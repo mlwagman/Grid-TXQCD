@@ -13,9 +13,12 @@
 // need for a fresh Grid fermion type while keeping all spin/color contractions
 // available through Grid's stock arithmetic.
 //
-// This header implements only the sigma/pi (flavor+spin) sector for Phase 4c
-// bring-up. The color sector (s, p) and the tensor sector (t_{mu,nu}) will
-// follow once the flavor-sector tests pass.
+// All five pieces of Delta are Hermitian individually, so the combined
+// Delta is Hermitian in the (flavor x spin x color x site) inner product.
+// The Wilson hopping is the only gamma5-non-Hermitian bit, and satisfies
+// gamma5 D_W gamma5 = D_W^dag; since Delta is Hermitian and commutes with
+// gamma5 in structure only through pi and p (both of which carry gamma5
+// explicitly), gamma5 M gamma5 = M^dag holds for M = D_W + Delta + mass.
 
 #include <Grid/qcd/action/txqcd/AuxFieldTypes.h>
 
@@ -55,12 +58,85 @@ inline void ApplyDeltaSigmaPi(const LatticeSigmaField &sigma,
     out.f[a] = Zero();
     for (int b = 0; b < TxqcdNf; ++b) {
       // Storage is iScalar<iScalar<iMatrix<vComplex,Nf>>>; the matrix is at
-      // tensor level 2 (outer iScalar=0, inner iScalar=1).
+      // tensor level 2.
       auto s_ab = PeekIndex<2>(sigma, a, b);
       auto p_ab = PeekIndex<2>(pi, a, b);
       out.f[a] = out.f[a] + s_ab * in.f[b] + p_ab * g5_in[b];
     }
   }
+}
+
+// Map the 6 antisymmetric (mu<nu) pairs to Grid's sigma_{mu,nu} generators.
+// Index convention: mu/nu are (0,1,2,3) = (X,Y,Z,T) and Grid's Sigma<MN>
+// is defined as sigma_{M,N} = (i/2)[gamma_M, gamma_N].
+inline Gamma::Algebra SigmaMuNuAlgebra(int mu, int nu) {
+  // Only called for mu < nu.
+  if (mu == 0 && nu == 1) return Gamma::Algebra::SigmaXY;
+  if (mu == 0 && nu == 2) return Gamma::Algebra::SigmaXZ;
+  if (mu == 0 && nu == 3) return Gamma::Algebra::SigmaXT;
+  if (mu == 1 && nu == 2) return Gamma::Algebra::SigmaYZ;
+  if (mu == 1 && nu == 3) return Gamma::Algebra::SigmaYT;
+  if (mu == 2 && nu == 3) return Gamma::Algebra::SigmaZT;
+  GRID_ASSERT(0 && "SigmaMuNuAlgebra: invalid (mu,nu)");
+  return Gamma::Algebra::Identity;
+}
+
+// Color sector:
+//   result[a] += (1/sqrt 2) s * in[a]
+//              + (1/sqrt 2) p * (gamma5 in[a])
+//              + sum_{mu<nu} t_{mu,nu} * (sigma_{mu,nu} in[a])
+// where s, p are LatticeColourMatrix (the site-level type of LatticeSFieldC /
+// LatticePFieldC is identical to iColourMatrix up to typedef) and t_{mu,nu}
+// is the (mu,nu) block of the antisym-tensor field, also a LatticeColourMatrix.
+//
+// All three pieces are Hermitian: s, p are Hermitian color matrices; p gamma5
+// is Hermitian because [p_color, gamma5_spin] = 0; and the tensor term is
+// Hermitian because sigma_{mu,nu}^dag = sigma_{mu,nu} and t_{mu,nu}^dag =
+// t_{mu,nu}. The result combines as Delta = Delta^dag, so we test Hermiticity
+// in the composite (flavor x spin x color x site) inner product.
+inline void ApplyDeltaColor(const LatticeSFieldC &s,
+                            const LatticePFieldC &p,
+                            const LatticeTField &t,
+                            const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+  const RealD inv_sqrt2 = 1.0 / std::sqrt(2.0);
+  Gamma g5(Gamma::Algebra::Gamma5);
+
+  for (int a = 0; a < TxqcdNf; ++a) {
+    // s term: (1/sqrt 2) * s * v[a].
+    out.f[a] = inv_sqrt2 * (s * in.f[a]);
+    // p gamma5 term.
+    LatticeFermion g5v(in.Grid());
+    g5v = g5 * in.f[a];
+    out.f[a] = out.f[a] + inv_sqrt2 * (p * g5v);
+    // Tensor term: sum over (mu < nu) of t_{mu,nu} (sigma_{mu,nu} v[a]).
+    // Grid's Gamma::SigmaMN is the anti-Hermitian (1/2)[gamma_mu, gamma_nu];
+    // the TXQCD notes use the Hermitian sigma_{mu,nu} = (i/2)[gamma_mu,
+    // gamma_nu], which is i * Grid's version. We therefore multiply by i
+    // explicitly so t_{mu,nu} * sigma_{mu,nu} is Hermitian.
+    const ComplexD ci(0.0, 1.0);
+    for (int mu = 0; mu < Nd; ++mu) {
+      for (int nu = mu + 1; nu < Nd; ++nu) {
+        Gamma smn(SigmaMuNuAlgebra(mu, nu));
+        LatticeFermion smn_v(in.Grid());
+        smn_v = smn * in.f[a];
+        auto t_mn = PeekIndex<1>(t, mu, nu);
+        out.f[a] = out.f[a] + ci * (t_mn * smn_v);
+      }
+    }
+  }
+}
+
+// Apply the full Delta: sigma + pi + s + p + t pieces. Result overwrites out.
+inline void ApplyDelta(const LatticeSigmaField &sigma,
+                       const LatticePiField &pi,
+                       const LatticeSFieldC &s,
+                       const LatticePFieldC &p,
+                       const LatticeTField &t,
+                       const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+  TXQCDFermionNf tmp(in.Grid());
+  ApplyDeltaSigmaPi(sigma, pi, in, out);
+  ApplyDeltaColor(s, p, t, in, tmp);
+  for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + tmp.f[a];
 }
 
 NAMESPACE_END(Grid);
