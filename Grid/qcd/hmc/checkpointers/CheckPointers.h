@@ -35,6 +35,7 @@ directory
 #include <Grid/qcd/hmc/checkpointers/BinaryCheckpointer.h>
 #include <Grid/qcd/hmc/checkpointers/ILDGCheckpointer.h>
 #include <Grid/qcd/hmc/checkpointers/ScidacCheckpointer.h>
+#include <Grid/qcd/action/txqcd/TXQCDCheckpointer.h>
 //#include <Grid/qcd/hmc/checkpointers/CheckPointerModules.h>
 
 
