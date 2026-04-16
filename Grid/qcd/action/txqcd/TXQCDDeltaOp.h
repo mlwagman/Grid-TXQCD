@@ -41,7 +41,31 @@ struct TXQCDFermionNf {
     for (auto &ff : f) ff = Zero();
     return *this;
   }
+
+  TXQCDFermionNf &operator=(const TXQCDFermionNf &rhs) {
+    for (int a = 0; a < TxqcdNf; ++a) f[a] = rhs.f[a];
+    return *this;
+  }
 };
+
+// Componentwise inner product (sum over flavors, full spin/color/site).
+inline ComplexD innerProduct(const TXQCDFermionNf &x, const TXQCDFermionNf &y) {
+  ComplexD acc = 0.0;
+  for (int a = 0; a < TxqcdNf; ++a) acc += innerProduct(x.f[a], y.f[a]);
+  return acc;
+}
+
+inline RealD norm2(const TXQCDFermionNf &x) {
+  RealD n = 0.0;
+  for (int a = 0; a < TxqcdNf; ++a) n += norm2(x.f[a]);
+  return n;
+}
+
+// axpy: y = a*x + y
+inline void axpy(TXQCDFermionNf &y, const ComplexD &a,
+                 const TXQCDFermionNf &x) {
+  for (int aa = 0; aa < TxqcdNf; ++aa) y.f[aa] = a * x.f[aa] + y.f[aa];
+}
 
 // Apply Delta_{sigma,pi}: result[a] = sum_b (sigma_{a,b} in[b] + pi_{a,b} g5 in[b])
 // where sigma and pi are Nf x Nf Hermitian flavor-matrix site lattices.
