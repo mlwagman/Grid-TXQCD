@@ -1,0 +1,44 @@
+tests-local: Test_aux_gaussian Test_txqcd_delta_color Test_txqcd_delta_sigmapi Test_txqcd_pf_force Test_txqcd_qcd_2pt Test_txqcd_rational_force Test_txqcd_vev Test_txqcd_wilson_op Test_txqcd_2pt_gencfgs Test_txqcd_2pt_conn Test_txqcd_2pt_disc Test_txqcd_2pt_aux Test_txqcd_2pt_compare
+EXTRA_PROGRAMS = Test_aux_gaussian Test_txqcd_delta_color Test_txqcd_delta_sigmapi Test_txqcd_pf_force Test_txqcd_qcd_2pt Test_txqcd_rational_force Test_txqcd_vev Test_txqcd_wilson_op Test_txqcd_2pt_gencfgs Test_txqcd_2pt_conn Test_txqcd_2pt_disc Test_txqcd_2pt_aux Test_txqcd_2pt_compare
+
+Test_aux_gaussian_SOURCES=Test_aux_gaussian.cc
+Test_aux_gaussian_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_delta_color_SOURCES=Test_txqcd_delta_color.cc
+Test_txqcd_delta_color_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_delta_sigmapi_SOURCES=Test_txqcd_delta_sigmapi.cc
+Test_txqcd_delta_sigmapi_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_pf_force_SOURCES=Test_txqcd_pf_force.cc
+Test_txqcd_pf_force_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_qcd_2pt_SOURCES=Test_txqcd_qcd_2pt.cc
+Test_txqcd_qcd_2pt_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_rational_force_SOURCES=Test_txqcd_rational_force.cc
+Test_txqcd_rational_force_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_vev_SOURCES=Test_txqcd_vev.cc
+Test_txqcd_vev_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_wilson_op_SOURCES=Test_txqcd_wilson_op.cc
+Test_txqcd_wilson_op_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_2pt_gencfgs_SOURCES=Test_txqcd_2pt_gencfgs.cc
+Test_txqcd_2pt_gencfgs_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_2pt_conn_SOURCES=Test_txqcd_2pt_conn.cc
+Test_txqcd_2pt_conn_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_2pt_disc_SOURCES=Test_txqcd_2pt_disc.cc
+Test_txqcd_2pt_disc_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_2pt_aux_SOURCES=Test_txqcd_2pt_aux.cc
+Test_txqcd_2pt_aux_LDADD=$(top_builddir)/Grid/libGrid.a
+
+Test_txqcd_2pt_compare_SOURCES=Test_txqcd_2pt_compare.cc
+Test_txqcd_2pt_compare_LDADD=$(top_builddir)/Grid/libGrid.a
+
+CLEANFILES = Test_aux_gaussian Test_txqcd_delta_color Test_txqcd_delta_sigmapi Test_txqcd_pf_force Test_txqcd_qcd_2pt Test_txqcd_rational_force Test_txqcd_vev Test_txqcd_wilson_op Test_txqcd_2pt_gencfgs Test_txqcd_2pt_conn Test_txqcd_2pt_disc Test_txqcd_2pt_aux Test_txqcd_2pt_compare
+

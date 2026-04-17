@@ -139,11 +139,17 @@ class TXQCDCompositeImpl {
   static inline void generate_momenta(Field &P, GridSerialRNG &sRNG,
                                       GridParallelRNG &pRNG) {
     PeriodicGimplR::generate_momenta(P.U, sRNG, pRNG);
-    HermitianGaussian(pRNG, P.sigma);
-    HermitianGaussian(pRNG, P.pi);
-    HermitianGaussian(pRNG, P.s);
-    HermitianGaussian(pRNG, P.p);
-    GaussianAntisymTensor(pRNG, P.t);
+    // Aux momenta need the same sqrt(HMC_MOMENTUM_DENOMINATOR) scaling that
+    // gauge momenta receive inside PeriodicGimplR::generate_momenta, so that
+    // K = ||P||^2 / HMC_MOMENTUM_DENOMINATOR gives K ~ nDOF/2 per component
+    // and the symplectic integrator update  P -= F * ep * HMC_MOMENTUM_DENOMINATOR
+    // is balanced against dq/dt = P.
+    RealD scale = ::sqrt(HMC_MOMENTUM_DENOMINATOR);
+    HermitianGaussian(pRNG, P.sigma);  P.sigma = scale * P.sigma;
+    HermitianGaussian(pRNG, P.pi);     P.pi    = scale * P.pi;
+    HermitianGaussian(pRNG, P.s);      P.s     = scale * P.s;
+    HermitianGaussian(pRNG, P.p);      P.p     = scale * P.p;
+    GaussianAntisymTensor(pRNG, P.t);  P.t     = scale * P.t;
   }
 
   static inline Field projectForce(Field &Fforce) {
@@ -173,12 +179,17 @@ class TXQCDCompositeImpl {
   }
 
   static inline RealD FieldSquareNorm(Field &U) {
+    // Gauge momenta are antihermitian → Tr(P^2) < 0 naturally, matching
+    // the integrator's H = -FieldSquareNorm(P)/denom + S convention.
+    // Aux momenta are Hermitian → Tr(P^2) > 0. To get the symplectic
+    // structure correct (dH/dt=0 with P -= 2*F*dt, X += P*dt) we need
+    // the scalar-field convention: FieldSquareNorm_aux = -Tr(P^2)/2.
     RealD total = PeriodicGimplR::FieldSquareNorm(U.U);
-    total += HermitianFieldSquareNorm(U.sigma);
-    total += HermitianFieldSquareNorm(U.pi);
-    total += HermitianFieldSquareNorm(U.s);
-    total += HermitianFieldSquareNorm(U.p);
-    total += TensorFieldSquareNorm(U.t);
+    total -= HermitianFieldSquareNorm(U.sigma) / 2.0;
+    total -= HermitianFieldSquareNorm(U.pi)    / 2.0;
+    total -= HermitianFieldSquareNorm(U.s)     / 2.0;
+    total -= HermitianFieldSquareNorm(U.p)     / 2.0;
+    total -= TensorFieldSquareNorm(U.t)        / 2.0;
     return total;
   }
 

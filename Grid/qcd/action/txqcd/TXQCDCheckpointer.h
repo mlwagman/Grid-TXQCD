@@ -3,12 +3,18 @@
 //
 // Writes:
 //   <config_prefix>.N         gauge, NERSC binary (interoperable with stock Grid)
-//   <config_prefix>_aux.N     sidecar: sigma, pi, s, p, t concatenated, with
-//                             a small header ("TXQCDAUX", uint32 version).
+//   <config_prefix>_aux.N     packed aux sidecar: only independent real DOF of
+//                             each Hermitian/antisymmetric field, IEEE64BIG.
 //   <rng_prefix>.N            RNG state (NERSC writer)
 //
-// CheckpointRestore fails loudly if the aux sidecar is missing -- per the
-// design decision to never silently re-heat aux fields on restart.
+// Packed layout per site (80 doubles = 640 bytes):
+//   sigma:  Nf^2 = 4  reals (diagonal, then upper-triangle re,im)
+//   pi:     Nf^2 = 4  reals
+//   s:      Nc^2 = 9  reals
+//   p:      Nc^2 = 9  reals
+//   t:  6 × Nc^2 = 54 reals (mu<nu blocks only, each packed as Hermitian)
+//
+// CheckpointRestore fails loudly if the aux sidecar is missing.
 
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
 
@@ -18,10 +24,18 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
  private:
   CheckpointerParameters Params;
 
-  // Fixed on-disk format for aux fields: IEEE64BIG (matches gauge NERSC default).
-  static constexpr const char *kAuxFormat = "IEEE64BIG";
-  static constexpr uint32_t kAuxMagic = 0x54585141;  // 'TXQA' (TXQcd Aux)
-  static constexpr uint32_t kAuxVersion = 1;
+  static constexpr uint32_t kAuxMagic   = 0x54585141;  // 'TXQA'
+  static constexpr uint32_t kAuxVersion = 2;            // v2 = packed Hermitian
+
+  // Per-site packed sizes (in doubles)
+  static constexpr int kSigmaPacked = TxqcdNf * TxqcdNf;   // 4
+  static constexpr int kPiPacked    = TxqcdNf * TxqcdNf;   // 4
+  static constexpr int kSPacked     = Nc * Nc;              // 9
+  static constexpr int kPPacked     = Nc * Nc;              // 9
+  static constexpr int kNtPairs     = Nd * (Nd - 1) / 2;   // 6
+  static constexpr int kTPacked     = kNtPairs * Nc * Nc;   // 54
+  static constexpr int kSiteDoubles =
+      kSigmaPacked + kPiPacked + kSPacked + kPPacked + kTPacked;  // 80
 
   std::string aux_filename(int traj) const {
     std::ostringstream os;
@@ -29,71 +43,78 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
     return os.str();
   }
 
-  // Write one Lattice to the open-file sidecar at 'offset'. Advances offset
-  // by the number of bytes written. Uses BinaryIO::writeLatticeObject with
-  // an identity (BinarySimple) munger at IEEE64BIG.
-  template <class Lat>
-  void write_aux_lattice(Lat &X, const std::string &file, uint64_t &offset) {
-    typedef typename Lat::vector_object vobj;
-    typedef typename vobj::scalar_object sobj;
-    BinarySimpleUnmunger<sobj, sobj> munge;
-    uint32_t nersc_csum = 0, scidac_a = 0, scidac_b = 0;
-    BinaryIO::writeLatticeObject<vobj, sobj>(X, file, munge, offset,
-                                             std::string(kAuxFormat),
-                                             nersc_csum, scidac_a, scidac_b);
-    offset += X.Grid()->gSites() * sizeof(sobj);
-    std::cout << GridLogMessage
-              << "TXQCDCheckpointer: aux write checksum " << std::hex
-              << nersc_csum << std::dec << std::endl;
+  // Pack an N×N Hermitian complex matrix into N^2 doubles:
+  //   [M_00.re, M_11.re, ..., M_01.re, M_01.im, M_02.re, M_02.im, ...]
+  template <int N, class ctype>
+  static void PackHermitian(const iScalar<iScalar<iMatrix<ctype, N>>> &M,
+                            double *buf) {
+    int k = 0;
+    for (int i = 0; i < N; ++i)
+      buf[k++] = M()()(i, i).real();
+    for (int i = 0; i < N; ++i)
+      for (int j = i + 1; j < N; ++j) {
+        buf[k++] = M()()(i, j).real();
+        buf[k++] = M()()(i, j).imag();
+      }
   }
 
-  template <class Lat>
-  void read_aux_lattice(Lat &X, const std::string &file, uint64_t &offset) {
-    typedef typename Lat::vector_object vobj;
-    typedef typename vobj::scalar_object sobj;
-    BinarySimpleMunger<sobj, sobj> munge;
-    uint32_t nersc_csum = 0, scidac_a = 0, scidac_b = 0;
-    BinaryIO::readLatticeObject<vobj, sobj>(X, file, munge, offset,
-                                            std::string(kAuxFormat),
-                                            nersc_csum, scidac_a, scidac_b);
-    offset += X.Grid()->gSites() * sizeof(sobj);
+  template <int N, class ctype>
+  static void UnpackHermitian(const double *buf,
+                              iScalar<iScalar<iMatrix<ctype, N>>> &M) {
+    int k = 0;
+    for (int i = 0; i < N; ++i)
+      M()()(i, i) = ctype(buf[k++], 0.0);
+    for (int i = 0; i < N; ++i)
+      for (int j = i + 1; j < N; ++j) {
+        double re = buf[k++], im = buf[k++];
+        M()()(i, j) = ctype(re, im);
+        M()()(j, i) = ctype(re, -im);
+      }
   }
 
-  // Small header written by rank 0, read by all.
-  void write_aux_header(const std::string &file) {
-    std::ofstream ofs(file, std::ios::binary | std::ios::trunc);
-    uint32_t magic = kAuxMagic, version = kAuxVersion;
-    ofs.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
-    ofs.write(reinterpret_cast<const char *>(&version), sizeof(version));
-    // Pad to 16 bytes so downstream BinaryIO writes land on an aligned offset.
-    uint64_t pad = 0;
-    ofs.write(reinterpret_cast<const char *>(&pad), sizeof(pad));
+  // Pack one site's worth of all five aux fields into kSiteDoubles doubles.
+  template <class SigSobj, class PiSobj, class SSobj, class PSobj, class TSobj>
+  static void PackSite(const SigSobj &sigma, const PiSobj &pi,
+                       const SSobj &s, const PSobj &p, const TSobj &t,
+                       double *buf) {
+    int off = 0;
+    PackHermitian<TxqcdNf>(sigma, buf + off);  off += kSigmaPacked;
+    PackHermitian<TxqcdNf>(pi,    buf + off);  off += kPiPacked;
+    PackHermitian<Nc>(s, buf + off);           off += kSPacked;
+    PackHermitian<Nc>(p, buf + off);           off += kPPacked;
+    for (int mu = 0; mu < Nd; ++mu)
+      for (int nu = mu + 1; nu < Nd; ++nu) {
+        iScalar<iScalar<iMatrix<ComplexD, Nc>>> block;
+        for (int i = 0; i < Nc; ++i)
+          for (int j = 0; j < Nc; ++j)
+            block()()(i, j) = t()(mu, nu)(i, j);
+        PackHermitian<Nc>(block, buf + off);
+        off += Nc * Nc;
+      }
   }
 
-  void read_aux_header(const std::string &file) {
-    std::ifstream ifs(file, std::ios::binary);
-    if (!ifs) {
-      std::cout << GridLogError
-                << "TXQCDCheckpointer: aux sidecar " << file
-                << " missing. Refusing to silently re-heat aux fields."
-                << std::endl;
-      abort();
-    }
-    uint32_t magic = 0, version = 0;
-    ifs.read(reinterpret_cast<char *>(&magic), sizeof(magic));
-    ifs.read(reinterpret_cast<char *>(&version), sizeof(version));
-    if (magic != kAuxMagic) {
-      std::cout << GridLogError
-                << "TXQCDCheckpointer: bad aux sidecar magic in " << file
-                << std::endl;
-      abort();
-    }
-    if (version != kAuxVersion) {
-      std::cout << GridLogError
-                << "TXQCDCheckpointer: aux sidecar version " << version
-                << " != expected " << kAuxVersion << std::endl;
-      abort();
-    }
+  template <class SigSobj, class PiSobj, class SSobj, class PSobj, class TSobj>
+  static void UnpackSite(const double *buf,
+                         SigSobj &sigma, PiSobj &pi,
+                         SSobj &s, PSobj &p, TSobj &t) {
+    int off = 0;
+    UnpackHermitian<TxqcdNf>(buf + off, sigma);  off += kSigmaPacked;
+    UnpackHermitian<TxqcdNf>(buf + off, pi);     off += kPiPacked;
+    UnpackHermitian<Nc>(buf + off, s);            off += kSPacked;
+    UnpackHermitian<Nc>(buf + off, p);            off += kPPacked;
+    // Zero full t, then fill upper triangle and antisymmetrize
+    t = Zero();
+    for (int mu = 0; mu < Nd; ++mu)
+      for (int nu = mu + 1; nu < Nd; ++nu) {
+        iScalar<iScalar<iMatrix<ComplexD, Nc>>> block;
+        UnpackHermitian<Nc>(buf + off, block);
+        off += Nc * Nc;
+        for (int i = 0; i < Nc; ++i)
+          for (int j = 0; j < Nc; ++j) {
+            t()(mu, nu)(i, j) = block()()(i, j);
+            t()(nu, mu)(i, j) = -block()()(i, j);
+          }
+      }
   }
 
  public:
@@ -121,19 +142,44 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
     NerscIO::writeRNGState(sRNG, pRNG, rng);
     NerscIO::writeConfiguration<GaugeStats>(U.U, config, tworow, precision32);
 
-    // Aux sidecar: header then 5 lattices.
+    // Unvectorize all aux fields to scalar site arrays
+    typedef typename LatticeSigmaField::vector_object::scalar_object SigSobj;
+    typedef typename LatticePiField::vector_object::scalar_object    PiSobj;
+    typedef typename LatticeSFieldC::vector_object::scalar_object    SSobj;
+    typedef typename LatticePFieldC::vector_object::scalar_object    PSobj;
+    typedef typename LatticeTField::vector_object::scalar_object     TSobj;
+
+    std::vector<SigSobj> sig_s;  unvectorizeToLexOrdArray(sig_s, U.sigma);
+    std::vector<PiSobj>  pi_s;   unvectorizeToLexOrdArray(pi_s,  U.pi);
+    std::vector<SSobj>   s_s;    unvectorizeToLexOrdArray(s_s,   U.s);
+    std::vector<PSobj>   p_s;    unvectorizeToLexOrdArray(p_s,   U.p);
+    std::vector<TSobj>   t_s;    unvectorizeToLexOrdArray(t_s,   U.t);
+
+    uint64_t nsites = sig_s.size();
+    std::vector<double> buf(nsites * kSiteDoubles);
+
+    for (uint64_t x = 0; x < nsites; ++x)
+      PackSite(sig_s[x], pi_s[x], s_s[x], p_s[x], t_s[x],
+               &buf[x * kSiteDoubles]);
+
+    // Byte-swap to big-endian
+    BinaryIO::htobe64_v((void *)buf.data(), buf.size() * sizeof(double));
+
     if (U.Grid()->IsBoss()) {
-      write_aux_header(auxfile);
+      std::ofstream ofs(auxfile, std::ios::binary | std::ios::trunc);
+      uint32_t magic = kAuxMagic, version = kAuxVersion;
+      uint64_t pad = 0;
+      ofs.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
+      ofs.write(reinterpret_cast<const char *>(&version), sizeof(version));
+      ofs.write(reinterpret_cast<const char *>(&pad), sizeof(pad));
+      ofs.write(reinterpret_cast<const char *>(buf.data()),
+                buf.size() * sizeof(double));
     }
     U.Grid()->Barrier();
-    uint64_t offset = 16;
-    write_aux_lattice(U.sigma, auxfile, offset);
-    write_aux_lattice(U.pi,    auxfile, offset);
-    write_aux_lattice(U.s,     auxfile, offset);
-    write_aux_lattice(U.p,     auxfile, offset);
-    write_aux_lattice(U.t,     auxfile, offset);
-    std::cout << GridLogMessage << "TXQCDCheckpointer: wrote aux sidecar "
-              << auxfile << " (" << offset << " bytes)" << std::endl;
+
+    std::cout << GridLogMessage << "TXQCDCheckpointer: wrote packed aux "
+              << auxfile << " (" << (16 + nsites * kSiteDoubles * 8)
+              << " bytes, " << kSiteDoubles << " doubles/site)" << std::endl;
   }
 
   void CheckpointRestore(int traj, TXQCDField &U, GridSerialRNG &sRNG,
@@ -150,14 +196,62 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
     NerscIO::readRNGState(sRNG, pRNG, header, rng);
     NerscIO::readConfiguration<GaugeStats>(U.U, header, config);
 
-    read_aux_header(auxfile);
-    uint64_t offset = 16;
-    read_aux_lattice(U.sigma, auxfile, offset);
-    read_aux_lattice(U.pi,    auxfile, offset);
-    read_aux_lattice(U.s,     auxfile, offset);
-    read_aux_lattice(U.p,     auxfile, offset);
-    read_aux_lattice(U.t,     auxfile, offset);
-    std::cout << GridLogMessage << "TXQCDCheckpointer: restored aux sidecar "
+    // Read and validate header
+    std::ifstream ifs(auxfile, std::ios::binary);
+    if (!ifs) {
+      std::cout << GridLogError
+                << "TXQCDCheckpointer: aux sidecar " << auxfile
+                << " missing." << std::endl;
+      abort();
+    }
+    uint32_t magic = 0, version = 0;
+    ifs.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+    ifs.read(reinterpret_cast<char *>(&version), sizeof(version));
+    if (magic != kAuxMagic) {
+      std::cout << GridLogError << "TXQCDCheckpointer: bad aux magic in "
+                << auxfile << std::endl;
+      abort();
+    }
+
+    uint64_t nsites = U.Grid()->gSites();
+    uint64_t pad = 0;
+    ifs.read(reinterpret_cast<char *>(&pad), sizeof(pad));
+
+    if (version == kAuxVersion) {
+      // v2: packed Hermitian
+      std::vector<double> buf(nsites * kSiteDoubles);
+      ifs.read(reinterpret_cast<char *>(buf.data()),
+               buf.size() * sizeof(double));
+      BinaryIO::be64toh_v((void *)buf.data(), buf.size() * sizeof(double));
+
+      typedef typename LatticeSigmaField::vector_object::scalar_object SigSobj;
+      typedef typename LatticePiField::vector_object::scalar_object    PiSobj;
+      typedef typename LatticeSFieldC::vector_object::scalar_object    SSobj;
+      typedef typename LatticePFieldC::vector_object::scalar_object    PSobj;
+      typedef typename LatticeTField::vector_object::scalar_object     TSobj;
+
+      std::vector<SigSobj> sig_s(nsites);
+      std::vector<PiSobj>  pi_s(nsites);
+      std::vector<SSobj>   s_s(nsites);
+      std::vector<PSobj>   p_s(nsites);
+      std::vector<TSobj>   t_s(nsites);
+
+      for (uint64_t x = 0; x < nsites; ++x)
+        UnpackSite(&buf[x * kSiteDoubles],
+                   sig_s[x], pi_s[x], s_s[x], p_s[x], t_s[x]);
+
+      vectorizeFromLexOrdArray(sig_s, U.sigma);
+      vectorizeFromLexOrdArray(pi_s,  U.pi);
+      vectorizeFromLexOrdArray(s_s,   U.s);
+      vectorizeFromLexOrdArray(p_s,   U.p);
+      vectorizeFromLexOrdArray(t_s,   U.t);
+    } else {
+      std::cout << GridLogError
+                << "TXQCDCheckpointer: unsupported aux version " << version
+                << " in " << auxfile << std::endl;
+      abort();
+    }
+    std::cout << GridLogMessage << "TXQCDCheckpointer: restored packed aux "
               << auxfile << std::endl;
   }
 };

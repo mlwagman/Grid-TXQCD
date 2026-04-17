@@ -31,11 +31,13 @@ class AuxiliaryFieldGaussianAction : public Action<TXQCDField> {
 
   RealD S(const TXQCDField &U) override {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
+    // TensorFieldSquareNorm returns Σ_{μ<ν} Tr(t²), but the paper's Einstein
+    // summation t_{μν}t_{μν} = 2 Σ_{μ<ν} Tr(t²) due to antisymmetry.
     RealD n2 = HermitianFieldSquareNorm(Unc.sigma)
              + HermitianFieldSquareNorm(Unc.pi)
              + HermitianFieldSquareNorm(Unc.s)
              + HermitianFieldSquareNorm(Unc.p)
-             + TensorFieldSquareNorm(Unc.t);
+             + 2.0 * TensorFieldSquareNorm(Unc.t);
     return 0.5 * lambda * lambda * n2;
   }
 
@@ -46,7 +48,7 @@ class AuxiliaryFieldGaussianAction : public Action<TXQCDField> {
     dSdU.pi    = c * U.pi;
     dSdU.s     = c * U.s;
     dSdU.p     = c * U.p;
-    dSdU.t     = c * U.t;
+    dSdU.t     = (2.0 * c) * U.t;
   }
 
  private:
