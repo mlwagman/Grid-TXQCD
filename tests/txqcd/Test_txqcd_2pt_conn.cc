@@ -6,6 +6,7 @@
 #include "Test_txqcd_2pt_utils.h"
 #include <Grid/qcd/utils/BaryonUtils.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TxqcdTest2pt;
 
@@ -145,6 +146,7 @@ int main(int argc, char **argv) {
 
   std::vector<std::vector<RealD>>    pion_tx, pion_qcd;
   std::vector<std::vector<ComplexD>> nucl_tx, nucl_qcd;
+  std::vector<RealD> plaq_tx, plaq_qcd;
 
   // TXQCD
   {
@@ -152,6 +154,7 @@ int main(int argc, char **argv) {
     for (int traj : trajs) {
       std::cout << GridLogMessage << "[conn] TXQCD traj=" << traj << std::endl;
       LoadTxqcdConfig(U, sRNG, pRNG, traj);
+      plaq_tx.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
       LatticePropagator Su(&Grid), Sd(&Grid);
       TxqcdPointProp(Su, Sd, U, mass, src, meas_tol, cg_max);
       pion_tx.push_back(PionCorrelator(Sd, Su));
@@ -165,6 +168,7 @@ int main(int argc, char **argv) {
     for (int traj : trajs) {
       std::cout << GridLogMessage << "[conn] QCD traj=" << traj << std::endl;
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
+      plaq_qcd.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
       LatticePropagator S(&Grid);
       QcdPointProp(S, Umu, mass, Grid, RBGrid, src, meas_tol, cg_max);
       pion_qcd.push_back(PionCorrelator(S, S));
@@ -176,6 +180,8 @@ int main(int argc, char **argv) {
   WriteMeasReal(meas_dir() + "/pion_conn_qcd.dat", pion_qcd, T);
   WriteMeasComplex(meas_dir() + "/nucleon_txqcd.dat", nucl_tx, T);
   WriteMeasComplex(meas_dir() + "/nucleon_qcd.dat", nucl_qcd, T);
+  WriteMeasScalar(meas_dir() + "/plaq_txqcd.dat", plaq_tx);
+  WriteMeasScalar(meas_dir() + "/plaq_qcd.dat", plaq_qcd);
 
   std::cout << GridLogMessage << "Connected 2pt measurements written to "
             << meas_dir() << "/" << std::endl;

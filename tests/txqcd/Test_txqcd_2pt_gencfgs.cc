@@ -6,7 +6,8 @@
 // QCD:   one TwoFlavour PF (|det M_W|^2 = Nf=2 Wilson) + Wilson gauge action.
 
 #include "Test_txqcd_2pt_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
 
 using namespace TxqcdTest2pt;
 
@@ -33,8 +34,9 @@ int main(int argc, char **argv) {
 
     GridSerialRNG   sRNG;
     GridParallelRNG pRNG(&Grid);
-    sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
-    pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+
+    int start_traj = 0;
+    int latest = latest_txqcd_checkpoint();
 
     RealD cg_tol = 1e-8;
     OneFlavourRationalParams rat_params(1e-4, 64.0, cg_max, cg_tol, 12, 64,
@@ -42,11 +44,13 @@ int main(int argc, char **argv) {
 
     GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
     AuxiliaryFieldGaussianAction           AuxAction(lambda);
-    TXQCDWilsonRationalPseudoFermionAction PF(Grid, RBGrid, mass, rat_params);
+    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params);
+    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass);
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);
     L1.push_back(&PF);
+    L1.push_back(&LogDet);
     L1.push_back(&AuxAction);
     ActionLevel<TXQCDField, Reps> L2(4);
     L2.push_back(&GaugeAction);
@@ -55,13 +59,25 @@ int main(int argc, char **argv) {
     Aset.push_back(L2);
 
     IntegratorParameters MD;
-    MD.name = "LeapFrog";
-    MD.MDsteps = 80;
+    MD.name = "ForceGradient";
+    MD.MDsteps = 10;
     MD.trajL = 0.5;
 
+    TXQCDField U(&Grid);
+    if (latest > 0) {
+      std::cout << GridLogMessage << "Resuming TXQCD from checkpoint at traj "
+                << latest << std::endl;
+      LoadTxqcdConfig(U, sRNG, pRNG, latest);
+      start_traj = latest;
+    } else {
+      sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
+      pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+      TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
+    }
+
     HMCparameters HMCp;
-    HMCp.StartTrajectory     = 0;
-    HMCp.Trajectories        = total_traj;
+    HMCp.StartTrajectory     = start_traj;
+    HMCp.Trajectories        = total_traj - start_traj;
     HMCp.NoMetropolisUntil   = n_therm;
     HMCp.MetropolisTest      = true;
     HMCp.PerformRandomShift  = false;
@@ -69,12 +85,9 @@ int main(int argc, char **argv) {
     HMCp.MD = MD;
 
     NoSmearing<TXQCDCompositeImpl> Smear;
-    typedef LeapFrog<TXQCDCompositeImpl,
-                     NoSmearing<TXQCDCompositeImpl>, Reps> IntT;
+    typedef ForceGradient<TXQCDCompositeImpl,
+                          NoSmearing<TXQCDCompositeImpl>, Reps> IntT;
     IntT MDyn(&Grid, MD, Aset, Smear);
-
-    TXQCDField U(&Grid);
-    TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
     Smear.set_Field(U);
 
     CheckpointerParameters CPp;
@@ -101,11 +114,21 @@ int main(int argc, char **argv) {
 
     GridSerialRNG   sRNG;
     GridParallelRNG pRNG(&Grid);
-    sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
-    pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
+
+    int start_traj = 0;
+    int latest = latest_qcd_checkpoint();
 
     LatticeGaugeField Umu(&Grid);
-    SU<Nc>::ColdConfiguration(Umu);
+    if (latest > 0) {
+      std::cout << GridLogMessage << "Resuming QCD from checkpoint at traj "
+                << latest << std::endl;
+      LoadQcdConfig(Umu, sRNG, pRNG, latest);
+      start_traj = latest;
+    } else {
+      sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
+      pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
+      SU<Nc>::ColdConfiguration(Umu);
+    }
 
     WilsonFermionD FermOp(Umu, Grid, RBGrid, mass);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
@@ -124,13 +147,13 @@ int main(int argc, char **argv) {
     Aset.push_back(L2);
 
     IntegratorParameters MD;
-    MD.name = "LeapFrog";
-    MD.MDsteps = 80;
+    MD.name = "ForceGradient";
+    MD.MDsteps = 10;
     MD.trajL = 0.5;
 
     HMCparameters HMCp;
-    HMCp.StartTrajectory     = 0;
-    HMCp.Trajectories        = total_traj;
+    HMCp.StartTrajectory     = start_traj;
+    HMCp.Trajectories        = total_traj - start_traj;
     HMCp.NoMetropolisUntil   = n_therm;
     HMCp.MetropolisTest      = true;
     HMCp.PerformRandomShift  = false;
@@ -138,8 +161,8 @@ int main(int argc, char **argv) {
     HMCp.MD = MD;
 
     NoSmearing<PeriodicGimplR> Smear;
-    typedef LeapFrog<PeriodicGimplR,
-                     NoSmearing<PeriodicGimplR>, Reps> IntT;
+    typedef ForceGradient<PeriodicGimplR,
+                          NoSmearing<PeriodicGimplR>, Reps> IntT;
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(Umu);
 

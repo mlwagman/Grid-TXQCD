@@ -20,13 +20,13 @@ namespace TxqcdTest2pt {
 constexpr RealD beta   = 5.6;
 constexpr RealD lambda = 3.0;
 constexpr RealD mass   = 0.3;
-constexpr int   n_therm   = 20;
-constexpr int   n_prod    = 20;
-constexpr int   meas_skip = 2;
+constexpr int   n_therm   = 100;
+constexpr int   n_prod    = 500;
+constexpr int   meas_skip = 10;
 
 constexpr RealD meas_tol = 1e-10;
 constexpr int   cg_max   = 10000;
-constexpr int   n_noise  = 4;
+constexpr int   n_noise  = 32;
 
 inline Coordinate default_latt() { return Coordinate(std::vector<int>{4, 4, 4, 8}); }
 inline Coordinate src_site()     { return Coordinate(std::vector<int>{0, 0, 0, 0}); }
@@ -70,6 +70,28 @@ inline bool qcd_configs_exist() {
     if (!file_exists(dir + "/ckpoint_rng." + std::to_string(t))) return false;
   }
   return true;
+}
+
+inline int latest_txqcd_checkpoint() {
+  int latest = -1;
+  for (int t = meas_skip; t <= n_therm + n_prod; t += meas_skip) {
+    std::string dir = txqcd_cfg_dir();
+    if (file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
+        file_exists(dir + "/ckpoint_lat_aux." + std::to_string(t)) &&
+        file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
+      latest = t;
+  }
+  return latest;
+}
+inline int latest_qcd_checkpoint() {
+  int latest = -1;
+  for (int t = meas_skip; t <= n_therm + n_prod; t += meas_skip) {
+    std::string dir = qcd_cfg_dir();
+    if (file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
+        file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
+      latest = t;
+  }
+  return latest;
 }
 
 inline void LoadTxqcdConfig(TXQCDField &U, GridSerialRNG &sRNG,

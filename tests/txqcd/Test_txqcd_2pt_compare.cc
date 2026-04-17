@@ -25,6 +25,8 @@ int main(int argc, char **argv) {
   auto nucl_tx  = ReadMeasComplex(dir + "/nucleon_txqcd.dat", T2);
   auto nucl_qcd = ReadMeasComplex(dir + "/nucleon_qcd.dat", T2);
   auto loop_ud  = ReadMeasComplex(dir + "/loop_ud_txqcd.dat", T2);
+  auto plaq_tx  = ReadMeasScalar(dir + "/plaq_txqcd.dat");
+  auto plaq_qcd = ReadMeasScalar(dir + "/plaq_qcd.dat");
   auto vev_sig  = ReadMeasScalar(dir + "/vev_sigma_txqcd.dat");
   auto vev_s    = ReadMeasScalar(dir + "/vev_s_txqcd.dat");
   auto trminv_tx  = ReadMeasScalar(dir + "/vev_trminv_txqcd.dat");
@@ -230,6 +232,20 @@ int main(int argc, char **argv) {
     bool pass = ns < 3.0;
     std::cout << GridLogMessage << "[ratio] <Tr sigma>/<Tr s> = " << ratio
               << " +/- " << ratio_e << "  expected " << expected
+              << "  (" << ns << " sigma)" << (pass ? "  PASS" : "  FAIL") << "\n";
+    if (!pass) exitcode = 1;
+  }
+
+  // Plaquette comparison: TXQCD vs QCD (Fierz test)
+  {
+    auto [ptx_m, ptx_e] = sm(plaq_tx);
+    auto [pqc_m, pqc_e] = sm(plaq_qcd);
+    RealD diff = ptx_m - pqc_m;
+    RealD de = std::sqrt(ptx_e * ptx_e + pqc_e * pqc_e);
+    RealD ns = (de > 0) ? std::abs(diff) / de : 0.0;
+    bool pass = ns < 3.0;
+    std::cout << GridLogMessage << "[plaq] TXQCD = " << ptx_m << " +/- " << ptx_e
+              << "  vs QCD = " << pqc_m << " +/- " << pqc_e
               << "  (" << ns << " sigma)" << (pass ? "  PASS" : "  FAIL") << "\n";
     if (!pass) exitcode = 1;
   }
