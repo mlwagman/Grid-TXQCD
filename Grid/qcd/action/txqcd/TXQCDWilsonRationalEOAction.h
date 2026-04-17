@@ -139,9 +139,7 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
       // Each returns -(ForceO + ForceE), accumulated with factor ak.
       gforce = Zero();
 
-      GridRedBlackCartesian *forcecb =
-          new GridRedBlackCartesian(&grid_);
-      LatticeGaugeField ForceO(forcecb), ForceE(forcecb);
+      LatticeGaugeField ForceO(&rbgrid_), ForceE(&rbgrid_);
 
       for (int a = 0; a < TxqcdNf; ++a) {
         // MpcDeriv(Y.f[a], X.f[a]):
@@ -163,7 +161,6 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
         gforce = gforce - gtmp;
       }
       dSdU.U = dSdU.U + ak * gforce;
-      delete forcecb;
     }
   }
 

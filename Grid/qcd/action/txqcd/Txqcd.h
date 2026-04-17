@@ -7,7 +7,10 @@
 #include <Grid/qcd/action/txqcd/AuxGaussianAction.h>
 #include <Grid/qcd/action/txqcd/GaugeActionAdapter.h>
 #include <Grid/qcd/action/txqcd/TXQCDDeltaOp.h>
+#include <Grid/qcd/action/txqcd/TXQCDSiteMatrix.h>
 // TXQCDWilsonOp.h depends on WilsonFermion (Fermion.h), which is pulled in
 // after ActionCore.h. Include it directly from drivers/tests that need it.
+// TXQCDWilsonFermionEO.h, TXQCDSchurOp.h, TXQCDSolvers.h, and the EO action
+// headers similarly depend on WilsonFermion and are included from drivers.
 // TXQCDCheckpointer.h depends on NerscIO and is pulled in later from
 // Grid/qcd/hmc/checkpointers/CheckPointers.h.
