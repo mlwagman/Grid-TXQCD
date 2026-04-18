@@ -20,7 +20,6 @@ namespace TxqcdTest2pt {
 constexpr RealD beta   = 5.6;
 constexpr RealD lambda = 3.0;
 constexpr RealD mass   = 0.3;
-constexpr RealD csw    = 1.0;
 constexpr int   n_therm   = 100;
 constexpr int   n_prod    = 500;
 constexpr int   meas_skip = 10;
@@ -32,15 +31,9 @@ constexpr int   n_noise  = 32;
 inline Coordinate default_latt() { return Coordinate(std::vector<int>{4, 4, 4, 8}); }
 inline Coordinate src_site()     { return Coordinate(std::vector<int>{0, 0, 0, 0}); }
 
-inline std::string csw_tag() {
-  if (csw == 0.0) return "";
-  std::ostringstream os;
-  os << "_csw" << csw;
-  return os.str();
-}
-inline std::string txqcd_cfg_dir() { return "configs_2pt_txqcd" + csw_tag(); }
-inline std::string qcd_cfg_dir()   { return "configs_2pt_qcd_nf2" + csw_tag(); }
-inline std::string meas_dir()      { return "meas_2pt" + csw_tag(); }
+inline std::string txqcd_cfg_dir() { return "configs_2pt_txqcd"; }
+inline std::string qcd_cfg_dir()   { return "configs_2pt_qcd_nf2"; }
+inline std::string meas_dir()      { return "meas_2pt"; }
 
 inline std::vector<int> meas_trajs() {
   std::vector<int> v;

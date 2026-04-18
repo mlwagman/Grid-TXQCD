@@ -8,8 +8,8 @@
 // Test 3: Full-grid M with clover matches EO decomposition.
 
 #include <Grid/Grid.h>
-#include <Grid/qcd/action/txqcd/TXQCDWilsonFermionEO.h>
-#include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverFermionEO.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/action/fermion/CloverHelpers.h>
 
@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
     LatticePFieldC p(grid); p = Zero();
     LatticeTField t(grid); t = Zero();
 
-    TXQCDWilsonFermionEO EOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
+    TXQCDWilsonCloverFermionEO EOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
 
     WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> Dwc(
         U, *grid, *rbgrid, mass, csw, csw);
@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
       }
     }
 
-    TXQCDWilsonFermionEO EOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
+    TXQCDWilsonCloverFermionEO EOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
 
     for (int cb = 0; cb < 2; ++cb) {
       std::string cbname = (cb == Even) ? "Even" : "Odd";
@@ -270,8 +270,8 @@ int main(int argc, char **argv) {
       }
     }
 
-    TXQCDWilsonOp fullOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
-    TXQCDWilsonFermionEO EOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
+    TXQCDWilsonCloverOp fullOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
+    TXQCDWilsonCloverFermionEO EOp(U, *grid, *rbgrid, mass, sigma, pi, s, p, t, csw);
 
     TXQCDFermionNf v(grid);
     for (int a = 0; a < TxqcdNf; ++a) gaussian(pRNG, v.f[a]);

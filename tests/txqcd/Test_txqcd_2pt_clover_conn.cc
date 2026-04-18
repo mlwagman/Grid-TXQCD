@@ -1,14 +1,13 @@
-// Step 2: Compute connected pion and nucleon correlators from point-source
-// quark propagators on TXQCD and QCD configurations.
-//
-// Writes: meas_2pt/{pion_conn,nucleon}_{txqcd,qcd}.dat
+// Step 2 (Clover): Connected pion and nucleon correlators using Wilson-Clover
+// operators on clover configurations.
 
-#include "Test_txqcd_2pt_utils.h"
+#include "Test_txqcd_2pt_clover_utils.h"
 #include <Grid/qcd/utils/BaryonUtils.h>
-#include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
-using namespace TxqcdTest2pt;
+using namespace TxqcdTest2ptClover;
 
 static void PointSource(const Coordinate &site, LatticePropagator &src) {
   src = Zero();
@@ -45,8 +44,7 @@ static std::vector<ComplexD> NucleonCorrelator(const LatticePropagator &S_u,
   return out;
 }
 
-// Hand-rolled CG on M^dag M for TXQCDFermionNf.
-static void TxqcdCG(TXQCDWilsonOp &Mop, const TXQCDFermionNf &b,
+static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
                      TXQCDFermionNf &x, RealD tol, int maxit) {
   GridBase *g = b.Grid();
   TXQCDFermionNf r(g), p(g), Mp(g), MdMp(g);
@@ -80,7 +78,7 @@ static void TxqcdPointProp(LatticePropagator &S_u, LatticePropagator &S_d,
   GridBase *g = U.Grid();
   GridCartesian *Ug = dynamic_cast<GridCartesian *>(g);
   GridRedBlackCartesian RB(Ug);
-  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t);
+  TXQCDWilsonCloverOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t, csw);
 
   LatticePropagator srcP(g);
   PointSource(src, srcP);
@@ -109,8 +107,9 @@ static void QcdPointProp(LatticePropagator &S, LatticeGaugeField &Umu,
                          RealD m, GridCartesian &Grid,
                          GridRedBlackCartesian &RBGrid,
                          const Coordinate &src, RealD tol, int maxit) {
-  WilsonFermionD Dw(Umu, Grid, RBGrid, m);
-  MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+  typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+  WCF Dw(Umu, Grid, RBGrid, m, csw, csw);
+  MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(tol, maxit);
 
   LatticePropagator srcP(&Grid);
@@ -152,7 +151,7 @@ int main(int argc, char **argv) {
   {
     TXQCDField U(&Grid);
     for (int traj : trajs) {
-      std::cout << GridLogMessage << "[conn] TXQCD traj=" << traj << std::endl;
+      std::cout << GridLogMessage << "[conn] TXQCD clover traj=" << traj << std::endl;
       LoadTxqcdConfig(U, sRNG, pRNG, traj);
       plaq_tx.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
       LatticePropagator Su(&Grid), Sd(&Grid);
@@ -166,7 +165,7 @@ int main(int argc, char **argv) {
   {
     LatticeGaugeField Umu(&Grid);
     for (int traj : trajs) {
-      std::cout << GridLogMessage << "[conn] QCD traj=" << traj << std::endl;
+      std::cout << GridLogMessage << "[conn] QCD clover traj=" << traj << std::endl;
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
       plaq_qcd.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
       LatticePropagator S(&Grid);
@@ -183,7 +182,7 @@ int main(int argc, char **argv) {
   WriteMeasScalar(meas_dir() + "/plaq_txqcd.dat", plaq_tx);
   WriteMeasScalar(meas_dir() + "/plaq_qcd.dat", plaq_qcd);
 
-  std::cout << GridLogMessage << "Connected 2pt measurements written to "
+  std::cout << GridLogMessage << "Connected 2pt clover measurements written to "
             << meas_dir() << "/" << std::endl;
   Grid_finalize();
   return 0;

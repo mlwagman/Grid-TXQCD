@@ -4,7 +4,7 @@
 // 2. Finite-difference force check for aux (sigma, pi, s, p, t) and gauge
 
 #include <Grid/Grid.h>
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
 
 using namespace Grid;
 
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
                                       /*mdtol=*/1e-8,
                                       /*BoundsCheckTol=*/1e-4);
 
-  TXQCDWilsonRationalEOAction action(Grid, RBGrid, mass, rat_params);
+  TXQCDWilsonCloverRationalEOAction action(Grid, RBGrid, mass, rat_params);
 
   int exitcode = 0;
 
@@ -152,8 +152,7 @@ int main(int argc, char **argv) {
     for (int mu = 0; mu < Nd; ++mu)
       SU<Nc>::GaussianFundamentalLieAlgebraMatrix(pRNG, Emu[mu]);
 
-    // deriv() returns gauge force in Convention A (half gradient).
-    // FD relationship: dS/dh = -2 * Re Tr(E * F_A).
+    // Convention A gauge force: dS/dh = -2 * Re Tr(E * F_A).
     RealD an = 0;
     for (int mu = 0; mu < Nd; ++mu) {
       LatticeColourMatrix Fmu = PeekIndex<LorentzIndex>(dSdU.U, mu);
@@ -188,6 +187,93 @@ int main(int argc, char **argv) {
             << (exitcode ? "SOME EO FORCE CHECKS FAILED"
                          : "ALL EO FORCE CHECKS PASSED")
             << std::endl;
+
+  // ===== Part 2: csw != 0 — clover RHMC force FD test =====
+  std::cout << GridLogMessage << "===== Clover RHMC force (csw=1.0) =====" << std::endl;
+  {
+    RealD csw = 1.0;
+    TXQCDWilsonCloverRationalEOAction caction(Grid, RBGrid, mass, rat_params, csw);
+
+    caction.refresh(U, sRNG, pRNG);
+
+    RealD cS = caction.S(U);
+    std::cout << GridLogMessage << "[clover action value] S=" << cS << std::endl;
+
+    TXQCDField cdSdU(&Grid);
+    caction.deriv(U, cdSdU);
+
+    // Aux force FD checks with clover
+    auto fd_clover = [&](auto &field_ref, auto perturb) -> RealD {
+      const RealD h = 1e-4;
+      auto saved = field_ref;
+      perturb(field_ref,  h);  RealD Sp = caction.S(U);
+      field_ref = saved;
+      perturb(field_ref, -h);  RealD Sm = caction.S(U);
+      field_ref = saved;
+      return (Sp - Sm) / (2.0 * h);
+    };
+
+    {
+      LatticeSigmaField E(&Grid); HermitianGaussian(pRNG, E);
+      RealD an = HermitianTrInner(E, cdSdU.sigma);
+      RealD fd = fd_clover(U.sigma, [&](LatticeSigmaField &X, RealD h) { X = X + h * E; });
+      check("clover sigma", an, fd);
+    }
+
+    // Gauge force FD check with clover
+    {
+      std::array<LatticeColourMatrix, 4> Emu{LatticeColourMatrix(&Grid),
+          LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid),
+          LatticeColourMatrix(&Grid)};
+      for (int mu = 0; mu < Nd; ++mu)
+        SU<Nc>::GaussianFundamentalLieAlgebraMatrix(pRNG, Emu[mu]);
+
+      // Convention A gauge force: dS/dh = -2 * Re Tr(E * F_A).
+      RealD an = 0;
+      for (int mu = 0; mu < Nd; ++mu) {
+        LatticeColourMatrix Fmu = PeekIndex<LorentzIndex>(cdSdU.U, mu);
+        an += TensorRemove(sum(trace(Emu[mu] * Fmu))).real();
+      }
+      an *= -2.0;
+
+      const RealD h = 1e-4;
+      LatticeGaugeField Usaved = U.U;
+
+      for (int mu = 0; mu < Nd; ++mu) {
+        LatticeColourMatrix Umu = PeekIndex<LorentzIndex>(Usaved, mu);
+        LatticeColourMatrix expE = expMat(Emu[mu], h, 12);
+        PokeIndex<LorentzIndex>(U.U, expE * Umu, mu);
+      }
+      RealD Sp = caction.S(U);
+
+      for (int mu = 0; mu < Nd; ++mu) {
+        LatticeColourMatrix Umu = PeekIndex<LorentzIndex>(Usaved, mu);
+        LatticeColourMatrix expE = expMat(Emu[mu], -h, 12);
+        PokeIndex<LorentzIndex>(U.U, expE * Umu, mu);
+      }
+      RealD Sm = caction.S(U);
+
+      U.U = Usaved;
+
+      RealD fd = (Sp - Sm) / (2.0 * h);
+      check("clover gauge", an, fd);
+    }
+
+    // Clover gauge force should be non-zero
+    {
+      RealD nU = std::sqrt(norm2(cdSdU.U));
+      bool pass = nU > 1e-10;
+      std::cout << GridLogMessage << "[clover gauge force nonzero] |dSdU.U|=" << nU
+                << (pass ? "  PASS" : "  FAIL") << std::endl;
+      if (!pass) exitcode = 1;
+    }
+
+    std::cout << GridLogMessage
+              << (exitcode ? "SOME CLOVER RHMC FORCE CHECKS FAILED"
+                           : "ALL CLOVER RHMC FORCE CHECKS PASSED")
+              << std::endl;
+  }
+
   Grid_finalize();
   return exitcode;
 }

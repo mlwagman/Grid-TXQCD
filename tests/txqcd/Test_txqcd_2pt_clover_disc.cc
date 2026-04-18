@@ -1,23 +1,12 @@
-// Step 3: Compute disconnected pion loops and VEVs from stochastic noise sources.
-//
-// Disconnected pion: per-timeslice off-diagonal loop
-//   L_ud(t) = sum_{x in t} Tr_sc[G_{ud}(x,x) gamma_5]
-// estimated with Gaussian volume noise. The comparison program forms the
-// correlator Disc(dt) = (1/V) sum_{t0} L_ud(t0+dt) conj(L_ud(t0))
-// using gamma_5-Hermiticity: L_du(t) = conj(L_ud(t)).
-//
-// VEVs: <Tr sigma>/V, <Tr s>/V (direct from aux fields),
-//        stochastic Re Tr M^{-1}/V (TXQCD and QCD).
-//
-// Writes: meas_2pt/{loop_ud_txqcd, vev_sigma, vev_s, vev_trminv_txqcd,
-//                    vev_trminv_qcd}.dat
+// Step 3 (Clover): Disconnected pion loops and VEVs using Wilson-Clover.
 
-#include "Test_txqcd_2pt_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include "Test_txqcd_2pt_clover_utils.h"
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
-using namespace TxqcdTest2pt;
+using namespace TxqcdTest2ptClover;
 
-static void TxqcdCG(TXQCDWilsonOp &Mop, const TXQCDFermionNf &b,
+static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
                      TXQCDFermionNf &x, RealD tol, int maxit) {
   GridBase *g = b.Grid();
   TXQCDFermionNf r(g), p(g), Mp(g), MdMp(g);
@@ -43,11 +32,9 @@ static void TxqcdCG(TXQCDWilsonOp &Mop, const TXQCDFermionNf &b,
   }
 }
 
-// Per-timeslice off-diagonal loop L_ud(t) via Gaussian noise on flavor d.
-// Grid's gaussian gives E[|eta|^2]=2 per complex DOF; 1/2 corrects this.
 static std::vector<ComplexD>
-StochasticLoop_ud(TXQCDWilsonOp &Mop, GridBase *grid, GridParallelRNG &pRNG,
-                  int nn, RealD tol, int maxit) {
+StochasticLoop_ud(TXQCDWilsonCloverOp &Mop, GridBase *grid,
+                  GridParallelRNG &pRNG, int nn, RealD tol, int maxit) {
   int T = grid->GlobalDimensions()[Nd - 1];
   Gamma g5(Gamma::Algebra::Gamma5);
   std::vector<ComplexD> L(T, 0.0);
@@ -71,8 +58,7 @@ StochasticLoop_ud(TXQCDWilsonOp &Mop, GridBase *grid, GridParallelRNG &pRNG,
   return L;
 }
 
-// Stochastic Re Tr M^{-1} / V for TXQCDWilsonOp.
-static RealD StochasticTrMinv_TX(TXQCDWilsonOp &Mop, GridBase *grid,
+static RealD StochasticTrMinv_TX(TXQCDWilsonCloverOp &Mop, GridBase *grid,
                                  GridParallelRNG &pRNG, int nn, RealD tol,
                                  int maxit) {
   RealD V = (RealD)grid->gSites();
@@ -87,12 +73,12 @@ static RealD StochasticTrMinv_TX(TXQCDWilsonOp &Mop, GridBase *grid,
   return acc / nn;
 }
 
-// Stochastic Re Tr M_W^{-1} / V for single-flavor Wilson.
-static RealD StochasticTrMinv_QCD(WilsonFermionD &Dw, GridBase *grid,
+typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+static RealD StochasticTrMinv_QCD(WCF &Dw, GridBase *grid,
                                   GridParallelRNG &pRNG, int nn, RealD tol,
                                   int maxit) {
   RealD V = (RealD)grid->gSites();
-  MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+  MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(tol, maxit);
   RealD acc = 0.0;
   for (int h = 0; h < nn; ++h) {
@@ -124,11 +110,11 @@ int main(int argc, char **argv) {
   std::vector<std::vector<ComplexD>> loop_ud;
   std::vector<RealD> vev_sigma, vev_s, trminv_tx, trminv_qcd;
 
-  // TXQCD: loops + VEVs
+  // TXQCD
   {
     TXQCDField U(&Grid);
     for (int traj : trajs) {
-      std::cout << GridLogMessage << "[disc] TXQCD traj=" << traj << std::endl;
+      std::cout << GridLogMessage << "[disc] TXQCD clover traj=" << traj << std::endl;
 
       sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
       pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
@@ -136,7 +122,8 @@ int main(int argc, char **argv) {
 
       GridCartesian *Ug = dynamic_cast<GridCartesian *>(U.Grid());
       GridRedBlackCartesian RB(Ug);
-      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass, U.sigma, U.pi, U.s, U.p, U.t);
+      TXQCDWilsonCloverOp Mop(U.U, *Ug, RB, mass, U.sigma, U.pi, U.s, U.p,
+                               U.t, csw);
 
       loop_ud.push_back(StochasticLoop_ud(Mop, &Grid, pRNG, n_noise,
                                            meas_tol, cg_max));
@@ -149,17 +136,17 @@ int main(int argc, char **argv) {
     }
   }
 
-  // QCD: stochastic Tr M_W^{-1} / V
+  // QCD
   {
     LatticeGaugeField Umu(&Grid);
     for (int traj : trajs) {
-      std::cout << GridLogMessage << "[disc] QCD traj=" << traj << std::endl;
+      std::cout << GridLogMessage << "[disc] QCD clover traj=" << traj << std::endl;
 
       sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
       pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
 
-      WilsonFermionD Dw(Umu, Grid, RBGrid, mass);
+      WCF Dw(Umu, Grid, RBGrid, mass, csw, csw);
       trminv_qcd.push_back(
           StochasticTrMinv_QCD(Dw, &Grid, pRNG, n_noise, meas_tol, cg_max));
     }
@@ -171,7 +158,7 @@ int main(int argc, char **argv) {
   WriteMeasScalar(meas_dir() + "/vev_trminv_txqcd.dat", trminv_tx);
   WriteMeasScalar(meas_dir() + "/vev_trminv_qcd.dat", trminv_qcd);
 
-  std::cout << GridLogMessage << "Disconnected + VEV measurements written to "
+  std::cout << GridLogMessage << "Disconnected + VEV clover measurements written to "
             << meas_dir() << "/" << std::endl;
   Grid_finalize();
   return 0;

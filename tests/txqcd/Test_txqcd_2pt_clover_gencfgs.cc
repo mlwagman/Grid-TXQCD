@@ -1,15 +1,15 @@
-// Step 1: Generate TXQCD and QCD gauge configurations for the 2pt test suite.
-// Skips generation if configs already exist at all measurement trajectories.
+// Step 1 (Clover): Generate TXQCD and QCD gauge configurations with csw != 0.
+// Same HMC settings as the Wilson version; only the fermion action changes.
 //
-// TXQCD: one rational PF (|det M_TX|^1, Nf_tx=2 -> Nf=2 Wilson at aux=0)
-//        + Gaussian aux action + Wilson gauge action.
-// QCD:   one TwoFlavour PF (|det M_W|^2 = Nf=2 Wilson) + Wilson gauge action.
+// TXQCD: rational PF + LogDet (Wilson-Clover) + Gaussian aux + Wilson gauge.
+// QCD:   TwoFlavour PF (Wilson-Clover) + Wilson gauge.
 
-#include "Test_txqcd_2pt_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
-#include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
+#include "Test_txqcd_2pt_clover_utils.h"
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
-using namespace TxqcdTest2pt;
+using namespace TxqcdTest2ptClover;
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
@@ -25,11 +25,12 @@ int main(int argc, char **argv) {
   // ==================== TXQCD ====================
   if (txqcd_configs_exist()) {
     std::cout << GridLogMessage
-              << "TXQCD configs already exist, skipping generation." << std::endl;
+              << "TXQCD clover configs already exist, skipping generation."
+              << std::endl;
   } else {
     std::cout << GridLogMessage
-              << "Generating TXQCD configs (" << total_traj << " trajectories)..."
-              << std::endl;
+              << "Generating TXQCD clover configs (" << total_traj
+              << " trajectories, csw=" << csw << ")..." << std::endl;
     mkdir_p(txqcd_cfg_dir());
 
     GridSerialRNG   sRNG;
@@ -44,8 +45,8 @@ int main(int argc, char **argv) {
 
     GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
     AuxiliaryFieldGaussianAction           AuxAction(lambda);
-    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params);
-    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass);
+    TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass, rat_params, csw);
+    TXQCDLogDetCloverEOAction         LogDet(Grid, RBGrid, mass, csw);
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);
@@ -65,7 +66,7 @@ int main(int argc, char **argv) {
 
     TXQCDField U(&Grid);
     if (latest > 0) {
-      std::cout << GridLogMessage << "Resuming TXQCD from checkpoint at traj "
+      std::cout << GridLogMessage << "Resuming TXQCD clover from checkpoint at traj "
                 << latest << std::endl;
       LoadTxqcdConfig(U, sRNG, pRNG, latest);
       start_traj = latest;
@@ -105,11 +106,12 @@ int main(int argc, char **argv) {
   // ==================== QCD ====================
   if (qcd_configs_exist()) {
     std::cout << GridLogMessage
-              << "QCD configs already exist, skipping generation." << std::endl;
+              << "QCD clover configs already exist, skipping generation."
+              << std::endl;
   } else {
     std::cout << GridLogMessage
-              << "Generating QCD Nf=2 configs (" << total_traj
-              << " trajectories)..." << std::endl;
+              << "Generating QCD Nf=2 clover configs (" << total_traj
+              << " trajectories, csw=" << csw << ")..." << std::endl;
     mkdir_p(qcd_cfg_dir());
 
     GridSerialRNG   sRNG;
@@ -120,7 +122,7 @@ int main(int argc, char **argv) {
 
     LatticeGaugeField Umu(&Grid);
     if (latest > 0) {
-      std::cout << GridLogMessage << "Resuming QCD from checkpoint at traj "
+      std::cout << GridLogMessage << "Resuming QCD clover from checkpoint at traj "
                 << latest << std::endl;
       LoadQcdConfig(Umu, sRNG, pRNG, latest);
       start_traj = latest;
@@ -130,7 +132,8 @@ int main(int argc, char **argv) {
       SU<Nc>::ColdConfiguration(Umu);
     }
 
-    WilsonFermionD FermOp(Umu, Grid, RBGrid, mass);
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    WCF FermOp(Umu, Grid, RBGrid, mass, csw, csw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     TwoFlavourPseudoFermionAction<WilsonImplR> Nf2(FermOp, CG, CG);
     Nf2.is_smeared = false;
@@ -166,7 +169,6 @@ int main(int argc, char **argv) {
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(Umu);
 
-    // QCD checkpointer using NerscIO
     struct QcdCkpt : public HmcObservable<LatticeGaugeField> {
       std::string cfg_prefix, rng_prefix;
       int save_interval;
@@ -190,7 +192,7 @@ int main(int argc, char **argv) {
     HMC.evolve();
   }
 
-  std::cout << GridLogMessage << "Config generation complete." << std::endl;
+  std::cout << GridLogMessage << "Clover config generation complete." << std::endl;
   Grid_finalize();
   return 0;
 }
