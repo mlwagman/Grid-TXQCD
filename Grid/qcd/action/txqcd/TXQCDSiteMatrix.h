@@ -52,11 +52,37 @@ struct TXQCDSiteMatrixUtil {
     }
   };
 
+  typedef typename LatticeColourMatrix::vector_object::scalar_object FmnSobj;
+
+  struct CloverSiteArrays {
+    std::array<std::vector<FmnSobj>, 6> fs;
+  };
+
+  static CloverSiteArrays UnvectorizeClover(
+      const std::vector<LatticeColourMatrix> &FS) {
+    CloverSiteArrays out;
+    for (int k = 0; k < 6; ++k) unvectorizeToLexOrdArray(out.fs[k], FS[k]);
+    return out;
+  }
+
+  static int FmnIndex(int mu, int nu) {
+    if (mu == 0 && nu == 1) return 0;
+    if (mu == 0 && nu == 2) return 1;
+    if (mu == 0 && nu == 3) return 2;
+    if (mu == 1 && nu == 2) return 3;
+    if (mu == 1 && nu == 3) return 4;
+    if (mu == 2 && nu == 3) return 5;
+    return -1;
+  }
+
   template <class SigSobj, class PiSobj, class SSobj, class PSobj, class TSobj>
   static void BuildSiteMatrix(const SpinMatrices &sm, RealD diag_mass,
                                const SigSobj &sig_site, const PiSobj &pi_site,
                                const SSobj &s_site, const PSobj &p_site,
-                               const TSobj &t_site, SiteMatrix &M) {
+                               const TSobj &t_site,
+                               RealD csw,
+                               const std::array<FmnSobj, 6> *fmn_site,
+                               SiteMatrix &M) {
     M = SiteMatrix::Zero();
     for (int r = 0; r < kDim; ++r) M(r, r) = diag_mass;
 
@@ -82,6 +108,8 @@ struct TXQCDSiteMatrixUtil {
       }
     }
 
+    const std::complex<double> clover_coeff(0.0, 0.5 * csw);
+
     for (int a = 0; a < TxqcdNf; ++a) {
       for (int i = 0; i < Nc; ++i) {
         for (int j = 0; j < Nc; ++j) {
@@ -101,6 +129,17 @@ struct TXQCDSiteMatrixUtil {
                                             t_site()(mu, nu)(i, j).imag());
                   M(r, c) += t_ij * sm.isigma[mu][nu](alpha, beta);
                 }
+              if (fmn_site != nullptr) {
+                for (int mu = 0; mu < Nd; ++mu)
+                  for (int nu = mu + 1; nu < Nd; ++nu) {
+                    int k = FmnIndex(mu, nu);
+                    std::complex<double> fs_ij(
+                        (*fmn_site)[k]()()(i, j).real(),
+                        (*fmn_site)[k]()()(i, j).imag());
+                    M(r, c) += clover_coeff * fs_ij *
+                               sm.isigma[mu][nu](alpha, beta);
+                  }
+              }
             }
           }
         }
@@ -138,13 +177,21 @@ struct TXQCDSiteMatrixUtil {
 
   static void PrecomputeInverses(const SpinMatrices &sm, RealD diag_mass,
                                   const AuxSiteArrays &aux,
+                                  RealD csw,
+                                  const CloverSiteArrays *clover,
                                   std::vector<SiteMatrix> &inv) {
     uint64_t nsites = aux.sig.size();
     inv.resize(nsites);
     SiteMatrix M;
     for (uint64_t x = 0; x < nsites; ++x) {
+      std::array<FmnSobj, 6> fmn_site;
+      const std::array<FmnSobj, 6> *fmn_ptr = nullptr;
+      if (clover != nullptr) {
+        for (int k = 0; k < 6; ++k) fmn_site[k] = clover->fs[k][x];
+        fmn_ptr = &fmn_site;
+      }
       BuildSiteMatrix(sm, diag_mass, aux.sig[x], aux.pi[x], aux.s[x],
-                      aux.p[x], aux.t[x], M);
+                      aux.p[x], aux.t[x], csw, fmn_ptr, M);
       inv[x] = M.inverse();
     }
   }

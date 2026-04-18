@@ -6,6 +6,7 @@
 #include "Test_txqcd_2pt_utils.h"
 #include <Grid/qcd/utils/BaryonUtils.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TxqcdTest2pt;
@@ -80,7 +81,7 @@ static void TxqcdPointProp(LatticePropagator &S_u, LatticePropagator &S_d,
   GridBase *g = U.Grid();
   GridCartesian *Ug = dynamic_cast<GridCartesian *>(g);
   GridRedBlackCartesian RB(Ug);
-  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t);
+  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t, csw);
 
   LatticePropagator srcP(g);
   PointSource(src, srcP);
@@ -109,8 +110,9 @@ static void QcdPointProp(LatticePropagator &S, LatticeGaugeField &Umu,
                          RealD m, GridCartesian &Grid,
                          GridRedBlackCartesian &RBGrid,
                          const Coordinate &src, RealD tol, int maxit) {
-  WilsonFermionD Dw(Umu, Grid, RBGrid, m);
-  MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+  typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+  WCF Dw(Umu, Grid, RBGrid, m, csw, csw);
+  MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(tol, maxit);
 
   LatticePropagator srcP(&Grid);

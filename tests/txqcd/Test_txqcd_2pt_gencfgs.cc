@@ -8,6 +8,7 @@
 #include "Test_txqcd_2pt_utils.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TxqcdTest2pt;
 
@@ -44,8 +45,8 @@ int main(int argc, char **argv) {
 
     GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
     AuxiliaryFieldGaussianAction           AuxAction(lambda);
-    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params);
-    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass);
+    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params, csw);
+    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass, csw);
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);
@@ -130,7 +131,8 @@ int main(int argc, char **argv) {
       SU<Nc>::ColdConfiguration(Umu);
     }
 
-    WilsonFermionD FermOp(Umu, Grid, RBGrid, mass);
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    WCF FermOp(Umu, Grid, RBGrid, mass, csw, csw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     TwoFlavourPseudoFermionAction<WilsonImplR> Nf2(FermOp, CG, CG);
     Nf2.is_smeared = false;

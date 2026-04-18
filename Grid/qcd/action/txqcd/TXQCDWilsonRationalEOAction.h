@@ -10,7 +10,7 @@
 // Force has three pieces per rational pole:
 //   1. Aux force on odd sites: bilinear(Y_k, X_k) [same as full-grid]
 //   2. Aux force on even sites: bilinear(Z_e, W_e) [chain rule through Mee^{-1}]
-//   3. Gauge force: MoeDeriv/MeoDeriv per flavor [SchurDifferentiableOperator pattern]
+//   3. Gauge force: hopping (MoeDeriv/MeoDeriv) + clover (Cmunu staples, csw != 0)
 //
 // where X_k = (Mpc†Mpc + σ_k)^{-1} Phi, Y_k = Mpc X_k,
 //       W_e = Mee^{-1} Meo X_k, Z_e = Mee^{-1}† Moe† Y_k.
@@ -20,6 +20,7 @@
 #include <Grid/qcd/action/txqcd/TXQCDSchurOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDSolvers.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonPseudoFermionAction.h>
+#include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -29,8 +30,9 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
 
   TXQCDWilsonRationalEOAction(GridCartesian &grid,
                               GridRedBlackCartesian &rbgrid,
-                              RealD mass, Params &p)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), param(p), Phi(&rbgrid) {
+                              RealD mass, Params &p, RealD csw = 0.0)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
+        param(p), Phi(&rbgrid) {
     AlgRemez remez(param.lo, param.hi, param.precision);
     std::cout << GridLogMessage
               << "[TXQCDWilsonRationalEO] degree " << param.degree
@@ -135,31 +137,152 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
       AccumulateAuxForce(dSdU, ak, Z_e, W_e, g5, inv_sqrt2, Id, G5);
 
       // ---- Gauge force ----
-      // MpcDeriv(Y, X) + MpcDagDeriv(X, Y), per flavor.
-      // Each returns -(ForceO + ForceE), accumulated with factor ak.
+      // Grid's MoeDeriv/MeoDeriv return UdSdU in a convention where
+      // dS/dε = 2*Re Tr(E * UdSdU). We multiply by 2 and flip sign
+      // to convert to the convention dS/dε = Re Tr(E * force) used
+      // by our Cmunu-based clover force and LogDet action.
       gforce = Zero();
 
       LatticeGaugeField ForceO(&rbgrid_), ForceE(&rbgrid_);
 
       for (int a = 0; a < TxqcdNf; ++a) {
-        // MpcDeriv(Y.f[a], X.f[a]):
-        //   ForceO = MoeDeriv(Y, W_e, No)  [odd links]
-        //   ForceE = MeoDeriv(Z_e, X, No)  [even links]
         EOp.Wilson().MoeDeriv(ForceO, Y.f[a], W_e.f[a], DaggerNo);
         EOp.Wilson().MeoDeriv(ForceE, Z_e.f[a], X.f[a], DaggerNo);
         setCheckerboard(gtmp, ForceO);
         setCheckerboard(gtmp, ForceE);
-        gforce = gforce - gtmp;
+        gforce = gforce + 2.0 * gtmp;
 
-        // MpcDagDeriv(X.f[a], Y.f[a]):
-        //   ForceO = MoeDeriv(X, Z_e, Yes) [odd links]
-        //   ForceE = MeoDeriv(W_e, Y, Yes) [even links]
         EOp.Wilson().MoeDeriv(ForceO, X.f[a], Z_e.f[a], DaggerYes);
         EOp.Wilson().MeoDeriv(ForceE, W_e.f[a], Y.f[a], DaggerYes);
         setCheckerboard(gtmp, ForceO);
         setCheckerboard(gtmp, ForceE);
-        gforce = gforce - gtmp;
+        gforce = gforce + 2.0 * gtmp;
       }
+
+      // ---- Clover gauge force ----
+      if (csw_ != 0.0) {
+        typedef TXQCDSiteMatrixUtil SMU;
+        typedef typename LatticeColourMatrix::vector_object::scalar_object CMsobj;
+        typedef typename LatticeFermion::vector_object::scalar_object Fsobj;
+        SMU::SpinMatrices sm;
+
+        // Unvectorize fermion fields to per-site scalar objects
+        std::array<std::vector<Fsobj>, TxqcdNf> Xv, Yv, Wv, Zv;
+        for (int a = 0; a < TxqcdNf; ++a) {
+          unvectorizeToLexOrdArray(Xv[a], X.f[a]);
+          unvectorizeToLexOrdArray(Yv[a], Y.f[a]);
+          unvectorizeToLexOrdArray(Wv[a], W_e.f[a]);
+          unvectorizeToLexOrdArray(Zv[a], Z_e.f[a]);
+        }
+        uint64_t nsites_odd = Xv[0].size();
+        uint64_t nsites_even = Wv[0].size();
+
+        std::vector<LatticeColourMatrix> Sigma_full;
+        int fk = 0;
+        for (int rho = 0; rho < Nd; ++rho) {
+          for (int sig = rho + 1; sig < Nd; ++sig) {
+            // Odd-site sigma: sigma_1†-sigma_1 from 2Re[Y†(dM/dF)X]
+            // = -(i*csw/2) Σ isigma(α,β)[Y*(α,j)X(β,i)+X*(α,j)Y(β,i)]
+            std::vector<CMsobj> sig_odd(nsites_odd);
+            for (uint64_t x = 0; x < nsites_odd; ++x) {
+              for (int i = 0; i < Nc; ++i)
+                for (int j = 0; j < Nc; ++j) {
+                  std::complex<double> val(0,0);
+                  for (int a = 0; a < TxqcdNf; ++a)
+                    for (int alpha = 0; alpha < Ns; ++alpha)
+                      for (int beta = 0; beta < Ns; ++beta) {
+                        auto isig = sm.isigma[rho][sig](alpha, beta);
+                        if (isig == std::complex<double>(0,0)) continue;
+                        std::complex<double> Yaj(
+                            Yv[a][x]()(alpha)(j).real(),
+                            Yv[a][x]()(alpha)(j).imag());
+                        std::complex<double> Xbi(
+                            Xv[a][x]()(beta)(i).real(),
+                            Xv[a][x]()(beta)(i).imag());
+                        std::complex<double> Xaj(
+                            Xv[a][x]()(alpha)(j).real(),
+                            Xv[a][x]()(alpha)(j).imag());
+                        std::complex<double> Ybi(
+                            Yv[a][x]()(beta)(i).real(),
+                            Yv[a][x]()(beta)(i).imag());
+                        val += isig * (std::conj(Yaj)*Xbi + std::conj(Xaj)*Ybi);
+                      }
+                  std::complex<double> cv(0.0, -0.5*csw_);
+                  std::complex<double> cval = cv * val;
+                  sig_odd[x]()()(i,j) = ComplexD(cval.real(), cval.imag());
+                }
+            }
+
+            // Even-site sigma (same structure with Z,W)
+            std::vector<CMsobj> sig_even(nsites_even);
+            for (uint64_t x = 0; x < nsites_even; ++x) {
+              for (int i = 0; i < Nc; ++i)
+                for (int j = 0; j < Nc; ++j) {
+                  std::complex<double> val(0,0);
+                  for (int a = 0; a < TxqcdNf; ++a)
+                    for (int alpha = 0; alpha < Ns; ++alpha)
+                      for (int beta = 0; beta < Ns; ++beta) {
+                        auto isig = sm.isigma[rho][sig](alpha, beta);
+                        if (isig == std::complex<double>(0,0)) continue;
+                        std::complex<double> Zaj(
+                            Zv[a][x]()(alpha)(j).real(),
+                            Zv[a][x]()(alpha)(j).imag());
+                        std::complex<double> Wbi(
+                            Wv[a][x]()(beta)(i).real(),
+                            Wv[a][x]()(beta)(i).imag());
+                        std::complex<double> Waj(
+                            Wv[a][x]()(alpha)(j).real(),
+                            Wv[a][x]()(alpha)(j).imag());
+                        std::complex<double> Zbi(
+                            Zv[a][x]()(beta)(i).real(),
+                            Zv[a][x]()(beta)(i).imag());
+                        val += isig * (std::conj(Zaj)*Wbi + std::conj(Waj)*Zbi);
+                      }
+                  std::complex<double> cv(0.0, -0.5*csw_);
+                  std::complex<double> cval = cv * val;
+                  sig_even[x]()()(i,j) = ComplexD(cval.real(), cval.imag());
+                }
+            }
+
+            LatticeColourMatrix lam_odd(&rbgrid_);
+            vectorizeFromLexOrdArray(sig_odd, lam_odd);
+            lam_odd.Checkerboard() = Odd;
+            LatticeColourMatrix lam_even(&rbgrid_);
+            vectorizeFromLexOrdArray(sig_even, lam_even);
+            lam_even.Checkerboard() = Even;
+
+            Sigma_full.emplace_back(&grid_);
+            Sigma_full.back() = Zero();
+            setCheckerboard(Sigma_full[fk], lam_odd);
+            setCheckerboard(Sigma_full[fk], lam_even);
+            ++fk;
+          }
+        }
+
+        std::vector<LatticeColourMatrix> Ulinks(Nd, &grid_);
+        for (int mu = 0; mu < Nd; ++mu)
+          Ulinks[mu] = PeekIndex<LorentzIndex>(EOp.Gauge(), mu);
+
+        LatticeGaugeField clover_gforce(&grid_);
+        clover_gforce = Zero();
+        for (int mu = 0; mu < Nd; ++mu) {
+          LatticeColourMatrix force_mu(&grid_);
+          force_mu = Zero();
+          for (int nu = 0; nu < Nd; ++nu) {
+            if (mu == nu) continue;
+            int mn = (mu < nu) ? SMU::FmnIndex(mu, nu)
+                               : SMU::FmnIndex(nu, mu);
+            LatticeColourMatrix lam = (mu < nu)
+                ? Sigma_full[mn] : (-1.0) * Sigma_full[mn];
+            force_mu = force_mu + 0.25 *
+                WilsonCloverHelpers<WilsonImplR>::Cmunu(
+                    Ulinks, lam, mu, nu);
+          }
+          pokeLorentz(clover_gforce, Ulinks[mu] * force_mu, mu);
+        }
+        gforce = gforce + clover_gforce;
+      }
+
       dSdU.U = dSdU.U + ak * gforce;
     }
   }
@@ -170,7 +293,7 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
   TXQCDWilsonFermionEO MakeEOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
     return TXQCDWilsonFermionEO(Unc.U, grid_, rbgrid_, mass_, Unc.sigma,
-                                Unc.pi, Unc.s, Unc.p, Unc.t);
+                                Unc.pi, Unc.s, Unc.p, Unc.t, csw_);
   }
 
   void ApplyRational(TXQCDSchurOp &SchurOp, const MultiShiftFunction &rat,
@@ -278,6 +401,7 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
+  RealD csw_;
   Params &param;
   MultiShiftFunction PowerHalf;
   MultiShiftFunction PowerNegHalf;

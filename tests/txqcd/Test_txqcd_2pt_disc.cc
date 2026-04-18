@@ -14,6 +14,7 @@
 
 #include "Test_txqcd_2pt_utils.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TxqcdTest2pt;
 
@@ -87,12 +88,13 @@ static RealD StochasticTrMinv_TX(TXQCDWilsonOp &Mop, GridBase *grid,
   return acc / nn;
 }
 
-// Stochastic Re Tr M_W^{-1} / V for single-flavor Wilson.
-static RealD StochasticTrMinv_QCD(WilsonFermionD &Dw, GridBase *grid,
+// Stochastic Re Tr M^{-1} / V for single-flavor Wilson-Clover.
+typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+static RealD StochasticTrMinv_QCD(WCF &Dw, GridBase *grid,
                                   GridParallelRNG &pRNG, int nn, RealD tol,
                                   int maxit) {
   RealD V = (RealD)grid->gSites();
-  MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+  MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(tol, maxit);
   RealD acc = 0.0;
   for (int h = 0; h < nn; ++h) {
@@ -136,7 +138,7 @@ int main(int argc, char **argv) {
 
       GridCartesian *Ug = dynamic_cast<GridCartesian *>(U.Grid());
       GridRedBlackCartesian RB(Ug);
-      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass, U.sigma, U.pi, U.s, U.p, U.t);
+      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass, U.sigma, U.pi, U.s, U.p, U.t, csw);
 
       loop_ud.push_back(StochasticLoop_ud(Mop, &Grid, pRNG, n_noise,
                                            meas_tol, cg_max));
@@ -159,7 +161,7 @@ int main(int argc, char **argv) {
       pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
 
-      WilsonFermionD Dw(Umu, Grid, RBGrid, mass);
+      WCF Dw(Umu, Grid, RBGrid, mass, csw, csw);
       trminv_qcd.push_back(
           StochasticTrMinv_QCD(Dw, &Grid, pRNG, n_noise, meas_tol, cg_max));
     }

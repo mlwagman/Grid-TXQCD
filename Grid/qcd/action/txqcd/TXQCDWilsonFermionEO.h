@@ -1,7 +1,8 @@
 #pragma once
 // Even-odd preconditioned TXQCD Wilson operator.
 //
-// M = D_W + (4+m) + Δ, where Δ is the site-diagonal aux-field insertion.
+// M = D_W + (4+m) + Δ + Clover, where Δ is the site-diagonal aux-field
+// insertion and Clover = -(csw/2) * σ_{μν} * F_{μν} is the clover term.
 // In even-odd decomposition:
 //   Mee = (4+m) + Δ_e     (site-diagonal, mixes flavors)
 //   Moo = (4+m) + Δ_o     (site-diagonal, mixes flavors)
@@ -36,15 +37,24 @@ class TXQCDWilsonFermionEO {
                        GridRedBlackCartesian &rbgrid, RealD mass,
                        LatticeSigmaField &sigma, LatticePiField &pi,
                        LatticeSFieldC &s, LatticePFieldC &p,
-                       LatticeTField &t)
+                       LatticeTField &t, RealD csw = 0.0)
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
+        csw_(csw),
         Dw_(Umu, grid, rbgrid, mass),
+        Umu_(Umu),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t),
         sigma_e_(&rbgrid), sigma_o_(&rbgrid),
         pi_e_(&rbgrid), pi_o_(&rbgrid),
         s_e_(&rbgrid), s_o_(&rbgrid),
         p_e_(&rbgrid), p_o_(&rbgrid),
         t_e_(&rbgrid), t_o_(&rbgrid) {
+    if (csw_ != 0.0) {
+      for (int k = 0; k < 6; ++k) {
+        FS_.emplace_back(&grid);
+        FS_e_.emplace_back(&rbgrid);
+        FS_o_.emplace_back(&rbgrid);
+      }
+    }
     ImportFields();
   }
 
@@ -80,6 +90,15 @@ class TXQCDWilsonFermionEO {
     TXQCDFermionNf d(in.Grid());
     ApplyDeltaCB(cb, in, d);
     for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
+    if (csw_ != 0.0) {
+      auto &fs = (cb == Even) ? FS_e_ : FS_o_;
+      TXQCDFermionNf cl(in.Grid());
+      ApplyClover(csw_, fs, in, cl);
+      for (int a = 0; a < TxqcdNf; ++a) {
+        out.f[a] = out.f[a] + cl.f[a];
+        out.f[a].Checkerboard() = cb;
+      }
+    }
   }
 
   void MooeeDag(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -129,13 +148,20 @@ class TXQCDWilsonFermionEO {
 
   WilsonOp &Wilson() { return Dw_; }
   RealD DiagMass() const { return diag_mass_; }
+  RealD Csw() const { return csw_; }
+  const GaugeField &Gauge() const { return Umu_; }
+  const std::vector<LatticeColourMatrix> &FieldStrengths() const {
+    return FS_;
+  }
 
  private:
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
   RealD diag_mass_;
+  RealD csw_;
   WilsonOp Dw_;
+  GaugeField &Umu_;
 
   LatticeSigmaField &sigma_;
   LatticePiField    &pi_;
@@ -148,6 +174,9 @@ class TXQCDWilsonFermionEO {
   LatticeSFieldC    s_e_, s_o_;
   LatticePFieldC    p_e_, p_o_;
   LatticeTField     t_e_, t_o_;
+
+  std::vector<LatticeColourMatrix> FS_;
+  std::vector<LatticeColourMatrix> FS_e_, FS_o_;
 
   std::vector<SMU::SiteMatrix> inv_even_;
   std::vector<SMU::SiteMatrix> inv_odd_;
@@ -166,10 +195,29 @@ class TXQCDWilsonFermionEO {
     pickCheckerboard(Even, t_e_, t_);
     pickCheckerboard(Odd, t_o_, t_);
 
+    if (csw_ != 0.0) {
+      int k = 0;
+      for (int mu = 0; mu < Nd; ++mu)
+        for (int nu = mu + 1; nu < Nd; ++nu) {
+          WilsonLoops<Impl>::FieldStrength(FS_[k], Umu_, mu, nu);
+          pickCheckerboard(Even, FS_e_[k], FS_[k]);
+          pickCheckerboard(Odd, FS_o_[k], FS_[k]);
+          ++k;
+        }
+    }
+
     auto aux_e = SMU::UnvectorizeAux(sigma_e_, pi_e_, s_e_, p_e_, t_e_);
-    SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, inv_even_);
     auto aux_o = SMU::UnvectorizeAux(sigma_o_, pi_o_, s_o_, p_o_, t_o_);
-    SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, inv_odd_);
+
+    if (csw_ != 0.0) {
+      auto cl_e = SMU::UnvectorizeClover(FS_e_);
+      auto cl_o = SMU::UnvectorizeClover(FS_o_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_);
+    } else {
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_);
+    }
   }
 
   void ApplyDeltaCB(int cb, const TXQCDFermionNf &in, TXQCDFermionNf &out) {

@@ -32,16 +32,28 @@ class TXQCDWilsonOp {
                 GridRedBlackCartesian &rbgrid, RealD mass,
                 const LatticeSigmaField &sigma, const LatticePiField &pi,
                 const LatticeSFieldC &s, const LatticePFieldC &p,
-                const LatticeTField &t)
-      : Dw(Umu, grid, rbgrid, mass),
-        sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t) {}
+                const LatticeTField &t, RealD csw = 0.0)
+      : Dw(Umu, grid, rbgrid, mass), csw_(csw), Umu_(Umu),
+        sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t) {
+    if (csw_ != 0.0) {
+      for (int mu = 0; mu < Nd; ++mu)
+        for (int nu = mu + 1; nu < Nd; ++nu) {
+          FS_.emplace_back(&grid);
+          WilsonLoops<Impl>::FieldStrength(FS_.back(), Umu, mu, nu);
+        }
+    }
+  }
 
-  // Apply M = D_W + Delta. Per flavor: out.f[a] = D_W in.f[a]; then add Delta.
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     for (int a = 0; a < TxqcdNf; ++a) Dw.M(in.f[a], out.f[a]);
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
     for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
+    if (csw_ != 0.0) {
+      TXQCDFermionNf cl(in.Grid());
+      ApplyClover(csw_, FS_, in, cl);
+      for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + cl.f[a];
+    }
   }
 
   // Mdag via gamma5 M gamma5 (cheaper than wiring a separate Wilson.Mdag,
@@ -58,11 +70,14 @@ class TXQCDWilsonOp {
 
  private:
   WilsonOp Dw;
+  RealD csw_;
+  GaugeField &Umu_;
   const LatticeSigmaField &sigma_;
   const LatticePiField    &pi_;
   const LatticeSFieldC    &s_;
   const LatticePFieldC    &p_;
   const LatticeTField     &t_;
+  std::vector<LatticeColourMatrix> FS_;
 };
 
 NAMESPACE_END(Grid);

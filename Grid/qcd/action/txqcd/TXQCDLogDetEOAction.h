@@ -12,10 +12,13 @@
 // The force is:
 //   dS/daux_even(x) = -Tr(M_site(x)^{-1} dM_site/daux(x))
 //
-// Only even-site aux fields contribute; odd-site and gauge forces are zero.
+// Only even-site aux fields contribute; odd-site force is zero.
+// Gauge force is zero for csw=0; for csw!=0 the clover term couples
+// Mee to the gauge links through F_{μν}, producing a gauge force via Cmunu.
 
 #include <Grid/qcd/action/txqcd/TXQCDSiteMatrix.h>
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
+#include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -25,8 +28,9 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
   static constexpr int kDim = SMU::kDim;
 
   TXQCDLogDetEOAction(GridCartesian &grid, GridRedBlackCartesian &rbgrid,
-                      RealD mass)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass) {}
+                      RealD mass, RealD csw = 0.0)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
+        csw_(csw) {}
 
   std::string action_name() override { return "TXQCDLogDetEOAction"; }
   std::string LogParameters() override {
@@ -41,13 +45,21 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
 
   RealD S(const TXQCDField &U) override {
     auto aux = GetEvenAux(U);
+    auto cl = GetEvenClover(U);
     uint64_t nsites = aux.sig.size();
 
     SMU::SiteMatrix M;
     RealD logdet = 0.0;
     for (uint64_t x = 0; x < nsites; ++x) {
+      std::array<SMU::FmnSobj, 6> fmn_site;
+      const std::array<SMU::FmnSobj, 6> *fmn_ptr = nullptr;
+      if (csw_ != 0.0) {
+        for (int k = 0; k < 6; ++k) fmn_site[k] = cl.fs[k][x];
+        fmn_ptr = &fmn_site;
+      }
       SMU::BuildSiteMatrix(sm_, diag_mass_, aux.sig[x], aux.pi[x],
-                          aux.s[x], aux.p[x], aux.t[x], M);
+                          aux.s[x], aux.p[x], aux.t[x],
+                          csw_, fmn_ptr, M);
       auto lu = M.partialPivLu();
       auto d = lu.determinant();
       logdet += std::log(std::abs(d));
@@ -61,10 +73,12 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
 
   void deriv(const TXQCDField &U, TXQCDField &dSdU) override {
     auto aux = GetEvenAux(U);
+    auto cl = GetEvenClover(U);
     uint64_t nsites = aux.sig.size();
 
     SMU::SiteMatrix M, Inv;
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
+    const double neg_csw_half = -0.5 * csw_;
 
     std::vector<SMU::SigSobj> sig_force(nsites);
     std::vector<SMU::PiSobj> pi_force(nsites);
@@ -72,9 +86,21 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
     std::vector<SMU::PSobj> p_force(nsites);
     std::vector<SMU::TSobj> t_force(nsites);
 
+    typedef typename LatticeColourMatrix::vector_object::scalar_object CMsobj;
+    std::array<std::vector<CMsobj>, 6> clover_sigma;
+    if (csw_ != 0.0)
+      for (int k = 0; k < 6; ++k) clover_sigma[k].resize(nsites);
+
     for (uint64_t x = 0; x < nsites; ++x) {
+      std::array<SMU::FmnSobj, 6> fmn_site;
+      const std::array<SMU::FmnSobj, 6> *fmn_ptr = nullptr;
+      if (csw_ != 0.0) {
+        for (int k = 0; k < 6; ++k) fmn_site[k] = cl.fs[k][x];
+        fmn_ptr = &fmn_site;
+      }
       SMU::BuildSiteMatrix(sm_, diag_mass_, aux.sig[x], aux.pi[x],
-                          aux.s[x], aux.p[x], aux.t[x], M);
+                          aux.s[x], aux.p[x], aux.t[x],
+                          csw_, fmn_ptr, M);
       Inv = M.inverse();
 
       // sigma force: F_{ab} = -Σ_{α,i} Inv_{(a,α,i),(b,α,i)}
@@ -167,6 +193,16 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
                   ComplexD(-val.real(), -val.imag());
               t_force[x]()(nu, mu)(i, j) =
                   ComplexD(val.real(), val.imag());
+
+              if (csw_ != 0.0) {
+                // dS/dF_{mu,nu}^{ij} = -Tr(M^{-1} dM/dF)
+                // dM/dF = i*(csw/2) * isigma => dS/dF = -i*(csw/2) * val
+                int k = SMU::FmnIndex(mu, nu);
+                std::complex<double> cv(0.0, -0.5 * csw_);
+                std::complex<double> cval = cv * val;
+                clover_sigma[k][x]()()(i, j) =
+                    ComplexD(cval.real(), cval.imag());
+              }
             }
           }
         }
@@ -205,6 +241,41 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
     setCheckerboard(dSdU.s, F_s_e);
     setCheckerboard(dSdU.p, F_p_e);
     setCheckerboard(dSdU.t, F_t_e);
+
+    if (csw_ != 0.0) {
+      typedef WilsonImplR Impl;
+      std::vector<LatticeColourMatrix> Sigma_full;
+      for (int k = 0; k < 6; ++k) {
+        LatticeColourMatrix Sigma_e(&rbgrid_);
+        vectorizeFromLexOrdArray(clover_sigma[k], Sigma_e);
+        Sigma_e.Checkerboard() = Even;
+        Sigma_full.emplace_back(&grid_);
+        Sigma_full.back() = Zero();
+        setCheckerboard(Sigma_full[k], Sigma_e);
+      }
+
+      std::vector<LatticeColourMatrix> Ulinks(Nd, &grid_);
+      for (int mu = 0; mu < Nd; ++mu)
+        Ulinks[mu] = PeekIndex<LorentzIndex>(U.U, mu);
+
+      LatticeGaugeField clover_force(&grid_);
+      clover_force = Zero();
+
+      for (int mu = 0; mu < Nd; ++mu) {
+        LatticeColourMatrix force_mu(&grid_);
+        force_mu = Zero();
+        for (int nu = 0; nu < Nd; ++nu) {
+          if (mu == nu) continue;
+          int mn = (mu < nu) ? SMU::FmnIndex(mu, nu) : SMU::FmnIndex(nu, mu);
+          LatticeColourMatrix lambda = (mu < nu) ? Sigma_full[mn]
+                                                 : (-1.0) * Sigma_full[mn];
+          force_mu += 0.25 *
+              WilsonCloverHelpers<Impl>::Cmunu(Ulinks, lambda, mu, nu);
+        }
+        pokeLorentz(clover_force, Ulinks[mu] * force_mu, mu);
+      }
+      dSdU.U = clover_force;
+    }
   }
 
  private:
@@ -212,7 +283,9 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
   RealD diag_mass_;
+  RealD csw_;
   SMU::SpinMatrices sm_;
+  std::vector<LatticeColourMatrix> FS_;
 
   SMU::AuxSiteArrays GetEvenAux(const TXQCDField &U) {
     LatticeSigmaField sigma_e(&rbgrid_);
@@ -226,6 +299,20 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
     pickCheckerboard(Even, p_e, U.p);
     pickCheckerboard(Even, t_e, U.t);
     return SMU::UnvectorizeAux(sigma_e, pi_e, s_e, p_e, t_e);
+  }
+
+  SMU::CloverSiteArrays GetEvenClover(const TXQCDField &U) {
+    if (csw_ == 0.0) return SMU::CloverSiteArrays();
+    FS_.clear();
+    std::vector<LatticeColourMatrix> FS_e;
+    for (int mu = 0; mu < Nd; ++mu)
+      for (int nu = mu + 1; nu < Nd; ++nu) {
+        FS_.emplace_back(&grid_);
+        WilsonLoops<WilsonImplR>::FieldStrength(FS_.back(), U.U, mu, nu);
+        FS_e.emplace_back(&rbgrid_);
+        pickCheckerboard(Even, FS_e.back(), FS_.back());
+      }
+    return SMU::UnvectorizeClover(FS_e);
   }
 };
 
