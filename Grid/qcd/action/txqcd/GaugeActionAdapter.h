@@ -44,4 +44,36 @@ class GaugeActionAdapter : public Action<TXQCDField> {
   GaugeAction inner;
 };
 
+// Non-owning adapter: wraps any Action<LatticeGaugeField> (e.g. a
+// pseudofermion action for a spectator quark) into an Action<TXQCDField>.
+class QCDActionAdapter : public Action<TXQCDField> {
+ public:
+  explicit QCDActionAdapter(Action<LatticeGaugeField> &a) : inner_(a) {}
+
+  std::string action_name() override {
+    return std::string("QCDActionAdapter[") + inner_.action_name() + "]";
+  }
+
+  std::string LogParameters() override { return inner_.LogParameters(); }
+
+  void refresh(const TXQCDField &U, GridSerialRNG &sRNG,
+               GridParallelRNG &pRNG) override {
+    inner_.refresh(U.U, sRNG, pRNG);
+  }
+
+  RealD S(const TXQCDField &U) override { return inner_.S(U.U); }
+
+  void deriv(const TXQCDField &U, TXQCDField &dSdU) override {
+    inner_.deriv(U.U, dSdU.U);
+    dSdU.sigma = Zero();
+    dSdU.pi    = Zero();
+    dSdU.s     = Zero();
+    dSdU.p     = Zero();
+    dSdU.t     = Zero();
+  }
+
+ private:
+  Action<LatticeGaugeField> &inner_;
+};
+
 NAMESPACE_END(Grid);

@@ -9,6 +9,7 @@
 //   - Auxiliary correlator diagnostics: C_pi_aux, C_sigma, C_s
 
 #include "Test_txqcd_2pt_utils.h"
+#include <Grid/serialisation/Hdf5IO.h>
 
 using namespace TxqcdTest2pt;
 
@@ -16,24 +17,44 @@ int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
   std::string dir = meas_dir();
-  int T = 0;
 
-  // Read all measurements
-  auto pion_conn_tx = ReadMeasReal(dir + "/pion_conn_txqcd.dat", T);
-  int T2;
-  auto pion_conn_qcd = ReadMeasReal(dir + "/pion_conn_qcd.dat", T2);
-  auto nucl_tx  = ReadMeasComplex(dir + "/nucleon_txqcd.dat", T2);
-  auto nucl_qcd = ReadMeasComplex(dir + "/nucleon_qcd.dat", T2);
-  auto loop_ud  = ReadMeasComplex(dir + "/loop_ud_txqcd.dat", T2);
-  auto plaq_tx  = ReadMeasScalar(dir + "/plaq_txqcd.dat");
-  auto plaq_qcd = ReadMeasScalar(dir + "/plaq_qcd.dat");
-  auto vev_sig  = ReadMeasScalar(dir + "/vev_sigma_txqcd.dat");
-  auto vev_s    = ReadMeasScalar(dir + "/vev_s_txqcd.dat");
-  auto trminv_tx  = ReadMeasScalar(dir + "/vev_trminv_txqcd.dat");
-  auto trminv_qcd = ReadMeasScalar(dir + "/vev_trminv_qcd.dat");
-  auto aux_pi     = ReadMeasComplex(dir + "/aux_pi_txqcd.dat", T2);
-  auto aux_sigma  = ReadMeasComplex(dir + "/aux_sigma_txqcd.dat", T2);
-  auto aux_s      = ReadMeasComplex(dir + "/aux_s_txqcd.dat", T2);
+  std::vector<std::vector<RealD>>    pion_conn_tx, pion_conn_qcd;
+  std::vector<std::vector<ComplexD>> nucl_tx, nucl_qcd, loop_ud;
+  std::vector<RealD> plaq_tx, plaq_qcd, vev_sig, vev_s;
+  std::vector<RealD> trminv_tx, trminv_qcd;
+  std::vector<std::vector<ComplexD>> aux_pi, aux_sigma, aux_s;
+
+  {
+    Hdf5Reader rd(dir + "/meas_txqcd_conn.h5");
+    read(rd, "pion_conn", pion_conn_tx);
+    read(rd, "nucleon", nucl_tx);
+    read(rd, "plaq", plaq_tx);
+  }
+  {
+    Hdf5Reader rd(dir + "/meas_qcd_conn.h5");
+    read(rd, "pion_conn", pion_conn_qcd);
+    read(rd, "nucleon", nucl_qcd);
+    read(rd, "plaq", plaq_qcd);
+  }
+  {
+    Hdf5Reader rd(dir + "/meas_txqcd_disc.h5");
+    read(rd, "loop_ud", loop_ud);
+    read(rd, "vev_sigma", vev_sig);
+    read(rd, "vev_s", vev_s);
+    read(rd, "trminv", trminv_tx);
+  }
+  {
+    Hdf5Reader rd(dir + "/meas_qcd_disc.h5");
+    read(rd, "trminv", trminv_qcd);
+  }
+  {
+    Hdf5Reader rd(dir + "/meas_txqcd_aux.h5");
+    read(rd, "aux_pi", aux_pi);
+    read(rd, "aux_sigma", aux_sigma);
+    read(rd, "aux_s", aux_s);
+  }
+
+  int T = (int)pion_conn_tx[0].size();
 
   int N = (int)pion_conn_tx.size();
   int M = (int)pion_conn_qcd.size();

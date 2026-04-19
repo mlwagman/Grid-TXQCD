@@ -1,15 +1,18 @@
-// Step 1: Generate TXQCD and QCD gauge configurations for the 2pt test suite.
-// Skips generation if configs already exist at all measurement trajectories.
+// Step 1 (Symanzik): Generate Nf=2+1 TXQCD and QCD gauge configurations with
+// stout smearing and tadpole-improved Lüscher-Weisz (Symanzik) gauge action.
 //
-// TXQCD: one rational PF (|det M_TX|^1, Nf_tx=2 -> Nf=2 Wilson at aux=0)
-//        + Gaussian aux action + Wilson gauge action.
-// QCD:   one TwoFlavour PF (|det M_W|^2 = Nf=2 Wilson) + Wilson gauge action.
+// Light quarks (u,d): TXQCD RHMC + LogDet (or QCD TwoFlavour PF)
+// Strange quark (s):  standard QCD OneFlavourRational RHMC via QCDActionAdapter
 
-#include "Test_txqcd_2pt_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
-#include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
+#include "Test_txqcd_2pt_symanzik_utils.h"
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDSmearedConfiguration.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/gauge/PlaqPlusRectangleAction.h>
+#include <Grid/qcd/utils/WilsonLoops.h>
 
-using namespace TxqcdTest2pt;
+using namespace TxqcdTest2ptSymanzik;
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
@@ -25,11 +28,13 @@ int main(int argc, char **argv) {
   // ==================== TXQCD ====================
   if (txqcd_configs_exist()) {
     std::cout << GridLogMessage
-              << "TXQCD configs already exist, skipping generation." << std::endl;
+              << "TXQCD symanzik configs already exist, skipping generation."
+              << std::endl;
   } else {
     std::cout << GridLogMessage
-              << "Generating TXQCD configs (" << total_traj << " trajectories)..."
-              << std::endl;
+              << "Generating TXQCD symanzik configs (" << total_traj
+              << " trajectories, csw=" << csw << ", rho=" << stout_rho
+              << ", Nsmear=" << stout_nsmear << ")..." << std::endl;
     mkdir_p(txqcd_cfg_dir());
 
     GridSerialRNG   sRNG;
@@ -39,19 +44,49 @@ int main(int argc, char **argv) {
     int latest = latest_txqcd_checkpoint();
 
     RealD cg_tol = 1e-8;
-    OneFlavourRationalParams rat_params(1e-4, 64.0, cg_max, cg_tol, 12, 64,
+    OneFlavourRationalParams rat_params(1e-4, 200.0, cg_max, cg_tol, 12, 64,
                                         100, 1e-6, 1e-4);
 
-    GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
+    typedef SymanzikGaugeAction<PeriodicGimplR> SymanzikR;
+    GaugeActionAdapter<SymanzikR> GaugeAction(beta, u0);
+    GaugeAction.is_smeared = true;
+
     AuxiliaryFieldGaussianAction           AuxAction(lambda);
-    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params);
-    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass);
+
+    TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass, rat_params, csw);
+    PF.is_smeared = true;
+
+    TXQCDLogDetCloverEOAction         LogDet(Grid, RBGrid, mass, csw);
+    LogDet.is_smeared = true;
+
+    TXQCDField U(&Grid);
+    if (latest > 0) {
+      std::cout << GridLogMessage << "Resuming TXQCD symanzik from checkpoint at traj "
+                << latest << std::endl;
+      LoadTxqcdConfig(U, sRNG, pRNG, latest);
+      start_traj = latest;
+    } else {
+      sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
+      pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+      TXQCDCompositeImpl::TepidConfiguration(pRNG, U);
+    }
+
+    // Strange quark: standard QCD one-flavor RHMC, wrapped for TXQCD HMC
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    WCF StrangeFermOp(U.U, Grid, RBGrid, mass_s, csw, csw);
+    OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 12, 64,
+                                         100, 1e-6, 1e-4);
+    OneFlavourRationalPseudoFermionAction<WilsonImplR> StrangePF(StrangeFermOp,
+                                                                  strange_rat);
+    QCDActionAdapter StrangeAdapter(StrangePF);
+    StrangeAdapter.is_smeared = true;
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);
     L1.push_back(&PF);
     L1.push_back(&LogDet);
     L1.push_back(&AuxAction);
+    L1.push_back(&StrangeAdapter);
     ActionLevel<TXQCDField, Reps> L2(4);
     L2.push_back(&GaugeAction);
     ActionSet<TXQCDField, Reps> Aset;
@@ -63,18 +98,6 @@ int main(int argc, char **argv) {
     MD.MDsteps = 10;
     MD.trajL = 0.5;
 
-    TXQCDField U(&Grid);
-    if (latest > 0) {
-      std::cout << GridLogMessage << "Resuming TXQCD from checkpoint at traj "
-                << latest << std::endl;
-      LoadTxqcdConfig(U, sRNG, pRNG, latest);
-      start_traj = latest;
-    } else {
-      sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
-      pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
-      TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
-    }
-
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
     HMCp.Trajectories        = total_traj - start_traj;
@@ -84,9 +107,11 @@ int main(int argc, char **argv) {
     HMCp.StartingType        = "ColdStart";
     HMCp.MD = MD;
 
-    NoSmearing<TXQCDCompositeImpl> Smear;
+    Smear_Stout<PeriodicGimplR> Stout(stout_rho);
+    TXQCDSmearedConfiguration Smear(&Grid, stout_nsmear, Stout);
+
     typedef ForceGradient<TXQCDCompositeImpl,
-                          NoSmearing<TXQCDCompositeImpl>, Reps> IntT;
+                          TXQCDSmearedConfiguration, Reps> IntT;
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(U);
 
@@ -101,6 +126,7 @@ int main(int argc, char **argv) {
         {"PseudoFermion", &PF},
         {"LogDet", &LogDet},
         {"AuxGaussian", &AuxAction},
+        {"StrangeQuark", &StrangeAdapter},
         {"Gauge", &GaugeAction}
     });
 
@@ -112,11 +138,13 @@ int main(int argc, char **argv) {
   // ==================== QCD ====================
   if (qcd_configs_exist()) {
     std::cout << GridLogMessage
-              << "QCD configs already exist, skipping generation." << std::endl;
+              << "QCD symanzik configs already exist, skipping generation."
+              << std::endl;
   } else {
     std::cout << GridLogMessage
-              << "Generating QCD Nf=2 configs (" << total_traj
-              << " trajectories)..." << std::endl;
+              << "Generating QCD Nf=2+1 symanzik configs (" << total_traj
+              << " trajectories, csw=" << csw << ", rho=" << stout_rho
+              << ", Nsmear=" << stout_nsmear << ")..." << std::endl;
     mkdir_p(qcd_cfg_dir());
 
     GridSerialRNG   sRNG;
@@ -127,26 +155,37 @@ int main(int argc, char **argv) {
 
     LatticeGaugeField Umu(&Grid);
     if (latest > 0) {
-      std::cout << GridLogMessage << "Resuming QCD from checkpoint at traj "
+      std::cout << GridLogMessage << "Resuming QCD symanzik from checkpoint at traj "
                 << latest << std::endl;
       LoadQcdConfig(Umu, sRNG, pRNG, latest);
       start_traj = latest;
     } else {
       sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
       pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
-      SU<Nc>::ColdConfiguration(Umu);
+      SU<Nc>::TepidConfiguration(pRNG, Umu);
     }
 
-    WilsonFermionD FermOp(Umu, Grid, RBGrid, mass);
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    WCF FermOp(Umu, Grid, RBGrid, mass, csw, csw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     TwoFlavourPseudoFermionAction<WilsonImplR> Nf2(FermOp, CG, CG);
-    Nf2.is_smeared = false;
+    Nf2.is_smeared = true;
 
-    WilsonGaugeActionR GaugeAction(beta);
+    // Strange quark: one-flavor RHMC
+    WCF StrangeFermOp(Umu, Grid, RBGrid, mass_s, csw, csw);
+    OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, 1e-8, 12, 64,
+                                         100, 1e-6, 1e-4);
+    OneFlavourRationalPseudoFermionAction<WilsonImplR> StrangePF(StrangeFermOp,
+                                                                  strange_rat);
+    StrangePF.is_smeared = true;
+
+    SymanzikGaugeAction<PeriodicGimplR> GaugeAction(beta, u0);
+    GaugeAction.is_smeared = true;
 
     typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
     ActionLevel<LatticeGaugeField, Reps> L1(1);
     L1.push_back(&Nf2);
+    L1.push_back(&StrangePF);
     ActionLevel<LatticeGaugeField, Reps> L2(4);
     L2.push_back(&GaugeAction);
     ActionSet<LatticeGaugeField, Reps> Aset;
@@ -167,9 +206,11 @@ int main(int argc, char **argv) {
     HMCp.StartingType        = "ColdStart";
     HMCp.MD = MD;
 
-    NoSmearing<PeriodicGimplR> Smear;
+    Smear_Stout<PeriodicGimplR> Stout(stout_rho);
+    SmearedConfiguration<PeriodicGimplR> Smear(&Grid, stout_nsmear, Stout);
+
     typedef ForceGradient<PeriodicGimplR,
-                          NoSmearing<PeriodicGimplR>, Reps> IntT;
+                          SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(Umu);
 
@@ -180,6 +221,7 @@ int main(int argc, char **argv) {
 
     QcdDiagnostics diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
         {"Nf2", &Nf2},
+        {"StrangeQuark", &StrangePF},
         {"Gauge", &GaugeAction}
     });
 
@@ -188,7 +230,7 @@ int main(int argc, char **argv) {
     HMC.evolve();
   }
 
-  std::cout << GridLogMessage << "Config generation complete." << std::endl;
+  std::cout << GridLogMessage << "Symanzik config generation complete." << std::endl;
   Grid_finalize();
   return 0;
 }

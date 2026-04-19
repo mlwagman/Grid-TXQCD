@@ -9,11 +9,11 @@
 // VEVs: <Tr sigma>/V, <Tr s>/V (direct from aux fields),
 //        stochastic Re Tr M^{-1}/V (TXQCD and QCD).
 //
-// Writes: meas_2pt/{loop_ud_txqcd, vev_sigma, vev_s, vev_trminv_txqcd,
-//                    vev_trminv_qcd}.dat
+// Writes: meas_2pt/meas_{txqcd,qcd}_disc.h5
 
 #include "Test_txqcd_2pt_utils.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
+#include <Grid/serialisation/Hdf5IO.h>
 
 using namespace TxqcdTest2pt;
 
@@ -165,14 +165,20 @@ int main(int argc, char **argv) {
     }
   }
 
-  WriteMeasComplex(meas_dir() + "/loop_ud_txqcd.dat", loop_ud, T);
-  WriteMeasScalar(meas_dir() + "/vev_sigma_txqcd.dat", vev_sigma);
-  WriteMeasScalar(meas_dir() + "/vev_s_txqcd.dat", vev_s);
-  WriteMeasScalar(meas_dir() + "/vev_trminv_txqcd.dat", trminv_tx);
-  WriteMeasScalar(meas_dir() + "/vev_trminv_qcd.dat", trminv_qcd);
+  {
+    Hdf5Writer wr(meas_dir() + "/meas_txqcd_disc.h5");
+    write(wr, "loop_ud", loop_ud);
+    write(wr, "vev_sigma", vev_sigma);
+    write(wr, "vev_s", vev_s);
+    write(wr, "trminv", trminv_tx);
+  }
+  {
+    Hdf5Writer wr(meas_dir() + "/meas_qcd_disc.h5");
+    write(wr, "trminv", trminv_qcd);
+  }
 
   std::cout << GridLogMessage << "Disconnected + VEV measurements written to "
-            << meas_dir() << "/" << std::endl;
+            << meas_dir() << "/*.h5" << std::endl;
   Grid_finalize();
   return 0;
 }

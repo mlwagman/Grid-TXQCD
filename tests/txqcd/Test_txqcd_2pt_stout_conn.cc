@@ -1,14 +1,14 @@
-// Step 2 (Clover): Connected pion and nucleon correlators using Wilson-Clover
-// operators on clover configurations.
+// Step 2 (Stout): Connected pion and nucleon correlators using Wilson-Clover
+// operators on stout-smeared configurations.
 
-#include "Test_txqcd_2pt_clover_utils.h"
+#include "Test_txqcd_2pt_stout_utils.h"
 #include <Grid/serialisation/Hdf5IO.h>
 #include <Grid/qcd/utils/BaryonUtils.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
-using namespace TxqcdTest2ptClover;
+using namespace TxqcdTest2ptStout;
 
 static void PointSource(const Coordinate &site, LatticePropagator &src) {
   src = Zero();
@@ -74,12 +74,13 @@ static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
 }
 
 static void TxqcdPointProp(LatticePropagator &S_u, LatticePropagator &S_d,
-                           TXQCDField &U, RealD m,
-                           const Coordinate &src, RealD tol, int maxit) {
+                           LatticeGaugeField &Ulinks, TXQCDField &U,
+                           RealD m, const Coordinate &src, RealD tol,
+                           int maxit) {
   GridBase *g = U.Grid();
   GridCartesian *Ug = dynamic_cast<GridCartesian *>(g);
   GridRedBlackCartesian RB(Ug);
-  TXQCDWilsonCloverOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t, csw);
+  TXQCDWilsonCloverOp Mop(Ulinks, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t, csw);
 
   LatticePropagator srcP(g);
   PointSource(src, srcP);
@@ -148,15 +149,20 @@ int main(int argc, char **argv) {
   std::vector<std::vector<ComplexD>> nucl_tx, nucl_qcd;
   std::vector<RealD> plaq_tx, plaq_qcd;
 
+  Smear_Stout<PeriodicGimplR> Stout(stout_rho);
+  SmearedConfiguration<PeriodicGimplR> SmearPolicy(&Grid, stout_nsmear, Stout);
+
   // TXQCD
   {
     TXQCDField U(&Grid);
     for (int traj : trajs) {
-      std::cout << GridLogMessage << "[conn] TXQCD clover traj=" << traj << std::endl;
+      std::cout << GridLogMessage << "[conn] TXQCD stout traj=" << traj << std::endl;
       LoadTxqcdConfig(U, sRNG, pRNG, traj);
       plaq_tx.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
+      SmearPolicy.set_Field(U.U);
+      LatticeGaugeField Usmeared = SmearPolicy.get_SmearedU();
       LatticePropagator Su(&Grid), Sd(&Grid);
-      TxqcdPointProp(Su, Sd, U, mass, src, meas_tol, cg_max);
+      TxqcdPointProp(Su, Sd, Usmeared, U, mass, src, meas_tol, cg_max);
       pion_tx.push_back(PionCorrelator(Sd, Su));
       nucl_tx.push_back(NucleonCorrelator(Su, Sd));
     }
@@ -166,11 +172,13 @@ int main(int argc, char **argv) {
   {
     LatticeGaugeField Umu(&Grid);
     for (int traj : trajs) {
-      std::cout << GridLogMessage << "[conn] QCD clover traj=" << traj << std::endl;
+      std::cout << GridLogMessage << "[conn] QCD stout traj=" << traj << std::endl;
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
       plaq_qcd.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
+      SmearPolicy.set_Field(Umu);
+      LatticeGaugeField Usmeared = SmearPolicy.get_SmearedU();
       LatticePropagator S(&Grid);
-      QcdPointProp(S, Umu, mass, Grid, RBGrid, src, meas_tol, cg_max);
+      QcdPointProp(S, Usmeared, mass, Grid, RBGrid, src, meas_tol, cg_max);
       pion_qcd.push_back(PionCorrelator(S, S));
       nucl_qcd.push_back(NucleonCorrelator(S, S));
     }
@@ -189,7 +197,7 @@ int main(int argc, char **argv) {
     write(wr, "plaq", plaq_qcd);
   }
 
-  std::cout << GridLogMessage << "Connected 2pt clover measurements written to "
+  std::cout << GridLogMessage << "Connected 2pt stout measurements written to "
             << meas_dir() << "/*.h5" << std::endl;
   Grid_finalize();
   return 0;

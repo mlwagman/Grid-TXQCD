@@ -1,21 +1,10 @@
-// Step 4: Compute auxiliary field correlators from TXQCD configurations.
-//
-// C_pi(dt)    = lam^4 [<Tr_f[pi(t) pi^dag(0)]> - <Tr_f[pi(t)] Tr_f[pi^dag(0)]>]
-//             = lam^4 (I=1 pion, traceless flavor projection, volume-averaged over sources)
-// C_sigma(dt) = lam^4 <Tr_f[sigma(t)] Tr_f[sigma^dag(0)]>
-// C_s(dt)     = lam^4 <Tr_c[s(t)] Tr_c[s^dag(0)]>
-//
-// No fermion inversions needed — correlators are computed directly from aux fields.
-//
-// Writes: meas_2pt/meas_txqcd_aux.h5
+// Step 4 (Stout): Auxiliary field correlators from stout-smeared TXQCD configs.
 
-#include "Test_txqcd_2pt_utils.h"
+#include "Test_txqcd_2pt_stout_utils.h"
 #include <Grid/serialisation/Hdf5IO.h>
 
-using namespace TxqcdTest2pt;
+using namespace TxqcdTest2ptStout;
 
-// Per-element slice sums for Nf x Nf flavor matrix field.
-// Returns Nf*Nf vectors of length T.
 static std::vector<std::vector<ComplexD>>
 SliceSumPiAll(const LatticePiField &piF) {
   GridBase *g = piF.Grid();
@@ -35,7 +24,6 @@ SliceSumPiAll(const LatticePiField &piF) {
   return out;
 }
 
-// Flavor trace slice sum: Tr_f[pi](t).
 static std::vector<ComplexD> SliceSumTrace(const LatticePiField &piF) {
   GridBase *g = piF.Grid();
   LatticeComplex tr(g);
@@ -47,7 +35,6 @@ static std::vector<ComplexD> SliceSumTrace(const LatticePiField &piF) {
   return out;
 }
 
-// Color trace slice sum: Tr_c[s](t).
 static std::vector<ComplexD> SliceSumColorTrace(const LatticeSFieldC &sF) {
   GridBase *g = sF.Grid();
   LatticeComplex tr(g);
@@ -59,7 +46,6 @@ static std::vector<ComplexD> SliceSumColorTrace(const LatticeSFieldC &sF) {
   return out;
 }
 
-// Flavor trace slice sum for sigma (same structure as pi).
 static std::vector<ComplexD> SliceSumSigmaTrace(const LatticeSigmaField &sigF) {
   GridBase *g = sigF.Grid();
   LatticeComplex tr(g);
@@ -93,10 +79,9 @@ int main(int argc, char **argv) {
 
   TXQCDField U(&Grid);
   for (int traj : trajs) {
-    std::cout << GridLogMessage << "[aux] traj=" << traj << std::endl;
+    std::cout << GridLogMessage << "[aux clover] traj=" << traj << std::endl;
     LoadTxqcdConfig(U, sRNG, pRNG, traj);
 
-    // C_pi = lam^4 [Tr_f(pi pi^dag) - Tr_f(pi) Tr_f(pi^dag)]
     auto pi_all = SliceSumPiAll(U.pi);
     auto pi_tr  = SliceSumTrace(U.pi);
     auto C_disc = CorrelatorFromSlice(pi_tr, V4);
@@ -109,14 +94,12 @@ int main(int argc, char **argv) {
     for (int t = 0; t < T; ++t) C_pi[t] = lam4 * (C_total[t] - C_disc[t]);
     aux_pi.push_back(C_pi);
 
-    // C_sigma = lam^4 <Tr_f[sigma] Tr_f[sigma]*>
     auto sig_tr = SliceSumSigmaTrace(U.sigma);
     auto C_sig  = CorrelatorFromSlice(sig_tr, V4);
     std::vector<ComplexD> csig(T);
     for (int t = 0; t < T; ++t) csig[t] = lam4 * C_sig[t];
     aux_sigma.push_back(csig);
 
-    // C_s = lam^4 <Tr_c[s] Tr_c[s]*>
     auto s_tr = SliceSumColorTrace(U.s);
     auto C_s  = CorrelatorFromSlice(s_tr, V4);
     std::vector<ComplexD> cs(T);
@@ -131,7 +114,7 @@ int main(int argc, char **argv) {
     write(wr, "aux_s", aux_s);
   }
 
-  std::cout << GridLogMessage << "Auxiliary correlators written to "
+  std::cout << GridLogMessage << "Auxiliary stout correlators written to "
             << meas_dir() << "/*.h5" << std::endl;
   Grid_finalize();
   return 0;

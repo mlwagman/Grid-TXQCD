@@ -1,9 +1,10 @@
 // Step 2: Compute connected pion and nucleon correlators from point-source
 // quark propagators on TXQCD and QCD configurations.
 //
-// Writes: meas_2pt/{pion_conn,nucleon}_{txqcd,qcd}.dat
+// Writes: meas_2pt/meas_{txqcd,qcd}_conn.h5
 
 #include "Test_txqcd_2pt_utils.h"
+#include <Grid/serialisation/Hdf5IO.h>
 #include <Grid/qcd/utils/BaryonUtils.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonOp.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -176,15 +177,21 @@ int main(int argc, char **argv) {
     }
   }
 
-  WriteMeasReal(meas_dir() + "/pion_conn_txqcd.dat", pion_tx, T);
-  WriteMeasReal(meas_dir() + "/pion_conn_qcd.dat", pion_qcd, T);
-  WriteMeasComplex(meas_dir() + "/nucleon_txqcd.dat", nucl_tx, T);
-  WriteMeasComplex(meas_dir() + "/nucleon_qcd.dat", nucl_qcd, T);
-  WriteMeasScalar(meas_dir() + "/plaq_txqcd.dat", plaq_tx);
-  WriteMeasScalar(meas_dir() + "/plaq_qcd.dat", plaq_qcd);
+  {
+    Hdf5Writer wr(meas_dir() + "/meas_txqcd_conn.h5");
+    write(wr, "pion_conn", pion_tx);
+    write(wr, "nucleon", nucl_tx);
+    write(wr, "plaq", plaq_tx);
+  }
+  {
+    Hdf5Writer wr(meas_dir() + "/meas_qcd_conn.h5");
+    write(wr, "pion_conn", pion_qcd);
+    write(wr, "nucleon", nucl_qcd);
+    write(wr, "plaq", plaq_qcd);
+  }
 
   std::cout << GridLogMessage << "Connected 2pt measurements written to "
-            << meas_dir() << "/" << std::endl;
+            << meas_dir() << "/*.h5" << std::endl;
   Grid_finalize();
   return 0;
 }

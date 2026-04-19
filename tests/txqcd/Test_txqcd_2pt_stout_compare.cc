@@ -1,10 +1,10 @@
-// Step 5 (Clover): Compare TXQCD and QCD 2pt measurements (Fierz test).
-// Same analysis as Wilson version but reads from clover measurement directory.
+// Step 5 (Stout): Compare TXQCD and QCD 2pt measurements (Fierz test).
+// Same analysis as Wilson version but reads from stout measurement directory.
 
-#include "Test_txqcd_2pt_clover_utils.h"
+#include "Test_txqcd_2pt_stout_utils.h"
 #include <Grid/serialisation/Hdf5IO.h>
 
-using namespace TxqcdTest2ptClover;
+using namespace TxqcdTest2ptStout;
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
@@ -15,6 +15,7 @@ int main(int argc, char **argv) {
   std::vector<std::vector<ComplexD>> nucl_tx, nucl_qcd, loop_ud;
   std::vector<RealD> plaq_tx, plaq_qcd, vev_sig, vev_s;
   std::vector<RealD> trminv_tx, trminv_qcd;
+  std::vector<RealD> trminv_strange_tx, trminv_strange_qcd;
   std::vector<std::vector<ComplexD>> aux_pi, aux_sigma, aux_s;
 
   {
@@ -35,10 +36,12 @@ int main(int argc, char **argv) {
     read(rd, "vev_sigma", vev_sig);
     read(rd, "vev_s", vev_s);
     read(rd, "trminv", trminv_tx);
+    read(rd, "trminv_strange", trminv_strange_tx);
   }
   {
     Hdf5Reader rd(dir + "/meas_qcd_disc.h5");
     read(rd, "trminv", trminv_qcd);
+    read(rd, "trminv_strange", trminv_strange_qcd);
   }
   {
     Hdf5Reader rd(dir + "/meas_txqcd_aux.h5");
@@ -85,8 +88,8 @@ int main(int argc, char **argv) {
 
   int exitcode = 0;
 
-  std::cout << GridLogMessage << "TXQCD clover samples: " << N
-            << "   QCD clover samples: " << M << std::endl;
+  std::cout << GridLogMessage << "TXQCD stout samples: " << N
+            << "   QCD stout samples: " << M << std::endl;
 
   std::cout << GridLogMessage
             << "----- Pion correlator (connected only, diagnostic) -----\n";
@@ -173,6 +176,8 @@ int main(int argc, char **argv) {
   auto [s_m, s_e]       = sm(vev_s);
   auto [mtx_m, mtx_e]   = sm(trminv_tx);
   auto [mqc_m, mqc_e]   = sm(trminv_qcd);
+  auto [mstx_m, mstx_e] = sm(trminv_strange_tx);
+  auto [msqc_m, msqc_e] = sm(trminv_strange_qcd);
 
   const int Nf_tx = TxqcdNf;
   const RealD sig_pf = sig_m / Nf_tx,  sig_pf_e = sig_e / Nf_tx;
@@ -223,6 +228,23 @@ int main(int argc, char **argv) {
     if (!pass) exitcode = 1;
   }
 
+  std::cout << GridLogMessage << "<Re Tr M_s^{-1}>/V (TXQCD) = " << mstx_m
+            << " +/- " << mstx_e << "\n";
+  std::cout << GridLogMessage << "<Re Tr M_s^{-1}>/V (QCD)   = " << msqc_m
+            << " +/- " << msqc_e << "\n";
+
+  {
+    RealD diff = mstx_m - msqc_m;
+    RealD de = std::sqrt(mstx_e * mstx_e + msqc_e * msqc_e);
+    RealD ns = (de > 0) ? std::abs(diff) / de : 0.0;
+    bool pass = ns < 3.0;
+    std::cout << GridLogMessage << "[Fierz strange VEV] TXQCD = " << mstx_m
+              << " +/- " << mstx_e << "  vs QCD = " << msqc_m << " +/- "
+              << msqc_e << "  (" << ns << " sigma)"
+              << (pass ? "  PASS" : "  FAIL") << "\n";
+    if (!pass) exitcode = 1;
+  }
+
   {
     RealD ratio = sig_m / s_m;
     RealD ratio_e = std::abs(ratio) * std::sqrt(
@@ -250,8 +272,8 @@ int main(int argc, char **argv) {
   }
 
   std::cout << GridLogMessage
-            << (exitcode ? "SOME CLOVER 2pt CHECKS FAILED"
-                         : "ALL CLOVER 2pt CHECKS PASSED")
+            << (exitcode ? "SOME STOUT 2pt CHECKS FAILED"
+                         : "ALL STOUT 2pt CHECKS PASSED")
             << std::endl;
   Grid_finalize();
   return exitcode;

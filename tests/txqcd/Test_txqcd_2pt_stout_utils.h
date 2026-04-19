@@ -1,11 +1,11 @@
 #pragma once
-// Shared utilities for the TXQCD 2pt clover test suite.
+// Shared utilities for the TXQCD 2pt stout-smeared test suite.
 // Reuses physical parameters and I/O helpers from Test_txqcd_2pt_utils.h
-// but provides clover-specific config directories.
+// but provides stout-smeared config directories.
 
 #include "Test_txqcd_2pt_utils.h"
 
-namespace TxqcdTest2ptClover {
+namespace TxqcdTest2ptStout {
 
 using TxqcdTest2pt::beta;
 using TxqcdTest2pt::lambda;
@@ -33,9 +33,9 @@ using TxqcdTest2pt::TxqcdDiagnostics;
 using TxqcdTest2pt::QcdDiagnostics;
 using TxqcdTest2pt::QcdCheckpointer;
 
-inline std::string txqcd_cfg_dir() { return "configs_2pt_txqcd_csw1"; }
-inline std::string qcd_cfg_dir()   { return "configs_2pt_qcd_nf2_csw1"; }
-inline std::string meas_dir()      { return "meas_2pt_csw1"; }
+inline std::string txqcd_cfg_dir() { return "configs_2pt_txqcd_stout"; }
+inline std::string qcd_cfg_dir()   { return "configs_2pt_qcd_nf2_stout"; }
+inline std::string meas_dir()      { return "meas_2pt_stout"; }
 
 inline bool txqcd_configs_exist() { return TxqcdTest2pt::txqcd_configs_exist(txqcd_cfg_dir()); }
 inline bool qcd_configs_exist()   { return TxqcdTest2pt::qcd_configs_exist(qcd_cfg_dir()); }
@@ -51,4 +51,4 @@ inline void LoadQcdConfig(LatticeGaugeField &U, GridSerialRNG &sRNG,
   TxqcdTest2pt::LoadQcdConfig(U, sRNG, pRNG, traj, qcd_cfg_dir());
 }
 
-}  // namespace TxqcdTest2ptClover
+}  // namespace TxqcdTest2ptStout

@@ -3,6 +3,7 @@
 // of csw. Only the config directory differs.
 
 #include "Test_txqcd_2pt_clover_utils.h"
+#include <Grid/serialisation/Hdf5IO.h>
 
 using namespace TxqcdTest2ptClover;
 
@@ -108,12 +109,15 @@ int main(int argc, char **argv) {
     aux_s.push_back(cs);
   }
 
-  WriteMeasComplex(meas_dir() + "/aux_pi_txqcd.dat", aux_pi, T);
-  WriteMeasComplex(meas_dir() + "/aux_sigma_txqcd.dat", aux_sigma, T);
-  WriteMeasComplex(meas_dir() + "/aux_s_txqcd.dat", aux_s, T);
+  {
+    Hdf5Writer wr(meas_dir() + "/meas_txqcd_aux.h5");
+    write(wr, "aux_pi", aux_pi);
+    write(wr, "aux_sigma", aux_sigma);
+    write(wr, "aux_s", aux_s);
+  }
 
   std::cout << GridLogMessage << "Auxiliary clover correlators written to "
-            << meas_dir() << "/" << std::endl;
+            << meas_dir() << "/*.h5" << std::endl;
   Grid_finalize();
   return 0;
 }

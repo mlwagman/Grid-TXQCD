@@ -7,10 +7,9 @@
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
 #include <Grid/qcd/action/txqcd/TXQCDCheckpointer.h>
+#include <Grid/serialisation/Hdf5IO.h>
+#include <Grid/qcd/utils/WilsonLoops.h>
 #include <sys/stat.h>
-#include <fstream>
-#include <iomanip>
-#include <sstream>
 
 using namespace Grid;
 
@@ -20,6 +19,11 @@ namespace TxqcdTest2pt {
 constexpr RealD beta   = 5.6;
 constexpr RealD lambda = 3.0;
 constexpr RealD mass   = 0.3;
+constexpr RealD mass_s = 0.4;
+constexpr RealD csw    = 1.0;
+constexpr RealD u0     = 0.843;
+constexpr RealD stout_rho   = 0.1;
+constexpr int   stout_nsmear = 3;
 constexpr int   n_therm   = 100;
 constexpr int   n_prod    = 500;
 constexpr int   meas_skip = 10;
@@ -51,31 +55,28 @@ inline bool file_exists(const std::string &f) {
   return stat(f.c_str(), &st) == 0;
 }
 
-// ---- Config I/O ----
-inline bool txqcd_configs_exist() {
+// ---- Config I/O (parameterized by directory) ----
+inline bool txqcd_configs_exist(const std::string &dir) {
   auto trajs = meas_trajs();
   for (int t : trajs) {
-    std::string dir = txqcd_cfg_dir();
     if (!file_exists(dir + "/ckpoint_lat." + std::to_string(t))) return false;
     if (!file_exists(dir + "/ckpoint_lat_aux." + std::to_string(t))) return false;
     if (!file_exists(dir + "/ckpoint_rng." + std::to_string(t))) return false;
   }
   return true;
 }
-inline bool qcd_configs_exist() {
+inline bool qcd_configs_exist(const std::string &dir) {
   auto trajs = meas_trajs();
   for (int t : trajs) {
-    std::string dir = qcd_cfg_dir();
     if (!file_exists(dir + "/ckpoint_lat." + std::to_string(t))) return false;
     if (!file_exists(dir + "/ckpoint_rng." + std::to_string(t))) return false;
   }
   return true;
 }
 
-inline int latest_txqcd_checkpoint() {
+inline int latest_txqcd_checkpoint(const std::string &dir) {
   int latest = -1;
   for (int t = meas_skip; t <= n_therm + n_prod; t += meas_skip) {
-    std::string dir = txqcd_cfg_dir();
     if (file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
         file_exists(dir + "/ckpoint_lat_aux." + std::to_string(t)) &&
         file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
@@ -83,10 +84,9 @@ inline int latest_txqcd_checkpoint() {
   }
   return latest;
 }
-inline int latest_qcd_checkpoint() {
+inline int latest_qcd_checkpoint(const std::string &dir) {
   int latest = -1;
   for (int t = meas_skip; t <= n_therm + n_prod; t += meas_skip) {
-    std::string dir = qcd_cfg_dir();
     if (file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
         file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
       latest = t;
@@ -95,18 +95,16 @@ inline int latest_qcd_checkpoint() {
 }
 
 inline void LoadTxqcdConfig(TXQCDField &U, GridSerialRNG &sRNG,
-                            GridParallelRNG &pRNG, int traj) {
-  CheckpointerParameters CPp;
-  CPp.config_prefix = txqcd_cfg_dir() + "/ckpoint_lat";
-  CPp.rng_prefix    = txqcd_cfg_dir() + "/ckpoint_rng";
-  CPp.saveInterval = 1; CPp.format = "IEEE64BIG";
-  TXQCDCheckpointer ckpt(CPp);
-  ckpt.CheckpointRestore(traj, U, sRNG, pRNG);
+                            GridParallelRNG &pRNG, int traj,
+                            const std::string &dir) {
+  TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
+                                dir + "/ckpoint_lat",
+                                dir + "/ckpoint_rng", traj);
 }
 
 inline void LoadQcdConfig(LatticeGaugeField &U, GridSerialRNG &sRNG,
-                          GridParallelRNG &pRNG, int traj) {
-  std::string dir = qcd_cfg_dir();
+                          GridParallelRNG &pRNG, int traj,
+                          const std::string &dir) {
   std::string cf = dir + "/ckpoint_lat." + std::to_string(traj);
   std::string rf = dir + "/ckpoint_rng." + std::to_string(traj);
   FieldMetaData header;
@@ -115,9 +113,36 @@ inline void LoadQcdConfig(LatticeGaugeField &U, GridSerialRNG &sRNG,
   NerscIO::readConfiguration<GaugeStats>(U, header, cf);
 }
 
+// Convenience wrappers using default directories
+inline bool txqcd_configs_exist() { return txqcd_configs_exist(txqcd_cfg_dir()); }
+inline bool qcd_configs_exist()   { return qcd_configs_exist(qcd_cfg_dir()); }
+inline int  latest_txqcd_checkpoint() { return latest_txqcd_checkpoint(txqcd_cfg_dir()); }
+inline int  latest_qcd_checkpoint()   { return latest_qcd_checkpoint(qcd_cfg_dir()); }
+inline void LoadTxqcdConfig(TXQCDField &U, GridSerialRNG &sRNG,
+                            GridParallelRNG &pRNG, int traj) {
+  LoadTxqcdConfig(U, sRNG, pRNG, traj, txqcd_cfg_dir());
+}
+inline void LoadQcdConfig(LatticeGaugeField &U, GridSerialRNG &sRNG,
+                          GridParallelRNG &pRNG, int traj) {
+  LoadQcdConfig(U, sRNG, pRNG, traj, qcd_cfg_dir());
+}
+
+// ---- QCD checkpointer (NerscIO, shared by all gencfgs) ----
+struct QcdCheckpointer : public HmcObservable<LatticeGaugeField> {
+  std::string cfg_prefix, rng_prefix;
+  int save_interval;
+  typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
+  void TrajectoryComplete(int t, LatticeGaugeField &U, GridSerialRNG &sR,
+                          GridParallelRNG &pR) override {
+    if (t % save_interval != 0) return;
+    NerscIO::writeRNGState(sR, pR,
+                           rng_prefix + "." + std::to_string(t));
+    NerscIO::writeConfiguration<GaugeStats>(
+        U, cfg_prefix + "." + std::to_string(t), 0, 1);
+  }
+};
+
 // ---- Volume-averaged correlator from per-timeslice data ----
-//   C(dt) = (1/V4) sum_{t0} f(t0+dt) * conj(f(t0))
-// Averages over all source locations via the sum over t0.
 inline std::vector<ComplexD>
 CorrelatorFromSlice(const std::vector<ComplexD> &s, RealD V4) {
   int T = (int)s.size();
@@ -127,90 +152,6 @@ CorrelatorFromSlice(const std::vector<ComplexD> &s, RealD V4) {
       C[dt] += s[(t0 + dt) % T] * std::conj(s[t0]);
   for (auto &c : C) c /= V4;
   return C;
-}
-
-// ---- Measurement file I/O ----
-// Real: one line per config, T space-separated values.
-inline void WriteMeasReal(const std::string &fname,
-                          const std::vector<std::vector<RealD>> &data, int T) {
-  std::ofstream f(fname);
-  f << "# T=" << T << " Ncfg=" << data.size() << "\n" << std::setprecision(16);
-  for (auto &row : data) {
-    for (int t = 0; t < T; ++t) f << (t ? " " : "") << row[t];
-    f << "\n";
-  }
-}
-// Complex: pairs of (re im) per timeslice.
-inline void WriteMeasComplex(const std::string &fname,
-                             const std::vector<std::vector<ComplexD>> &data,
-                             int T) {
-  std::ofstream f(fname);
-  f << "# T=" << T << " Ncfg=" << data.size() << "\n" << std::setprecision(16);
-  for (auto &row : data) {
-    for (int t = 0; t < T; ++t)
-      f << (t ? " " : "") << row[t].real() << " " << row[t].imag();
-    f << "\n";
-  }
-}
-// Scalar per config.
-inline void WriteMeasScalar(const std::string &fname,
-                            const std::vector<RealD> &data) {
-  std::ofstream f(fname);
-  f << "# Ncfg=" << data.size() << "\n" << std::setprecision(16);
-  for (auto v : data) f << v << "\n";
-}
-
-inline std::vector<std::vector<RealD>>
-ReadMeasReal(const std::string &fname, int &T) {
-  std::ifstream f(fname);
-  if (!f) { std::cerr << "Cannot open " << fname << "\n"; std::exit(1); }
-  std::string line;
-  std::getline(f, line);
-  T = 0;
-  sscanf(line.c_str(), "# T=%d", &T);
-  std::vector<std::vector<RealD>> data;
-  while (std::getline(f, line)) {
-    if (line.empty()) continue;
-    std::istringstream ss(line);
-    std::vector<RealD> row(T);
-    for (int t = 0; t < T; ++t) ss >> row[t];
-    data.push_back(row);
-  }
-  return data;
-}
-inline std::vector<std::vector<ComplexD>>
-ReadMeasComplex(const std::string &fname, int &T) {
-  std::ifstream f(fname);
-  if (!f) { std::cerr << "Cannot open " << fname << "\n"; std::exit(1); }
-  std::string line;
-  std::getline(f, line);
-  T = 0;
-  sscanf(line.c_str(), "# T=%d", &T);
-  std::vector<std::vector<ComplexD>> data;
-  while (std::getline(f, line)) {
-    if (line.empty()) continue;
-    std::istringstream ss(line);
-    std::vector<ComplexD> row(T);
-    for (int t = 0; t < T; ++t) {
-      RealD re, im;
-      ss >> re >> im;
-      row[t] = ComplexD(re, im);
-    }
-    data.push_back(row);
-  }
-  return data;
-}
-inline std::vector<RealD> ReadMeasScalar(const std::string &fname) {
-  std::ifstream f(fname);
-  if (!f) { std::cerr << "Cannot open " << fname << "\n"; std::exit(1); }
-  std::string line;
-  std::getline(f, line);  // header
-  std::vector<RealD> data;
-  while (std::getline(f, line)) {
-    if (line.empty()) continue;
-    data.push_back(std::stod(line));
-  }
-  return data;
 }
 
 // ---- Stats ----
@@ -224,5 +165,111 @@ inline RealD vstderr(const std::vector<RealD> &v) {
   for (auto x : v) s2 += (x - m) * (x - m);
   return std::sqrt(s2 / (v.size() * (v.size() - 1)));
 }
+
+// ---- HMC diagnostics (chunk-per-checkpoint HDF5, no restart logic needed) ----
+
+template <class Field>
+class HmcDiagWriter : public HmcObservable<Field> {
+public:
+  struct ActionRef {
+    std::string name;
+    Action<Field> *action;
+  };
+
+protected:
+  std::string prefix_;
+  int interval_;
+  std::vector<ActionRef> actions_;
+  bool has_aux_;
+
+  std::vector<int>    traj_;
+  std::vector<RealD>  plaq_;
+  std::vector<RealD>  vev_sigma_, vev_s_;
+  std::vector<std::vector<RealD>> force_avg_, force_max_;
+  std::vector<std::vector<RealD>> fdt_avg_, fdt_max_;
+
+  virtual RealD get_plaq(Field &U) = 0;
+  virtual void record_aux(Field &U) {}
+
+  void flush(int traj) {
+    if (traj_.empty()) return;
+    std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
+    Hdf5Writer wr(fname);
+    write(wr, "traj", traj_);
+    write(wr, "plaq", plaq_);
+    write(wr, "force_avg", force_avg_);
+    write(wr, "force_max", force_max_);
+    write(wr, "fdt_avg", fdt_avg_);
+    write(wr, "fdt_max", fdt_max_);
+    if (has_aux_) {
+      write(wr, "vev_sigma", vev_sigma_);
+      write(wr, "vev_s", vev_s_);
+    }
+    std::vector<std::string> names;
+    for (auto &a : actions_) names.push_back(a.name);
+    write(wr, "action_names", names);
+
+    traj_.clear(); plaq_.clear();
+    force_avg_.clear(); force_max_.clear();
+    fdt_avg_.clear(); fdt_max_.clear();
+    vev_sigma_.clear(); vev_s_.clear();
+
+    std::cout << GridLogMessage << "HMC diagnostics written to " << fname << std::endl;
+  }
+
+public:
+  HmcDiagWriter(const std::string &prefix, int interval,
+                std::vector<ActionRef> acts, bool aux = false)
+      : prefix_(prefix), interval_(interval),
+        actions_(std::move(acts)), has_aux_(aux) {}
+
+  void TrajectoryComplete(int traj, Field &U, GridSerialRNG &sRNG,
+                          GridParallelRNG &pRNG) override {
+    traj_.push_back(traj);
+    plaq_.push_back(get_plaq(U));
+
+    int na = (int)actions_.size();
+    std::vector<RealD> fa(na), fm(na), fdta(na), fdtm(na);
+    for (int i = 0; i < na; ++i) {
+      fa[i]   = actions_[i].action->deriv_norm_average();
+      fm[i]   = actions_[i].action->deriv_max_average();
+      fdta[i] = actions_[i].action->Fdt_norm_average();
+      fdtm[i] = actions_[i].action->Fdt_max_average();
+    }
+    force_avg_.push_back(fa);
+    force_max_.push_back(fm);
+    fdt_avg_.push_back(fdta);
+    fdt_max_.push_back(fdtm);
+
+    record_aux(U);
+
+    if (traj % interval_ == 0) flush(traj);
+  }
+};
+
+struct TxqcdDiagnostics : HmcDiagWriter<TXQCDField> {
+  TxqcdDiagnostics(const std::string &prefix, int interval,
+            std::vector<ActionRef> acts)
+      : HmcDiagWriter(prefix, interval, std::move(acts), true) {}
+
+  RealD get_plaq(TXQCDField &U) override {
+    return WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
+  }
+  void record_aux(TXQCDField &U) override {
+    RealD V = (RealD)U.Grid()->gSites();
+    vev_sigma_.push_back(TensorRemove(sum(trace(U.sigma))).real() / V);
+    vev_s_.push_back(TensorRemove(sum(trace(U.s))).real() / V);
+  }
+};
+
+struct QcdDiagnostics : HmcDiagWriter<LatticeGaugeField> {
+  QcdDiagnostics(const std::string &prefix, int interval,
+          std::vector<ActionRef> acts)
+      : HmcDiagWriter(prefix, interval, std::move(acts), false) {}
+
+  RealD get_plaq(LatticeGaugeField &U) override {
+    return WilsonLoops<PeriodicGimplR>::avgPlaquette(U);
+  }
+};
 
 }  // namespace TxqcdTest2pt

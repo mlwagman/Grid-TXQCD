@@ -1,15 +1,17 @@
-// Step 1: Generate TXQCD and QCD gauge configurations for the 2pt test suite.
-// Skips generation if configs already exist at all measurement trajectories.
+// Step 1 (Stout): Generate TXQCD and QCD gauge configurations with stout smearing.
+// Same HMC settings as clover version, plus stout smearing of gauge links.
 //
-// TXQCD: one rational PF (|det M_TX|^1, Nf_tx=2 -> Nf=2 Wilson at aux=0)
-//        + Gaussian aux action + Wilson gauge action.
-// QCD:   one TwoFlavour PF (|det M_W|^2 = Nf=2 Wilson) + Wilson gauge action.
+// TXQCD: rational PF + LogDet (Wilson-Clover) + Gaussian aux + Wilson gauge,
+//        all evaluated on stout-smeared gauge links.
+// QCD:   TwoFlavour PF (Wilson-Clover) + Wilson gauge, stout-smeared.
 
-#include "Test_txqcd_2pt_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
-#include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
+#include "Test_txqcd_2pt_stout_utils.h"
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDSmearedConfiguration.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
-using namespace TxqcdTest2pt;
+using namespace TxqcdTest2ptStout;
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
@@ -25,11 +27,13 @@ int main(int argc, char **argv) {
   // ==================== TXQCD ====================
   if (txqcd_configs_exist()) {
     std::cout << GridLogMessage
-              << "TXQCD configs already exist, skipping generation." << std::endl;
+              << "TXQCD stout configs already exist, skipping generation."
+              << std::endl;
   } else {
     std::cout << GridLogMessage
-              << "Generating TXQCD configs (" << total_traj << " trajectories)..."
-              << std::endl;
+              << "Generating TXQCD stout configs (" << total_traj
+              << " trajectories, csw=" << csw << ", rho=" << stout_rho
+              << ", Nsmear=" << stout_nsmear << ")..." << std::endl;
     mkdir_p(txqcd_cfg_dir());
 
     GridSerialRNG   sRNG;
@@ -43,9 +47,16 @@ int main(int argc, char **argv) {
                                         100, 1e-6, 1e-4);
 
     GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
+    GaugeAction.is_smeared = true;
+
     AuxiliaryFieldGaussianAction           AuxAction(lambda);
-    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params);
-    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass);
+    // AuxAction.is_smeared stays false — aux fields are not smeared
+
+    TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass, rat_params, csw);
+    PF.is_smeared = true;
+
+    TXQCDLogDetCloverEOAction         LogDet(Grid, RBGrid, mass, csw);
+    LogDet.is_smeared = true;
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);
@@ -65,14 +76,15 @@ int main(int argc, char **argv) {
 
     TXQCDField U(&Grid);
     if (latest > 0) {
-      std::cout << GridLogMessage << "Resuming TXQCD from checkpoint at traj "
+      std::cout << GridLogMessage << "Resuming TXQCD stout from checkpoint at traj "
                 << latest << std::endl;
       LoadTxqcdConfig(U, sRNG, pRNG, latest);
       start_traj = latest;
     } else {
       sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
       pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
-      TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
+      // Tepid start: Grid's stout smearing has a 0/0 singularity on cold configs
+      TXQCDCompositeImpl::TepidConfiguration(pRNG, U);
     }
 
     HMCparameters HMCp;
@@ -84,9 +96,11 @@ int main(int argc, char **argv) {
     HMCp.StartingType        = "ColdStart";
     HMCp.MD = MD;
 
-    NoSmearing<TXQCDCompositeImpl> Smear;
+    Smear_Stout<PeriodicGimplR> Stout(stout_rho);
+    TXQCDSmearedConfiguration Smear(&Grid, stout_nsmear, Stout);
+
     typedef ForceGradient<TXQCDCompositeImpl,
-                          NoSmearing<TXQCDCompositeImpl>, Reps> IntT;
+                          TXQCDSmearedConfiguration, Reps> IntT;
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(U);
 
@@ -112,11 +126,13 @@ int main(int argc, char **argv) {
   // ==================== QCD ====================
   if (qcd_configs_exist()) {
     std::cout << GridLogMessage
-              << "QCD configs already exist, skipping generation." << std::endl;
+              << "QCD stout configs already exist, skipping generation."
+              << std::endl;
   } else {
     std::cout << GridLogMessage
-              << "Generating QCD Nf=2 configs (" << total_traj
-              << " trajectories)..." << std::endl;
+              << "Generating QCD Nf=2 stout configs (" << total_traj
+              << " trajectories, csw=" << csw << ", rho=" << stout_rho
+              << ", Nsmear=" << stout_nsmear << ")..." << std::endl;
     mkdir_p(qcd_cfg_dir());
 
     GridSerialRNG   sRNG;
@@ -127,22 +143,24 @@ int main(int argc, char **argv) {
 
     LatticeGaugeField Umu(&Grid);
     if (latest > 0) {
-      std::cout << GridLogMessage << "Resuming QCD from checkpoint at traj "
+      std::cout << GridLogMessage << "Resuming QCD stout from checkpoint at traj "
                 << latest << std::endl;
       LoadQcdConfig(Umu, sRNG, pRNG, latest);
       start_traj = latest;
     } else {
       sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
       pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
-      SU<Nc>::ColdConfiguration(Umu);
+      SU<Nc>::TepidConfiguration(pRNG, Umu);
     }
 
-    WilsonFermionD FermOp(Umu, Grid, RBGrid, mass);
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    WCF FermOp(Umu, Grid, RBGrid, mass, csw, csw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     TwoFlavourPseudoFermionAction<WilsonImplR> Nf2(FermOp, CG, CG);
-    Nf2.is_smeared = false;
+    Nf2.is_smeared = true;
 
     WilsonGaugeActionR GaugeAction(beta);
+    GaugeAction.is_smeared = true;
 
     typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
     ActionLevel<LatticeGaugeField, Reps> L1(1);
@@ -167,9 +185,11 @@ int main(int argc, char **argv) {
     HMCp.StartingType        = "ColdStart";
     HMCp.MD = MD;
 
-    NoSmearing<PeriodicGimplR> Smear;
+    Smear_Stout<PeriodicGimplR> Stout(stout_rho);
+    SmearedConfiguration<PeriodicGimplR> Smear(&Grid, stout_nsmear, Stout);
+
     typedef ForceGradient<PeriodicGimplR,
-                          NoSmearing<PeriodicGimplR>, Reps> IntT;
+                          SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(Umu);
 
@@ -188,7 +208,7 @@ int main(int argc, char **argv) {
     HMC.evolve();
   }
 
-  std::cout << GridLogMessage << "Config generation complete." << std::endl;
+  std::cout << GridLogMessage << "Stout config generation complete." << std::endl;
   Grid_finalize();
   return 0;
 }

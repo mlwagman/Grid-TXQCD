@@ -187,16 +187,31 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
     std::string config, rng, smr;
     this->build_filenames(traj, Params, config, smr, rng);
     std::string auxfile = aux_filename(traj);
+    ReadConfigFiles(U, sRNG, pRNG, config, rng, auxfile);
+  }
 
-    this->check_filename(rng);
-    this->check_filename(config);
-    this->check_filename(auxfile);
+  static void ReadConfig(TXQCDField &U, GridSerialRNG &sRNG,
+                         GridParallelRNG &pRNG,
+                         const std::string &cfg_prefix,
+                         const std::string &rng_prefix,
+                         int traj) {
+    std::string ts = std::to_string(traj);
+    ReadConfigFiles(U, sRNG, pRNG,
+                    cfg_prefix + "." + ts,
+                    rng_prefix + "." + ts,
+                    cfg_prefix + "_aux." + ts);
+  }
 
+ private:
+  static void ReadConfigFiles(TXQCDField &U, GridSerialRNG &sRNG,
+                              GridParallelRNG &pRNG,
+                              const std::string &config,
+                              const std::string &rng,
+                              const std::string &auxfile) {
     FieldMetaData header;
     NerscIO::readRNGState(sRNG, pRNG, header, rng);
     NerscIO::readConfiguration<GaugeStats>(U.U, header, config);
 
-    // Read and validate header
     std::ifstream ifs(auxfile, std::ios::binary);
     if (!ifs) {
       std::cout << GridLogError
@@ -218,7 +233,6 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
     ifs.read(reinterpret_cast<char *>(&pad), sizeof(pad));
 
     if (version == kAuxVersion) {
-      // v2: packed Hermitian
       std::vector<double> buf(nsites * kSiteDoubles);
       ifs.read(reinterpret_cast<char *>(buf.data()),
                buf.size() * sizeof(double));

@@ -98,7 +98,14 @@ int main(int argc, char **argv) {
     CPp.format        = "IEEE64BIG";
     TXQCDCheckpointer ckpt(CPp);
 
-    std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt};
+    TxqcdDiagnostics diag(txqcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
+        {"PseudoFermion", &PF},
+        {"LogDet", &LogDet},
+        {"AuxGaussian", &AuxAction},
+        {"Gauge", &GaugeAction}
+    });
+
+    std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
     HMC.evolve();
   }
@@ -169,25 +176,17 @@ int main(int argc, char **argv) {
     IntT MDyn(&Grid, MD, Aset, Smear);
     Smear.set_Field(Umu);
 
-    struct QcdCkpt : public HmcObservable<LatticeGaugeField> {
-      std::string cfg_prefix, rng_prefix;
-      int save_interval;
-      typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
-      void TrajectoryComplete(int t, LatticeGaugeField &U, GridSerialRNG &sR,
-                              GridParallelRNG &pR) override {
-        if (t % save_interval != 0) return;
-        NerscIO::writeRNGState(sR, pR,
-                               rng_prefix + "." + std::to_string(t));
-        NerscIO::writeConfiguration<GaugeStats>(
-            U, cfg_prefix + "." + std::to_string(t), 0, 1);
-      }
-    };
-    QcdCkpt ckpt;
+    QcdCheckpointer ckpt;
     ckpt.cfg_prefix    = qcd_cfg_dir() + "/ckpoint_lat";
     ckpt.rng_prefix    = qcd_cfg_dir() + "/ckpoint_rng";
     ckpt.save_interval = meas_skip;
 
-    std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt};
+    QcdDiagnostics diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
+        {"Nf2", &Nf2},
+        {"Gauge", &GaugeAction}
+    });
+
+    std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);
     HMC.evolve();
   }

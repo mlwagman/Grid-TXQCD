@@ -130,6 +130,7 @@ class SymanzikGaugeAction : public RBCGaugeAction<Gimpl> {
 public:
   INHERIT_GIMPL_TYPES(Gimpl);
   SymanzikGaugeAction(RealD beta) : RBCGaugeAction<Gimpl>(beta,-1.0/12.0) {};
+  SymanzikGaugeAction(RealD beta, RealD u0) : RBCGaugeAction<Gimpl>(beta,-1.0/(12.0*u0*u0)) {};
   virtual std::string action_name(){return "SymanzikGaugeAction";}
 };
 
