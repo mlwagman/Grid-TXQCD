@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     int latest = latest_txqcd_checkpoint();
 
     RealD cg_tol = 1e-8;
-    OneFlavourRationalParams rat_params(1e-4, 200.0, cg_max, cg_tol, 12, 64,
+    OneFlavourRationalParams rat_params(1e-4, 200.0, cg_max, cg_tol, 16, 64,
                                         100, 1e-6, 1e-4);
 
     typedef SymanzikGaugeAction<PeriodicGimplR> SymanzikR;
@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
     // Strange quark: standard QCD one-flavor RHMC, wrapped for TXQCD HMC
     typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
     WCF StrangeFermOp(U.U, Grid, RBGrid, mass_s, csw, csw);
-    OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 12, 64,
+    OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 16, 64,
                                          100, 1e-6, 1e-4);
     OneFlavourRationalPseudoFermionAction<WilsonImplR> StrangePF(StrangeFermOp,
                                                                   strange_rat);
@@ -98,10 +98,11 @@ int main(int argc, char **argv) {
     MD.MDsteps = 10;
     MD.trajL = 0.5;
 
+    int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
-    HMCp.Trajectories        = total_traj - start_traj;
-    HMCp.NoMetropolisUntil   = n_therm;
+    HMCp.Trajectories        = total_traj - no_metrop - start_traj;
+    HMCp.NoMetropolisUntil   = no_metrop;
     HMCp.MetropolisTest      = true;
     HMCp.PerformRandomShift  = false;
     HMCp.StartingType        = "ColdStart";
@@ -122,13 +123,14 @@ int main(int argc, char **argv) {
     CPp.format        = "IEEE64BIG";
     TXQCDCheckpointer ckpt(CPp);
 
-    TxqcdDiagnostics diag(txqcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
+    TxqcdSmearedDiagnostics<TXQCDSmearedConfiguration> diag(
+        txqcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
         {"PseudoFermion", &PF},
         {"LogDet", &LogDet},
         {"AuxGaussian", &AuxAction},
         {"StrangeQuark", &StrangeAdapter},
         {"Gauge", &GaugeAction}
-    });
+    }, Smear, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
 
     std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
@@ -173,7 +175,7 @@ int main(int argc, char **argv) {
 
     // Strange quark: one-flavor RHMC
     WCF StrangeFermOp(Umu, Grid, RBGrid, mass_s, csw, csw);
-    OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, 1e-8, 12, 64,
+    OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, 1e-8, 16, 64,
                                          100, 1e-6, 1e-4);
     OneFlavourRationalPseudoFermionAction<WilsonImplR> StrangePF(StrangeFermOp,
                                                                   strange_rat);
@@ -197,10 +199,11 @@ int main(int argc, char **argv) {
     MD.MDsteps = 10;
     MD.trajL = 0.5;
 
+    int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
-    HMCp.Trajectories        = total_traj - start_traj;
-    HMCp.NoMetropolisUntil   = n_therm;
+    HMCp.Trajectories        = total_traj - no_metrop - start_traj;
+    HMCp.NoMetropolisUntil   = no_metrop;
     HMCp.MetropolisTest      = true;
     HMCp.PerformRandomShift  = false;
     HMCp.StartingType        = "ColdStart";
@@ -219,11 +222,12 @@ int main(int argc, char **argv) {
     ckpt.rng_prefix    = qcd_cfg_dir() + "/ckpoint_rng";
     ckpt.save_interval = meas_skip;
 
-    QcdDiagnostics diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
+    QcdSmearedDiagnostics<SmearedConfiguration<PeriodicGimplR>> diag(
+        qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
         {"Nf2", &Nf2},
         {"StrangeQuark", &StrangePF},
         {"Gauge", &GaugeAction}
-    });
+    }, Smear, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
 
     std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);

@@ -31,6 +31,7 @@ constexpr int   meas_skip = 10;
 constexpr RealD meas_tol = 1e-10;
 constexpr int   cg_max   = 10000;
 constexpr int   n_noise  = 32;
+constexpr int   n_vev_noise = 8;
 
 inline Coordinate default_latt() { return Coordinate(std::vector<int>{4, 4, 4, 8}); }
 inline Coordinate src_site()     { return Coordinate(std::vector<int>{0, 0, 0, 0}); }
@@ -191,7 +192,7 @@ protected:
   virtual RealD get_plaq(Field &U) = 0;
   virtual void record_aux(Field &U) {}
 
-  void flush(int traj) {
+  virtual void flush(int traj) {
     if (traj_.empty()) return;
     std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
     Hdf5Writer wr(fname);
@@ -248,27 +249,196 @@ public:
 };
 
 struct TxqcdDiagnostics : HmcDiagWriter<TXQCDField> {
+  GridCartesian &grid_;
+  GridRedBlackCartesian &rbgrid_;
+  GridParallelRNG &prng_;
+  RealD mass_, csw_;
+  int n_vev_noise_;
+  std::vector<RealD> vev_trminv_;
+
   TxqcdDiagnostics(const std::string &prefix, int interval,
-            std::vector<ActionRef> acts)
-      : HmcDiagWriter(prefix, interval, std::move(acts), true) {}
+            std::vector<ActionRef> acts,
+            GridCartesian &grid, GridRedBlackCartesian &rbgrid,
+            GridParallelRNG &prng, RealD mass, RealD csw, int n_vev_noise)
+      : HmcDiagWriter(prefix, interval, std::move(acts), true),
+        grid_(grid), rbgrid_(rbgrid), prng_(prng),
+        mass_(mass), csw_(csw), n_vev_noise_(n_vev_noise) {}
 
   RealD get_plaq(TXQCDField &U) override {
     return WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
   }
+
+  virtual LatticeGaugeField get_vev_gauge(TXQCDField &U) { return U.U; }
+
+  virtual RealD compute_trminv(LatticeGaugeField &Uvev) {
+    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_);
+    MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+    ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+    RealD V = (RealD)grid_.gSites();
+    RealD acc = 0.0;
+    for (int h = 0; h < n_vev_noise_; ++h) {
+      LatticeFermion eta(&grid_), b(&grid_), x(&grid_);
+      gaussian(prng_, eta);
+      Dw.Mdag(eta, b);
+      x = Zero();
+      CG(HermOp, b, x);
+      acc += innerProduct(eta, x).real() / (2.0 * V);
+    }
+    return acc / n_vev_noise_;
+  }
+
   void record_aux(TXQCDField &U) override {
     RealD V = (RealD)U.Grid()->gSites();
     vev_sigma_.push_back(TensorRemove(sum(trace(U.sigma))).real() / V);
     vev_s_.push_back(TensorRemove(sum(trace(U.s))).real() / V);
+
+    LatticeGaugeField Uvev = get_vev_gauge(U);
+    vev_trminv_.push_back(compute_trminv(Uvev));
+  }
+
+  void flush(int traj) override {
+    if (traj_.empty()) return;
+    std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
+    Hdf5Writer wr(fname);
+    write(wr, "traj", traj_);
+    write(wr, "plaq", plaq_);
+    write(wr, "force_avg", force_avg_);
+    write(wr, "force_max", force_max_);
+    write(wr, "fdt_avg", fdt_avg_);
+    write(wr, "fdt_max", fdt_max_);
+    write(wr, "vev_sigma", vev_sigma_);
+    write(wr, "vev_s", vev_s_);
+    write(wr, "vev_trminv", vev_trminv_);
+    std::vector<std::string> names;
+    for (auto &a : actions_) names.push_back(a.name);
+    write(wr, "action_names", names);
+
+    traj_.clear(); plaq_.clear();
+    force_avg_.clear(); force_max_.clear();
+    fdt_avg_.clear(); fdt_max_.clear();
+    vev_sigma_.clear(); vev_s_.clear();
+    vev_trminv_.clear();
+
+    std::cout << GridLogMessage << "HMC diagnostics written to " << fname << std::endl;
   }
 };
 
 struct QcdDiagnostics : HmcDiagWriter<LatticeGaugeField> {
+  GridCartesian &grid_;
+  GridRedBlackCartesian &rbgrid_;
+  GridParallelRNG &prng_;
+  RealD mass_, csw_;
+  int n_vev_noise_;
+  std::vector<RealD> vev_trminv_;
+
   QcdDiagnostics(const std::string &prefix, int interval,
-          std::vector<ActionRef> acts)
-      : HmcDiagWriter(prefix, interval, std::move(acts), false) {}
+          std::vector<ActionRef> acts,
+          GridCartesian &grid, GridRedBlackCartesian &rbgrid,
+          GridParallelRNG &prng, RealD mass, RealD csw, int n_vev_noise)
+      : HmcDiagWriter(prefix, interval, std::move(acts), false),
+        grid_(grid), rbgrid_(rbgrid), prng_(prng),
+        mass_(mass), csw_(csw), n_vev_noise_(n_vev_noise) {}
 
   RealD get_plaq(LatticeGaugeField &U) override {
     return WilsonLoops<PeriodicGimplR>::avgPlaquette(U);
+  }
+
+  virtual LatticeGaugeField get_vev_gauge(LatticeGaugeField &U) { return U; }
+
+  virtual RealD compute_trminv(LatticeGaugeField &Uvev) {
+    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_);
+    MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+    ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+    RealD V = (RealD)grid_.gSites();
+    RealD acc = 0.0;
+    for (int h = 0; h < n_vev_noise_; ++h) {
+      LatticeFermion eta(&grid_), b(&grid_), x(&grid_);
+      gaussian(prng_, eta);
+      Dw.Mdag(eta, b);
+      x = Zero();
+      CG(HermOp, b, x);
+      acc += innerProduct(eta, x).real() / (2.0 * V);
+    }
+    return acc / n_vev_noise_;
+  }
+
+  void measure_vev(LatticeGaugeField &U) {
+    LatticeGaugeField Uvev = get_vev_gauge(U);
+    vev_trminv_.push_back(compute_trminv(Uvev));
+  }
+
+  void TrajectoryComplete(int traj, LatticeGaugeField &U, GridSerialRNG &sRNG,
+                          GridParallelRNG &pRNG) override {
+    measure_vev(U);
+    HmcDiagWriter<LatticeGaugeField>::TrajectoryComplete(traj, U, sRNG, pRNG);
+  }
+
+  void flush(int traj) override {
+    if (traj_.empty()) return;
+    std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
+    Hdf5Writer wr(fname);
+    write(wr, "traj", traj_);
+    write(wr, "plaq", plaq_);
+    write(wr, "force_avg", force_avg_);
+    write(wr, "force_max", force_max_);
+    write(wr, "fdt_avg", fdt_avg_);
+    write(wr, "fdt_max", fdt_max_);
+    write(wr, "vev_trminv", vev_trminv_);
+    std::vector<std::string> names;
+    for (auto &a : actions_) names.push_back(a.name);
+    write(wr, "action_names", names);
+
+    traj_.clear(); plaq_.clear();
+    force_avg_.clear(); force_max_.clear();
+    fdt_avg_.clear(); fdt_max_.clear();
+    vev_trminv_.clear();
+
+    std::cout << GridLogMessage << "HMC diagnostics written to " << fname << std::endl;
+  }
+};
+
+// ---- Smeared VEV monitoring ----
+// Overrides get_vev_gauge to measure Tr M^{-1} on stout-smeared links.
+
+template <class SmearPolicy, class Base = TxqcdDiagnostics>
+struct TxqcdSmearedDiagnostics : Base {
+  SmearPolicy &smear_;
+  using ActionRef = typename HmcDiagWriter<TXQCDField>::ActionRef;
+
+  TxqcdSmearedDiagnostics(const std::string &prefix, int interval,
+                           std::vector<ActionRef> acts,
+                           SmearPolicy &smear,
+                           GridCartesian &grid, GridRedBlackCartesian &rbgrid,
+                           GridParallelRNG &prng,
+                           RealD mass, RealD csw, int n_vev_noise)
+      : Base(prefix, interval, std::move(acts),
+             grid, rbgrid, prng, mass, csw, n_vev_noise),
+        smear_(smear) {}
+
+  LatticeGaugeField get_vev_gauge(TXQCDField &U) override {
+    smear_.set_Field(U);
+    return smear_.get_SmearedU().U;
+  }
+};
+
+template <class SmearPolicy, class Base = QcdDiagnostics>
+struct QcdSmearedDiagnostics : Base {
+  SmearPolicy &smear_;
+  using ActionRef = typename HmcDiagWriter<LatticeGaugeField>::ActionRef;
+
+  QcdSmearedDiagnostics(const std::string &prefix, int interval,
+                         std::vector<ActionRef> acts,
+                         SmearPolicy &smear,
+                         GridCartesian &grid, GridRedBlackCartesian &rbgrid,
+                         GridParallelRNG &prng,
+                         RealD mass, RealD csw, int n_vev_noise)
+      : Base(prefix, interval, std::move(acts),
+             grid, rbgrid, prng, mass, csw, n_vev_noise),
+        smear_(smear) {}
+
+  LatticeGaugeField get_vev_gauge(LatticeGaugeField &U) override {
+    smear_.set_Field(U);
+    return smear_.get_SmearedU();
   }
 };
 

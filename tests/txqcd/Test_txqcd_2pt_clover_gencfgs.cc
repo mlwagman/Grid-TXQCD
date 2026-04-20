@@ -76,10 +76,11 @@ int main(int argc, char **argv) {
       TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
     }
 
+    int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
-    HMCp.Trajectories        = total_traj - start_traj;
-    HMCp.NoMetropolisUntil   = n_therm;
+    HMCp.Trajectories        = total_traj - no_metrop - start_traj;
+    HMCp.NoMetropolisUntil   = no_metrop;
     HMCp.MetropolisTest      = true;
     HMCp.PerformRandomShift  = false;
     HMCp.StartingType        = "ColdStart";
@@ -103,7 +104,7 @@ int main(int argc, char **argv) {
         {"LogDet", &LogDet},
         {"AuxGaussian", &AuxAction},
         {"Gauge", &GaugeAction}
-    });
+    }, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
 
     std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
@@ -161,10 +162,11 @@ int main(int argc, char **argv) {
     MD.MDsteps = 10;
     MD.trajL = 0.5;
 
+    int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
-    HMCp.Trajectories        = total_traj - start_traj;
-    HMCp.NoMetropolisUntil   = n_therm;
+    HMCp.Trajectories        = total_traj - no_metrop - start_traj;
+    HMCp.NoMetropolisUntil   = no_metrop;
     HMCp.MetropolisTest      = true;
     HMCp.PerformRandomShift  = false;
     HMCp.StartingType        = "ColdStart";
@@ -184,7 +186,7 @@ int main(int argc, char **argv) {
     QcdDiagnostics diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
         {"Nf2", &Nf2},
         {"Gauge", &GaugeAction}
-    });
+    }, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
 
     std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);

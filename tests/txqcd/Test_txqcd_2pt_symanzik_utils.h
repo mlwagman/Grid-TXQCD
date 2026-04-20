@@ -30,7 +30,10 @@ using TxqcdTest2ptStout::vmean;
 using TxqcdTest2ptStout::vstderr;
 using TxqcdTest2ptStout::TxqcdDiagnostics;
 using TxqcdTest2ptStout::QcdDiagnostics;
+using TxqcdTest2ptStout::TxqcdSmearedDiagnostics;
+using TxqcdTest2ptStout::QcdSmearedDiagnostics;
 using TxqcdTest2ptStout::QcdCheckpointer;
+using TxqcdTest2ptStout::n_vev_noise;
 
 inline std::string txqcd_cfg_dir() { return "configs_2pt_txqcd_symanzik"; }
 inline std::string qcd_cfg_dir()   { return "configs_2pt_qcd_nf2_symanzik"; }
