@@ -8,6 +8,8 @@
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
+#include <Grid/qcd/action/pseudofermion/TwoFlavourSchurCloverAction.h>
 
 using namespace TxqcdTest2ptClover;
 
@@ -143,14 +145,15 @@ int main(int argc, char **argv) {
     typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
     WCF FermOp(Umu, Grid, RBGrid, mass, csw, csw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
-    TwoFlavourPseudoFermionAction<WilsonImplR> Nf2(FermOp, CG, CG);
-    Nf2.is_smeared = false;
+    QCDLogDetCloverEOAction<WilsonImplR> LogDetAction(FermOp);
+    TwoFlavourSchurCloverAction<WilsonImplR> SchurPF(FermOp, CG, CG);
 
     WilsonGaugeActionR GaugeAction(beta);
 
     typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
     ActionLevel<LatticeGaugeField, Reps> L1(1);
-    L1.push_back(&Nf2);
+    L1.push_back(&LogDetAction);
+    L1.push_back(&SchurPF);
     ActionLevel<LatticeGaugeField, Reps> L2(4);
     L2.push_back(&GaugeAction);
     ActionSet<LatticeGaugeField, Reps> Aset;
@@ -184,7 +187,8 @@ int main(int argc, char **argv) {
     ckpt.save_interval = meas_skip;
 
     QcdDiagnostics diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
-        {"Nf2", &Nf2},
+        {"LogDet", &LogDetAction},
+        {"SchurPF", &SchurPF},
         {"Gauge", &GaugeAction}
     }, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
 

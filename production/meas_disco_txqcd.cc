@@ -108,7 +108,7 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
-  mkdir_p(data_dir());
+  mkdir_p(txqcd_data_dir());
 
   TXQCDField U(&Grid);
   TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
   RealD vev_sigma = TensorRemove(sum(trace(U.sigma))).real() / V;
   RealD vev_s = TensorRemove(sum(trace(U.s))).real() / V;
 
-  std::string outfile = data_dir() + "/disco_txqcd_" + std::to_string(traj) + ".h5";
+  std::string outfile = txqcd_data_dir() + "/disco_txqcd_" + std::to_string(traj) + ".h5";
   {
     Hdf5Writer wr(outfile);
     write(wr, "loop_ud", loop_ud);

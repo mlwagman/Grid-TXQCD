@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
   pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
 
-  mkdir_p(data_dir());
+  mkdir_p(qcd_data_dir());
 
   LatticeGaugeField Umu(&Grid);
   {
@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
   WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw);
   RealD trminv_strange = StochasticTrMinv(Dw_s, &Grid, pRNG, n_noise_disco);
 
-  std::string outfile = data_dir() + "/disco_qcd_" + std::to_string(traj) + ".h5";
+  std::string outfile = qcd_data_dir() + "/disco_qcd_" + std::to_string(traj) + ".h5";
   {
     Hdf5Writer wr(outfile);
     write(wr, "trminv", trminv);

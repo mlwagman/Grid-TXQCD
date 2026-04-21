@@ -319,18 +319,128 @@ void WilsonCloverFermion<Impl, CloverHelpers>::MDeriv(GaugeField &force, const F
   force += clover_force;
 }
 
-// Derivative parts
 template<class Impl, class CloverHelpers>
 void WilsonCloverFermion<Impl, CloverHelpers>::MooDeriv(GaugeField &mat, const FermionField &X, const FermionField &Y, int dag)
 {
-  GRID_ASSERT(0);
+  GRID_ASSERT(X.Checkerboard() == Odd);
+  GRID_ASSERT(Y.Checkerboard() == Odd);
+
+  FermionField Xf(this->GaugeGrid()), Yf(this->GaugeGrid());
+  Xf = Zero(); Yf = Zero();
+  setCheckerboard(Xf, X);
+  setCheckerboard(Yf, Y);
+
+  GaugeLinkField force_mu(mat.Grid()), lambda(mat.Grid());
+  PropagatorField Lambda(mat.Grid());
+
+  std::vector<GaugeLinkField> U(Nd, mat.Grid());
+  Impl::extractLinkField(U, this->Umu);
+
+  Impl::outerProductImpl(Lambda, Xf, Yf);
+
+  Gamma::Algebra sigma[] = {
+      Gamma::Algebra::SigmaXY,
+      Gamma::Algebra::SigmaXZ,
+      Gamma::Algebra::SigmaXT,
+      Gamma::Algebra::MinusSigmaXY,
+      Gamma::Algebra::SigmaYZ,
+      Gamma::Algebra::SigmaYT,
+      Gamma::Algebra::MinusSigmaXZ,
+      Gamma::Algebra::MinusSigmaYZ,
+      Gamma::Algebra::SigmaZT,
+      Gamma::Algebra::MinusSigmaXT,
+      Gamma::Algebra::MinusSigmaYT,
+      Gamma::Algebra::MinusSigmaZT};
+
+  int count = 0;
+  mat = Zero();
+  for (int mu = 0; mu < 4; mu++)
+  {
+    force_mu = Zero();
+    for (int nu = 0; nu < 4; nu++)
+    {
+      if (mu == nu)
+      continue;
+
+      RealD factor;
+      if (nu == 4 || mu == 4)
+      {
+        factor = 2.0 * csw_t;
+      }
+      else
+      {
+        factor = 2.0 * csw_r;
+      }
+      PropagatorField Slambda = Gamma(sigma[count]) * Lambda;
+      Impl::TraceSpinImpl(lambda, Slambda);
+      force_mu -= factor*CloverHelpers::Cmunu(U, lambda, mu, nu);
+      count++;
+    }
+
+    pokeLorentz(mat, U[mu] * force_mu, mu);
+  }
 }
 
-// Derivative parts
 template<class Impl, class CloverHelpers>
-void WilsonCloverFermion<Impl, CloverHelpers>::MeeDeriv(GaugeField &mat, const FermionField &U, const FermionField &V, int dag)
+void WilsonCloverFermion<Impl, CloverHelpers>::MeeDeriv(GaugeField &mat, const FermionField &X, const FermionField &Y, int dag)
 {
-  GRID_ASSERT(0); // not implemented yet
+  GRID_ASSERT(X.Checkerboard() == Even);
+  GRID_ASSERT(Y.Checkerboard() == Even);
+
+  FermionField Xf(this->GaugeGrid()), Yf(this->GaugeGrid());
+  Xf = Zero(); Yf = Zero();
+  setCheckerboard(Xf, X);
+  setCheckerboard(Yf, Y);
+
+  GaugeLinkField force_mu(mat.Grid()), lambda(mat.Grid());
+  PropagatorField Lambda(mat.Grid());
+
+  std::vector<GaugeLinkField> U(Nd, mat.Grid());
+  Impl::extractLinkField(U, this->Umu);
+
+  Impl::outerProductImpl(Lambda, Xf, Yf);
+
+  Gamma::Algebra sigma[] = {
+      Gamma::Algebra::SigmaXY,
+      Gamma::Algebra::SigmaXZ,
+      Gamma::Algebra::SigmaXT,
+      Gamma::Algebra::MinusSigmaXY,
+      Gamma::Algebra::SigmaYZ,
+      Gamma::Algebra::SigmaYT,
+      Gamma::Algebra::MinusSigmaXZ,
+      Gamma::Algebra::MinusSigmaYZ,
+      Gamma::Algebra::SigmaZT,
+      Gamma::Algebra::MinusSigmaXT,
+      Gamma::Algebra::MinusSigmaYT,
+      Gamma::Algebra::MinusSigmaZT};
+
+  int count = 0;
+  mat = Zero();
+  for (int mu = 0; mu < 4; mu++)
+  {
+    force_mu = Zero();
+    for (int nu = 0; nu < 4; nu++)
+    {
+      if (mu == nu)
+      continue;
+
+      RealD factor;
+      if (nu == 4 || mu == 4)
+      {
+        factor = 2.0 * csw_t;
+      }
+      else
+      {
+        factor = 2.0 * csw_r;
+      }
+      PropagatorField Slambda = Gamma(sigma[count]) * Lambda;
+      Impl::TraceSpinImpl(lambda, Slambda);
+      force_mu -= factor*CloverHelpers::Cmunu(U, lambda, mu, nu);
+      count++;
+    }
+
+    pokeLorentz(mat, U[mu] * force_mu, mu);
+  }
 }
 
 NAMESPACE_END(Grid);

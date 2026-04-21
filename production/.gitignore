@@ -1,0 +1,11 @@
+gen_txqcd_cfgs
+gen_qcd_cfgs
+meas_conn_txqcd
+meas_conn_qcd
+meas_disco_txqcd
+meas_disco_qcd
+meas_aux_txqcd
+compare
+cfgs/
+meas_2pt/
+logs/

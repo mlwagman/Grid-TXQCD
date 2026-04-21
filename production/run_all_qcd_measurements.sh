@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 
-DATA_DIR="meas_2pt"
+DATA_DIR="meas_2pt/qcd"
 CFG_DIR="cfgs/qcd"
 MIN_SIZE=1000  # minimum valid output file size in bytes
 GRID_ARGS="${@:---grid 8.8.8.16}"

@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
-  mkdir_p(data_dir());
+  mkdir_p(txqcd_data_dir());
 
   int T = latt[Nd - 1];
   RealD V4 = 1.0;
@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
   std::vector<ComplexD> aux_s(T);
   for (int t = 0; t < T; ++t) aux_s[t] = lam4 * C_s[t];
 
-  std::string outfile = data_dir() + "/aux_txqcd_" + std::to_string(traj) + ".h5";
+  std::string outfile = txqcd_data_dir() + "/aux_txqcd_" + std::to_string(traj) + ".h5";
   {
     Hdf5Writer wr(outfile);
     write(wr, "aux_pi", C_pi);

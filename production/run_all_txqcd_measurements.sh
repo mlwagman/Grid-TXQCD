@@ -2,8 +2,9 @@
 set -e
 cd "$(dirname "$0")"
 
-DATA_DIR="meas_2pt"
-CFG_DIR="cfgs/txqcd"
+LAMBDA="${LAMBDA:-0.5000}"
+DATA_DIR="meas_2pt/txqcd_lam${LAMBDA}"
+CFG_DIR="cfgs/txqcd_lam${LAMBDA}"
 MIN_SIZE=1000  # minimum valid output file size in bytes
 GRID_ARGS="${@:---grid 8.8.8.16}"
 
@@ -35,20 +36,20 @@ for ((t=N_THERM; t<N_THERM+N_PROD; t+=MEAS_SKIP)); do
   # Connected
   if [ ! -f "$DATA_DIR/conn_txqcd_$t.h5" ]; then
     echo "=== meas_conn_txqcd traj=$t ==="
-    ./meas_conn_txqcd $t $GRID_ARGS 2>&1 | tee "logs/conn_txqcd_$t.log"
+    ./meas_conn_txqcd $t $GRID_ARGS 2>&1 | tee "logs/conn_txqcd_lam${LAMBDA}_$t.log"
   fi
 
   # Disconnected
   if [ ! -f "$DATA_DIR/disco_txqcd_$t.h5" ]; then
     echo "=== meas_disco_txqcd traj=$t ==="
-    ./meas_disco_txqcd $t $GRID_ARGS 2>&1 | tee "logs/disco_txqcd_$t.log"
+    ./meas_disco_txqcd $t $GRID_ARGS 2>&1 | tee "logs/disco_txqcd_lam${LAMBDA}_$t.log"
   fi
 
   # Auxiliary fields
   if [ ! -f "$DATA_DIR/aux_txqcd_$t.h5" ]; then
     echo "=== meas_aux_txqcd traj=$t ==="
-    ./meas_aux_txqcd $t $GRID_ARGS 2>&1 | tee "logs/aux_txqcd_$t.log"
+    ./meas_aux_txqcd $t $GRID_ARGS 2>&1 | tee "logs/aux_txqcd_lam${LAMBDA}_$t.log"
   fi
 done
 
-echo "All available TXQCD measurements complete."
+echo "All available TXQCD measurements (lambda=$LAMBDA) complete."

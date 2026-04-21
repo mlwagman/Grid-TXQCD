@@ -33,7 +33,8 @@ int main(int argc, char **argv) {
   for (int mu = 0; mu < Nd; ++mu) V4 *= latt[mu];
 
   auto trajs = meas_trajs();
-  std::string dir = data_dir();
+  std::string tx_dir  = txqcd_data_dir();
+  std::string qcd_dir = qcd_data_dir();
 
   // Collect per-cfg data
   std::vector<std::vector<RealD>>    pion_conn_tx, pion_conn_qcd;
@@ -46,11 +47,11 @@ int main(int argc, char **argv) {
 
   int n_tx = 0, n_qcd = 0;
   for (int traj : trajs) {
-    std::string conn_tx = dir + "/conn_txqcd_" + std::to_string(traj) + ".h5";
-    std::string conn_qcd_f = dir + "/conn_qcd_" + std::to_string(traj) + ".h5";
-    std::string disc_tx = dir + "/disco_txqcd_" + std::to_string(traj) + ".h5";
-    std::string disc_qcd_f = dir + "/disco_qcd_" + std::to_string(traj) + ".h5";
-    std::string aux_f = dir + "/aux_txqcd_" + std::to_string(traj) + ".h5";
+    std::string conn_tx = tx_dir + "/conn_txqcd_" + std::to_string(traj) + ".h5";
+    std::string conn_qcd_f = qcd_dir + "/conn_qcd_" + std::to_string(traj) + ".h5";
+    std::string disc_tx = tx_dir + "/disco_txqcd_" + std::to_string(traj) + ".h5";
+    std::string disc_qcd_f = qcd_dir + "/disco_qcd_" + std::to_string(traj) + ".h5";
+    std::string aux_f = tx_dir + "/aux_txqcd_" + std::to_string(traj) + ".h5";
 
     if (file_exists(conn_tx)) {
       Hdf5Reader rd(conn_tx);

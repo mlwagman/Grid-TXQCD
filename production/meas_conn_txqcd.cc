@@ -72,15 +72,15 @@ static std::vector<ComplexD> NucleonCorrelator(const LatticePropagator &S_u,
 static std::vector<Coordinate> SourceGrid(const Coordinate &latt) {
   Coordinate origin = src_grid_origin();
   std::vector<Coordinate> sites;
-  for (int ix = 0; ix < src_per_dim; ++ix)
-    for (int iy = 0; iy < src_per_dim; ++iy)
-      for (int iz = 0; iz < src_per_dim; ++iz)
-        for (int it = 0; it < src_per_dim; ++it) {
+  for (int ix = 0; ix < space_src_per_dim; ++ix)
+    for (int iy = 0; iy < space_src_per_dim; ++iy)
+      for (int iz = 0; iz < space_src_per_dim; ++iz)
+        for (int it = 0; it < time_src_per_dim; ++it) {
           Coordinate s(Nd);
-          s[0] = (origin[0] + ix * latt[0] / src_per_dim) % latt[0];
-          s[1] = (origin[1] + iy * latt[1] / src_per_dim) % latt[1];
-          s[2] = (origin[2] + iz * latt[2] / src_per_dim) % latt[2];
-          s[3] = (origin[3] + it * latt[3] / src_per_dim) % latt[3];
+          s[0] = (origin[0] + ix * latt[0] / space_src_per_dim) % latt[0];
+          s[1] = (origin[1] + iy * latt[1] / space_src_per_dim) % latt[1];
+          s[2] = (origin[2] + iz * latt[2] / space_src_per_dim) % latt[2];
+          s[3] = (origin[3] + it * latt[3] / time_src_per_dim) % latt[3];
           sites.push_back(s);
         }
   return sites;
@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
-  mkdir_p(data_dir());
+  mkdir_p(txqcd_data_dir());
 
   TXQCDField U(&Grid);
   TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
@@ -195,7 +195,7 @@ int main(int argc, char **argv) {
       nucl_avg[t] += all_nucleon[i][t] / (double)nsrc;
     }
 
-  std::string outfile = data_dir() + "/conn_txqcd_" + std::to_string(traj) + ".h5";
+  std::string outfile = txqcd_data_dir() + "/conn_txqcd_" + std::to_string(traj) + ".h5";
   {
     Hdf5Writer wr(outfile);
     write(wr, "pion_conn", pion_avg);
