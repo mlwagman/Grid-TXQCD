@@ -21,6 +21,10 @@ static ComplexD CompositeInner(const TXQCDFermionNf &x,
   return acc;
 }
 
+static inline RealD cmag(const ComplexD &z) {
+  return std::abs(std::complex<double>(z.real(), z.imag()));
+}
+
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
@@ -100,7 +104,7 @@ int main(int argc, char **argv) {
 
     ComplexD lhs = CompositeInner(w, g5Mv);
     ComplexD rhs = conjugate(CompositeInner(v, g5Mw));
-    RealD err = std::abs(lhs - rhs) / std::max(std::abs(lhs), 1.0);
+    RealD err = cmag(lhs - rhs) / std::max(cmag(lhs), 1.0);
     bool pass = err < 1e-12;
     std::cout << GridLogMessage << "[gamma5-herm] <w,g5 M v>=" << lhs
               << " <v,g5 M w>*=" << rhs << " rel=" << err
@@ -119,7 +123,7 @@ int main(int argc, char **argv) {
     Mop.Mdag(w, Mdw);
     ComplexD lhs = CompositeInner(w, Mv);
     ComplexD rhs = conjugate(CompositeInner(v, Mdw));
-    RealD err = std::abs(lhs - rhs) / std::max(std::abs(lhs), 1.0);
+    RealD err = cmag(lhs - rhs) / std::max(cmag(lhs), 1.0);
     bool pass = err < 1e-12;
     std::cout << GridLogMessage << "[Mdag] <w,Mv>=" << lhs
               << " <v,Mdag w>*=" << rhs << " rel=" << err

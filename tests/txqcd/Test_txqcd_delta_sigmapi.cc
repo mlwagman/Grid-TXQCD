@@ -48,7 +48,10 @@ int main(int argc, char **argv) {
 
   ComplexD lhs = CompositeInner(w, Dv);   // <w, Dv>
   ComplexD rhs = conjugate(CompositeInner(v, Dw));  // <v, Dw>*
-  RealD err = std::abs(lhs - rhs) / std::max(std::abs(lhs), 1.0);
+  auto cmag = [](const ComplexD &z) {
+    return std::abs(std::complex<double>(z.real(), z.imag()));
+  };
+  RealD err = cmag(lhs - rhs) / std::max(cmag(lhs), 1.0);
 
   std::cout << GridLogMessage << "<w,Dv>    = " << lhs << std::endl;
   std::cout << GridLogMessage << "<v,Dw>^*  = " << rhs << std::endl;

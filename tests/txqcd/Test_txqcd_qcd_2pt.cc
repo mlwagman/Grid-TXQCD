@@ -291,7 +291,7 @@ CorrelatorFromSlice(const std::vector<ComplexD> &pi_s, RealD V) {
   for (int Dt = 0; Dt < T; ++Dt) {
     for (int t0 = 0; t0 < T; ++t0) {
       int t1 = (t0 + Dt) % T;
-      C[Dt] += pi_s[t1] * std::conj(pi_s[t0]);
+      C[Dt] += pi_s[t1] * conjugate(pi_s[t0]);
     }
     C[Dt] /= V;
   }
@@ -436,7 +436,8 @@ struct TxqcdCorrObs : public HmcObservable<TXQCDField> {
     pion_disc.push_back(disc);
 
     std::cout << GridLogMessage << "[2pt TXQCD] traj=" << traj
-              << " L_du_src=" << L_du_src << " |L_ud(0)|=" << std::abs(L_ud[0])
+              << " L_du_src=" << L_du_src
+              << " |L_ud(0)|=" << std::abs(std::complex<double>(L_ud[0].real(), L_ud[0].imag()))
               << std::endl;
 
     // Volume-averaged aux correlators + raw slice sums for connected build.

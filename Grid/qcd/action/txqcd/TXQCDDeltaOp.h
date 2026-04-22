@@ -69,24 +69,42 @@ inline void axpy(TXQCDFermionNf &y, const ComplexD &a,
 
 // Apply Delta_{sigma,pi}: result[a] = sum_b (sigma_{a,b} in[b] + pi_{a,b} g5 in[b])
 // where sigma and pi are Nf x Nf Hermitian flavor-matrix site lattices.
+//
+// Uses direct autoView + thread_for (matching HermitianFlavorForce /
+// FlavorBilinear) so the Nf=2 flavor-matrix element access stays consistent
+// with the pattern known to work on GPU. The Nf=2 flavor loop is hardcoded.
 inline void ApplyDeltaSigmaPi(const LatticeSigmaField &sigma,
                               const LatticePiField &pi,
                               const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+  static_assert(TxqcdNf == 2, "ApplyDeltaSigmaPi unroll assumes Nf=2");
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
   std::array<LatticeFermion, TxqcdNf> g5_in{{LatticeFermion(grid),
                                              LatticeFermion(grid)}};
   for (int b = 0; b < TxqcdNf; ++b) g5_in[b] = g5 * in.f[b];
 
+  autoView(sigmav, sigma, CpuRead);
+  autoView(piv,    pi,    CpuRead);
+  autoView(in0v,   in.f[0], CpuRead);
+  autoView(in1v,   in.f[1], CpuRead);
+  autoView(g0v,    g5_in[0], CpuRead);
+  autoView(g1v,    g5_in[1], CpuRead);
+
   for (int a = 0; a < TxqcdNf; ++a) {
-    out.f[a] = Zero();
-    for (int b = 0; b < TxqcdNf; ++b) {
-      // Storage is iScalar<iScalar<iMatrix<vComplex,Nf>>>; the matrix is at
-      // tensor level 2.
-      auto s_ab = PeekIndex<2>(sigma, a, b);
-      auto p_ab = PeekIndex<2>(pi, a, b);
-      out.f[a] = out.f[a] + s_ab * in.f[b] + p_ab * g5_in[b];
-    }
+    autoView(outav, out.f[a], CpuWrite);
+    thread_for(ss, grid->oSites(), {
+      auto sa0 = sigmav[ss]()()(a, 0);
+      auto sa1 = sigmav[ss]()()(a, 1);
+      auto pa0 = piv[ss]()()(a, 0);
+      auto pa1 = piv[ss]()()(a, 1);
+      for (int alpha = 0; alpha < Ns; ++alpha) {
+        for (int i = 0; i < Nc; ++i) {
+          outav[ss]()(alpha)(i) =
+              sa0 * in0v[ss]()(alpha)(i) + sa1 * in1v[ss]()(alpha)(i)
+            + pa0 *  g0v[ss]()(alpha)(i) + pa1 *  g1v[ss]()(alpha)(i);
+        }
+      }
+    });
   }
 }
 

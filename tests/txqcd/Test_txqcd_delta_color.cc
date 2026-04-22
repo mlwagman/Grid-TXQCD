@@ -56,7 +56,10 @@ int main(int argc, char **argv) {
                        const TXQCDFermionNf &Dw) {
     ComplexD lhs = CompositeInner(w, Dv);
     ComplexD rhs = conjugate(CompositeInner(v, Dw));
-    RealD err = std::abs(lhs - rhs) / std::max(std::abs(lhs), 1.0);
+    auto cmag = [](const ComplexD &z) {
+      return std::abs(std::complex<double>(z.real(), z.imag()));
+    };
+    RealD err = cmag(lhs - rhs) / std::max(cmag(lhs), 1.0);
     std::cout << GridLogMessage << "[" << name << "] <w,Dv>=" << lhs
               << " <v,Dw>*=" << rhs << " rel=" << err
               << (err < 1e-12 ? "  PASS" : "  FAIL") << std::endl;

@@ -37,10 +37,20 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
                                         const TXQCDFermionNf &X) {
   GridBase *grid = Y.Grid();
   LatticeSigmaField G(grid); G = Zero();
+  autoView(Gv, G, CpuWrite);
   for (int a = 0; a < TxqcdNf; ++a) {
+    autoView(Yv, Y.f[a], CpuRead);
     for (int b = 0; b < TxqcdNf; ++b) {
-      auto gab = localInnerProduct(Y.f[a], X.f[b]); // LatticeComplex-like
-      PokeIndex<2>(G, gab, a, b);
+      autoView(Xv, X.f[b], CpuRead);
+      thread_for(ss, grid->oSites(), {
+        vComplex acc; acc = Zero();
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int i = 0; i < Nc; ++i) {
+            acc = acc + conjugate(Yv[ss]()(alpha)(i)) * Xv[ss]()(alpha)(i);
+          }
+        }
+        Gv[ss]()()(a, b) = acc;
+      });
     }
   }
   return G;
@@ -48,15 +58,17 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
 
 // F = -(G^T + G^*) per site, with G the flavor bilinear above. Hermitian.
 inline LatticeSigmaField HermitianFlavorForce(const LatticeSigmaField &G) {
-  LatticeSigmaField F(G.Grid()); F = Zero();
-  for (int a = 0; a < TxqcdNf; ++a) {
-    for (int b = 0; b < TxqcdNf; ++b) {
-      auto gba = PeekIndex<2>(G, b, a);
-      auto gab = PeekIndex<2>(G, a, b);
-      auto entry = -(gba + conjugate(gab));
-      PokeIndex<2>(F, entry, a, b);
+  GridBase *grid = G.Grid();
+  LatticeSigmaField F(grid); F = Zero();
+  autoView(Fv, F, CpuWrite);
+  autoView(Gv, G, CpuRead);
+  thread_for(ss, grid->oSites(), {
+    for (int a = 0; a < TxqcdNf; ++a) {
+      for (int b = 0; b < TxqcdNf; ++b) {
+        Fv[ss]()()(a, b) = -(Gv[ss]()()(b, a) + conjugate(Gv[ss]()()(a, b)));
+      }
     }
-  }
+  });
   return F;
 }
 

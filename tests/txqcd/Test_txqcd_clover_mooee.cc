@@ -119,11 +119,11 @@ int main(int argc, char **argv) {
         for (int i = 0; i < Nc; ++i) {
           auto t = txqcd_s[0]()(alpha)(i);
           auto w = wc_s[0]()(alpha)(i);
-          if (std::abs(ComplexD(t.real(), t.imag())) > 1e-10 ||
-              std::abs(ComplexD(w.real(), w.imag())) > 1e-10) {
+          if (std::abs(std::complex<double>(t.real(), t.imag())) > 1e-10 ||
+              std::abs(std::complex<double>(w.real(), w.imag())) > 1e-10) {
             std::cout << GridLogMessage << "    (alpha=" << alpha << ",i=" << i
                       << "): TXQCD=" << t << " WC=" << w;
-            if (std::abs(ComplexD(w.real(), w.imag())) > 1e-10)
+            if (std::abs(std::complex<double>(w.real(), w.imag())) > 1e-10)
               std::cout << " ratio=" << ComplexD(t.real(),t.imag())/ComplexD(w.real(),w.imag());
             std::cout << std::endl;
           }
