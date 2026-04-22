@@ -863,10 +863,10 @@ class IldgReader : public GridLimeReader {
     }
 
     //////////////////////////////////////////////////////
-    // Minimally must find binary segment and checksum
-    // Since this is an ILDG reader require ILDG format
+    // Minimally must find binary segment and checksum.
+    // The ILDG LFN record is optional — chroma-produced ILDG configs (which
+    // otherwise satisfy the ILDG spec) don't always include it.
     //////////////////////////////////////////////////////
-    GRID_ASSERT(found_ildgLFN);
     GRID_ASSERT(found_ildgBinary);
     GRID_ASSERT(found_ildgFormat);
     GRID_ASSERT(found_scidacChecksum);

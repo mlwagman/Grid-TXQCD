@@ -7,7 +7,7 @@ LIBS     = $(shell $(GRID_CONFIG) --libs)
 PROGRAMS = gen_txqcd_cfgs gen_qcd_cfgs \
            meas_conn_txqcd meas_conn_qcd \
            meas_disco_txqcd meas_disco_qcd \
-           meas_aux_txqcd compare
+           meas_aux_txqcd compare compute_plaq compute_vev
 
 all: $(PROGRAMS)
 
