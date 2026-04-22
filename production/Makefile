@@ -1,7 +1,7 @@
-GRID_CONFIG = ../build/grid-config
+GRID_CONFIG = ../build-gpu/grid-config
 CXX      = $(shell $(GRID_CONFIG) --cxx)
-CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I../build/Grid
-LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L../build/Grid
+CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I../build-gpu/Grid
+LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L../build-gpu/Grid
 LIBS     = $(shell $(GRID_CONFIG) --libs)
 
 PROGRAMS = gen_txqcd_cfgs gen_qcd_cfgs \

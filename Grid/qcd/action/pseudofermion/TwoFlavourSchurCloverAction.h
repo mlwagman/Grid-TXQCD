@@ -24,7 +24,7 @@ public:
 
   typedef WilsonCloverFermion<Impl, CloverHelpers> FermionOperator;
 
-private:
+protected:
   FermionOperator &FermOp;
   OperatorFunction<FermionField> &DerivativeSolver;
   OperatorFunction<FermionField> &ActionSolver;

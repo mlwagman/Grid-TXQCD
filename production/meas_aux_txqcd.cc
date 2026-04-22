@@ -60,7 +60,7 @@ CorrelatorFromSlice(const std::vector<ComplexD> &s, RealD V4) {
   std::vector<ComplexD> C(T, 0.0);
   for (int dt = 0; dt < T; ++dt)
     for (int t0 = 0; t0 < T; ++t0)
-      C[dt] += s[(t0 + dt) % T] * std::conj(s[t0]);
+      C[dt] += s[(t0 + dt) % T] * conjugate(s[t0]);
   for (auto &c : C) c /= V4;
   return C;
 }

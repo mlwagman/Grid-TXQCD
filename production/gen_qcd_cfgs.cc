@@ -6,8 +6,165 @@
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/pseudofermion/TwoFlavourSchurCloverAction.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
+#include <Grid/algorithms/iterative/ConjugateGradientMixedPrec.h>
+#include <Grid/algorithms/iterative/ConjugateGradientMultiShiftMixedPrec.h>
 
 using namespace TXQCDProduction;
+
+// Mixed-precision CG wrapper that satisfies the OperatorFunction<FieldD>
+// interface expected by TwoFlavourSchurCloverAction as its derivative solver.
+// Assumes the single-precision Schur operator has already been updated (by
+// TwoFlavourSchurCloverActionMP::deriv() below) to match the current gauge.
+namespace Grid {
+template <class FieldD, class FieldF, class SchurOpD, class SchurOpF>
+class MixedPrecCGWrapper : public OperatorFunction<FieldD> {
+ public:
+  using OperatorFunction<FieldD>::operator();
+
+  MixedPrecCGWrapper(RealD tol, int max_inner, int max_outer,
+                     GridBase *rbgrid_f,
+                     SchurOpD &schur_d, SchurOpF &schur_f)
+      : tol_(tol), max_inner_(max_inner), max_outer_(max_outer),
+        rbgrid_f_(rbgrid_f), schur_d_(schur_d), schur_f_(schur_f) {}
+
+  void operator()(LinearOperatorBase<FieldD> &LinOp_unused,
+                  const FieldD &src, FieldD &sol) override {
+    MixedPrecisionConjugateGradient<FieldD, FieldF> MPCG(
+        tol_, max_inner_, max_outer_, rbgrid_f_, schur_f_, schur_d_);
+    MPCG(src, sol);
+  }
+
+ private:
+  RealD tol_;
+  int max_inner_, max_outer_;
+  GridBase *rbgrid_f_;
+  SchurOpD &schur_d_;
+  SchurOpF &schur_f_;
+};
+
+// Subclass of TwoFlavourSchurCloverAction that keeps the SP operator in sync
+// with the raw gauge field before each deriv().  Passes the CG work to the
+// mixed-precision wrapper installed as the DerivativeSolver.
+template <class ImplD, class ImplF>
+class TwoFlavourSchurCloverActionMP
+    : public TwoFlavourSchurCloverAction<ImplD> {
+ public:
+  typedef TwoFlavourSchurCloverAction<ImplD> Base;
+  typedef WilsonCloverFermion<ImplF, CloverHelpers<ImplF>> FermOpF;
+  typedef typename ImplD::GaugeField GaugeField;
+
+  TwoFlavourSchurCloverActionMP(typename Base::FermionOperator &opD,
+                                FermOpF &opF,
+                                OperatorFunction<typename Base::FermionField> &DS,
+                                OperatorFunction<typename Base::FermionField> &AS)
+      : Base(opD, DS, AS), opF_(opF) {}
+
+  void deriv(const GaugeField &U, GaugeField &dSdU) override {
+    // Refresh SP operator from the raw gauge field U (per-mu precisionChange).
+    typename ImplF::GaugeField UmuF(opF_.GaugeGrid());
+    typename ImplD::GaugeLinkField U_d(U.Grid());
+    typename ImplF::GaugeLinkField U_f(opF_.GaugeGrid());
+    for (int mu = 0; mu < Nd; ++mu) {
+      U_d = PeekIndex<LorentzIndex>(U, mu);
+      precisionChange(U_f, U_d);
+      PokeIndex<LorentzIndex>(UmuF, U_f, mu);
+    }
+    opF_.ImportGauge(UmuF);
+    // Delegate to base; base's DerivativeSolver is MixedPrecCGWrapper which
+    // will invoke MPCG against the now-synced SP Schur operator.
+    Base::deriv(U, dSdU);
+  }
+
+ private:
+  FermOpF &opF_;
+};
+}  // namespace Grid
+
+// Mixed-precision variant of OneFlavourSchurCloverRationalAction: overrides
+// deriv() to use ConjugateGradientMultiShiftMixedPrec. refresh() and S() are
+// inherited (they run multishift CG in double once per trajectory, so keeping
+// them full-DP avoids any accept/reject bias; only the MD force is critical
+// for cost).
+namespace Grid {
+template <class ImplD, class ImplF>
+class OneFlavourSchurCloverRationalActionMP
+    : public OneFlavourSchurCloverRationalAction<ImplD> {
+ public:
+  typedef OneFlavourSchurCloverRationalAction<ImplD> Base;
+  typedef typename Base::FermionField FermionField;
+  typedef typename Base::FermionOperator FermOpD;
+  typedef WilsonCloverFermion<ImplF, CloverHelpers<ImplF>> FermOpF;
+  typedef typename ImplD::GaugeField GaugeField;
+
+  OneFlavourSchurCloverRationalActionMP(FermOpD &opD, FermOpF &opF,
+                                        GridBase *sp_rbgrid,
+                                        OneFlavourRationalParams &p,
+                                        int reliable_update_freq = 50)
+      : Base(opD, p), opF_(opF), sp_rbgrid_(sp_rbgrid),
+        reliable_freq_(reliable_update_freq) {}
+
+  void deriv(const GaugeField &U, GaugeField &dSdU) override {
+    auto &FermOp   = this->FermOp;
+    auto &PhiOdd   = this->PhiOdd;
+    auto &PowerNegHalf = this->PowerNegHalf;
+    const int Npole = PowerNegHalf.poles.size();
+
+    std::vector<FermionField> MPhi_k(Npole, FermOp.FermionRedBlackGrid());
+    FermionField X(FermOp.FermionRedBlackGrid());
+    FermionField Y(FermOp.FermionRedBlackGrid());
+    GaugeField tmp(FermOp.GaugeGrid());
+    GridBase *fcbgrid = FermOp.FermionRedBlackGrid();
+
+    FermOp.ImportGauge(U);
+
+    // Refresh the single-precision operator from the RAW gauge field U.
+    // (Not FermOp.Umu, which is the internally-doubled -0.5*U storage and
+    // would get re-doubled if fed to opF_.ImportGauge.)
+    typename ImplF::GaugeField UmuF(opF_.GaugeGrid());
+    {
+      typename ImplD::GaugeLinkField U_d(U.Grid());
+      typename ImplF::GaugeLinkField U_f(opF_.GaugeGrid());
+      for (int mu = 0; mu < Nd; ++mu) {
+        U_d = PeekIndex<LorentzIndex>(U, mu);
+        precisionChange(U_f, U_d);
+        PokeIndex<LorentzIndex>(UmuF, U_f, mu);
+      }
+    }
+    opF_.ImportGauge(UmuF);
+
+    SchurDifferentiableOperator<ImplD> Mpc(FermOp);
+    SchurDifferentiableOperator<ImplF> Mpc_f(opF_);
+
+    ConjugateGradientMultiShiftMixedPrec<FermionField,
+                                         typename ImplF::FermionField>
+        msCG(this->param.MaxIter, PowerNegHalf, sp_rbgrid_, Mpc_f, reliable_freq_);
+    msCG(Mpc, PhiOdd, MPhi_k);
+
+    dSdU = Zero();
+    for (int k = 0; k < Npole; k++) {
+      RealD ak = PowerNegHalf.residues[k];
+      X = MPhi_k[k];
+      Mpc.Mpc(X, Y);
+
+      Mpc.MpcDeriv(tmp, Y, X);          dSdU = dSdU + ak * tmp;
+      Mpc.MpcDagDeriv(tmp, X, Y);       dSdU = dSdU + ak * tmp;
+      FermOp.MooDeriv(tmp, Y, X, DaggerNo);  dSdU = dSdU + ak * tmp;
+      FermOp.MooDeriv(tmp, X, Y, DaggerYes); dSdU = dSdU + ak * tmp;
+
+      FermionField W_e(fcbgrid), Z_e(fcbgrid), tmp1(fcbgrid);
+      FermOp.Meooe(X, tmp1);      FermOp.MooeeInv(tmp1, W_e);
+      FermOp.MeooeDag(Y, tmp1);   FermOp.MooeeInvDag(tmp1, Z_e);
+      FermOp.MeeDeriv(tmp, Z_e, W_e, DaggerNo);  dSdU = dSdU + ak * tmp;
+      FermOp.MeeDeriv(tmp, W_e, Z_e, DaggerYes); dSdU = dSdU + ak * tmp;
+    }
+  }
+
+ private:
+  FermOpF &opF_;
+  GridBase *sp_rbgrid_;
+  int reliable_freq_;
+};
+}  // namespace Grid
 
 struct QcdDiag : public HmcObservable<LatticeGaugeField> {
   struct ActionRef { std::string name; Action<LatticeGaugeField> *action; };
@@ -90,6 +247,18 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
+  // Multi-stream support: if the STREAM_ID env var is set (0, 1, 2, ...),
+  // write to a stream-indexed cfg dir and offset RNG seeds so each stream is
+  // an independent Markov chain.  STREAM_ID unset => default behaviour
+  // (cfgs/qcd, original seed) for backwards compatibility.
+  int stream_id = -1;
+  if (const char *sid = std::getenv("STREAM_ID")) stream_id = std::atoi(sid);
+  std::string cfg_dir = (stream_id < 0)
+      ? qcd_cfg_dir()
+      : (qcd_cfg_dir() + "_s" + std::to_string(stream_id));
+  std::cout << GridLogMessage << "STREAM_ID=" << stream_id
+            << " cfg_dir=" << cfg_dir << std::endl;
+
   Coordinate latt = lattice_size();
   Coordinate simd = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi  = GridDefaultMpi();
@@ -97,7 +266,7 @@ int main(int argc, char **argv) {
   GridRedBlackCartesian RBGrid(&Grid);
 
   int total_traj = n_therm + n_prod;
-  mkdir_p(qcd_cfg_dir());
+  mkdir_p(cfg_dir);
 
   GridSerialRNG   sRNG;
   GridParallelRNG pRNG(&Grid);
@@ -105,45 +274,78 @@ int main(int argc, char **argv) {
   int start_traj = 0;
   int latest = -1;
   for (int t = meas_skip; t <= total_traj; t += meas_skip) {
-    if (file_exists(qcd_cfg_dir() + "/ckpoint_lat." + std::to_string(t)) &&
-        file_exists(qcd_cfg_dir() + "/ckpoint_rng." + std::to_string(t)))
+    if (file_exists(cfg_dir + "/ckpoint_lat." + std::to_string(t)) &&
+        file_exists(cfg_dir + "/ckpoint_rng." + std::to_string(t)))
       latest = t;
   }
 
   LatticeGaugeField Umu(&Grid);
   if (latest > 0) {
     std::cout << GridLogMessage << "Resuming from checkpoint at traj " << latest << std::endl;
-    std::string cf = qcd_cfg_dir() + "/ckpoint_lat." + std::to_string(latest);
-    std::string rf = qcd_cfg_dir() + "/ckpoint_rng." + std::to_string(latest);
+    std::string cf = cfg_dir + "/ckpoint_lat." + std::to_string(latest);
+    std::string rf = cfg_dir + "/ckpoint_rng." + std::to_string(latest);
     FieldMetaData header;
     NerscIO::readRNGState(sRNG, pRNG, header, rf);
     typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
     NerscIO::readConfiguration<GaugeStats>(Umu, header, cf);
     start_traj = latest;
   } else {
-    sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
-    pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
+    // Offset RNG seeds by 100 × stream_id so streams are independent.
+    int sid = std::max(0, stream_id);
+    sRNG.SeedFixedIntegers({11 + 100*sid, 12 + 100*sid, 13 + 100*sid,
+                            14 + 100*sid, 15 + 100*sid});
+    pRNG.SeedFixedIntegers({16 + 100*sid, 17 + 100*sid, 18 + 100*sid,
+                            19 + 100*sid, 20 + 100*sid});
     SU<Nc>::TepidConfiguration(pRNG, Umu);
   }
 
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
 
-  // Light quarks (Nf=2): EO-preconditioned LogDet + Schur
+  // Single-precision grid + gauge field + operator for mixed-precision CG.
+  GridCartesian        GridF(latt, GridDefaultSimd(Nd, vComplexF::Nsimd()), mpi);
+  GridRedBlackCartesian RBGridF(&GridF);
+  LatticeGaugeFieldF UmuF(&GridF);
+  {
+    LatticeColourMatrix  U_d(&Grid);
+    LatticeColourMatrixF U_f(&GridF);
+    for (int mu = 0; mu < Nd; ++mu) {
+      U_d = PeekIndex<LorentzIndex>(Umu, mu);
+      precisionChange(U_f, U_d);
+      PokeIndex<LorentzIndex>(UmuF, U_f, mu);
+    }
+  }
+  typedef WilsonCloverFermion<WilsonImplF, CloverHelpers<WilsonImplF>> WCF_f;
+  WCF_f FermOpF(UmuF, GridF, RBGridF, mass_light, csw, csw);
+
+  // Light quarks (Nf=2): EO-preconditioned LogDet + Schur.
+  // Action solver (accept/reject): tight DP CG at cg_tol=1e-8.
+  // Derivative solver (MD force): mixed-precision CG (SP inner + DP correction),
+  // outer tolerance 1e-6 (mdtol bias cancels on Metropolis accept/reject).
   WCF FermOp(Umu, Grid, RBGrid, mass_light, csw, csw);
-  ConjugateGradient<LatticeFermion> CG(cg_tol, cg_max);
+  ConjugateGradient<LatticeFermion> CG_action(cg_tol, cg_max);
+  SchurDifferentiableOperator<WilsonImplR> SchurOpD(FermOp);
+  SchurDifferentiableOperator<WilsonImplF> SchurOpF(FermOpF);
+  MixedPrecCGWrapper<LatticeFermion, LatticeFermionF,
+                     SchurDifferentiableOperator<WilsonImplR>,
+                     SchurDifferentiableOperator<WilsonImplF>>
+      CG_md(1e-6, cg_max, 50, &RBGridF, SchurOpD, SchurOpF);
   QCDLogDetCloverEOAction<WilsonImplR> LightLogDet(FermOp, 2);
   LightLogDet.is_smeared = true;
-  TwoFlavourSchurCloverAction<WilsonImplR> LightSchurPF(FermOp, CG, CG);
+  TwoFlavourSchurCloverActionMP<WilsonImplR, WilsonImplF>
+      LightSchurPF(FermOp, FermOpF, CG_md, CG_action);
   LightSchurPF.is_smeared = true;
 
-  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC
+  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC.
+  // MD force uses mixed-precision multishift CG (SP inner + DP reliable).
   WCF StrangeFermOp(Umu, Grid, RBGrid, mass_strange, csw, csw);
-  OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 16, 64,
+  WCF_f StrangeFermOpF(UmuF, GridF, RBGridF, mass_strange, csw, csw);
+  // 10 poles (chroma typically uses 10-12 for Nf=1 Wilson-Clover at this mass).
+  OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 10, 64,
                                        100, 1e-6, 1e-4);
   QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
   StrangeLogDet.is_smeared = true;
-  OneFlavourSchurCloverRationalAction<WilsonImplR> StrangeSchurPF(
-      StrangeFermOp, strange_rat);
+  OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>
+      StrangeSchurPF(StrangeFermOp, StrangeFermOpF, &RBGridF, strange_rat, 50);
   StrangeSchurPF.is_smeared = true;
 
   typedef SymanzikGaugeAction<PeriodicGimplR> SymanzikR;
@@ -151,6 +353,9 @@ int main(int argc, char **argv) {
   GaugeAction.is_smeared = true;
 
   typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
+  // Outer (fermion) level: 7 steps/trajectory.  Inner (gauge) level: 4 gauge
+  // sub-steps per fermion step -> 28 gauge force evaluations per trajectory.
+  // Mirrors chroma's Min-Norm 7 / 7x4 convention on this ensemble.
   ActionLevel<LatticeGaugeField, Reps> L1(1);
   L1.push_back(&LightLogDet);
   L1.push_back(&LightSchurPF);
@@ -163,8 +368,8 @@ int main(int argc, char **argv) {
   Aset.push_back(L2);
 
   IntegratorParameters MD;
-  MD.name = "ForceGradient";
-  MD.MDsteps = 10;
+  MD.name = "MinimumNorm2";
+  MD.MDsteps = 7;
   MD.trajL = sqrt(2.0);
 
   int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
@@ -180,8 +385,8 @@ int main(int argc, char **argv) {
   Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
   SmearedConfiguration<PeriodicGimplR> Smear(&Grid, stout_nsmear_inv, Stout);
 
-  typedef ForceGradient<PeriodicGimplR,
-                        SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
+  typedef MinimumNorm2<PeriodicGimplR,
+                       SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
   IntT MDyn(&Grid, MD, Aset, Smear);
   Smear.set_Field(Umu);
 
@@ -197,11 +402,11 @@ int main(int argc, char **argv) {
     }
   };
   Ckpt ckpt;
-  ckpt.cfg_prefix = qcd_cfg_dir() + "/ckpoint_lat";
-  ckpt.rng_prefix = qcd_cfg_dir() + "/ckpoint_rng";
+  ckpt.cfg_prefix = cfg_dir + "/ckpoint_lat";
+  ckpt.rng_prefix = cfg_dir + "/ckpoint_rng";
   ckpt.interval   = meas_skip;
 
-  QcdDiag diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
+  QcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, {
       {"LightLogDet", &LightLogDet},
       {"LightSchurPF", &LightSchurPF},
       {"StrangeLogDet", &StrangeLogDet},

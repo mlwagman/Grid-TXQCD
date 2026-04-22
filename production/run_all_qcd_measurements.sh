@@ -1,11 +1,21 @@
 #!/bin/bash
+# QCD measurements driver (conn + disc for each available config).
+#
+# Set GRID_LAUNCH to control how each measurement binary is invoked:
+#   GRID_LAUNCH="srun"              (inside a SLURM job)
+#   GRID_LAUNCH="mpirun -np 4"      (outside SLURM)
+#   GRID_LAUNCH=""                  (single rank, default)
+#
+# CLI args are forwarded as Grid args (typically --mpi mx.my.mz.mt
+# [--shm 2048 --shm-mpi 0]). Lattice size comes from params.h, not --grid.
 set -e
 cd "$(dirname "$0")"
 
+GRID_LAUNCH="${GRID_LAUNCH:-}"
 DATA_DIR="meas_2pt/qcd"
 CFG_DIR="cfgs/qcd"
 MIN_SIZE=1000  # minimum valid output file size in bytes
-GRID_ARGS="${@:---grid 8.8.8.16}"
+GRID_ARGS="${@:---mpi 1.1.1.1}"
 
 mkdir -p "$DATA_DIR" logs
 
@@ -35,13 +45,13 @@ for ((t=N_THERM; t<N_THERM+N_PROD; t+=MEAS_SKIP)); do
   # Connected
   if [ ! -f "$DATA_DIR/conn_qcd_$t.h5" ]; then
     echo "=== meas_conn_qcd traj=$t ==="
-    ./meas_conn_qcd $t $GRID_ARGS 2>&1 | tee "logs/conn_qcd_$t.log"
+    $GRID_LAUNCH ./meas_conn_qcd $t $GRID_ARGS 2>&1 | tee "logs/conn_qcd_$t.log"
   fi
 
   # Disconnected
   if [ ! -f "$DATA_DIR/disco_qcd_$t.h5" ]; then
     echo "=== meas_disco_qcd traj=$t ==="
-    ./meas_disco_qcd $t $GRID_ARGS 2>&1 | tee "logs/disco_qcd_$t.log"
+    $GRID_LAUNCH ./meas_disco_qcd $t $GRID_ARGS 2>&1 | tee "logs/disco_qcd_$t.log"
   fi
 done
 

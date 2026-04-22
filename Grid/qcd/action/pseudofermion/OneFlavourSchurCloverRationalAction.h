@@ -27,7 +27,7 @@ public:
   MultiShiftFunction PowerNegQuarter;
   MultiShiftFunction PowerNegHalf;
 
-private:
+protected:
   FermionOperator &FermOp;
   FermionField PhiOdd;
 
