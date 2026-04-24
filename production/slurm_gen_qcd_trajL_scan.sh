@@ -11,17 +11,14 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=slurm-logs/qcd_tscan.%j.out
 
-# Thermalization experiment: 4 parallel QCD streams with different trajL
-# strategies, all Nf=2+1 Wilson-Clover on LWv2 gauge action (c_plaq=β,
-# c_rect=-β/(20·u0²)), Metropolis on from traj 0, MDsteps=10, tepid start.
+# trajL scan at fixed MDs=7 (chroma's baseline for cl3_16_48_b6p1_m0p2450).
+# Post is_smeared=false fix: LW gauge action acts on thin links, so large
+# trajL should be tractable again.  Four 1-GPU QCD streams per node.
 #
-#   GPU 0: trajL=0.2                        cfgs/qcd_s800_trajL0p2
-#   GPU 1: trajL=0.1                        cfgs/qcd_s801_trajL0p1
-#   GPU 2: trajL=0.05                       cfgs/qcd_s802_trajL0p05
-#   GPU 3: trajL=sqrt(2)≈1.414, m_l=m_s=-0.15  cfgs/qcd_s803_trajL1p4_m0p15
-#
-# Stream 3 is the mass-gradient warmup candidate (heavier mass with trajL≈1.4
-# matches the chroma trajectory-length convention).
+#   GPU 0: trajL=0.5               cfgs/qcd_s820_trajL0p5
+#   GPU 1: trajL=1.0               cfgs/qcd_s821_trajL1p0
+#   GPU 2: trajL=1.4142 (√2, chroma)  cfgs/qcd_s822_trajL1p4
+#   GPU 3: trajL=2.0 (aggressive)  cfgs/qcd_s823_trajL2p0
 
 cd "$SLURM_SUBMIT_DIR"
 mkdir -p slurm-logs
@@ -32,39 +29,27 @@ export OMP_NUM_THREADS=16
 date
 nvidia-smi --query-gpu=index,name --format=csv,noheader
 
-common_env() {
-  local gpu=$1 stream=$2 suffix=$3 trajL=$4 extra=$5 log=$6
+launch_stream() {
+  local gpu=$1 stream=$2 suffix=$3 trajL=$4 log=$5
   CUDA_VISIBLE_DEVICES=$gpu STREAM_ID=$stream SUFFIX="$suffix" \
-    MDSTEPS=10 TRAJL="$trajL" INTEGRATOR=ForceGradient NO_METROP=0 \
-    WEAK_FIELD_SCALE=0.1 START_TYPE=tepid $extra \
+    MDSTEPS=7 TRAJL="$trajL" INTEGRATOR=ForceGradient NO_METROP=0 \
+    WEAK_FIELD_SCALE=0.1 START_TYPE=tepid \
     mpirun -np 1 --map-by ppr:1:socket:PE=16 \
         ./gen_qcd_cfgs --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
     >"$log" 2>&1 &
 }
 
-# GPU 0: trajL=0.2
-log0="slurm-logs/qcd_s800_trajL0p2.${SLURM_JOB_ID}.out"
-echo "[GPU 0] trajL=0.2  log=$log0"
-common_env 0 800 _trajL0p2 0.2 "" "$log0"
+launch_stream 0 820 _trajL0p5  0.5               "slurm-logs/qcd_s820_trajL0p5.${SLURM_JOB_ID}.out"
+echo "[GPU 0] trajL=0.5"
 sleep 2
-
-# GPU 1: trajL=0.1
-log1="slurm-logs/qcd_s801_trajL0p1.${SLURM_JOB_ID}.out"
-echo "[GPU 1] trajL=0.1  log=$log1"
-common_env 1 801 _trajL0p1 0.1 "" "$log1"
+launch_stream 1 821 _trajL1p0  1.0               "slurm-logs/qcd_s821_trajL1p0.${SLURM_JOB_ID}.out"
+echo "[GPU 1] trajL=1.0"
 sleep 2
-
-# GPU 2: trajL=0.05
-log2="slurm-logs/qcd_s802_trajL0p05.${SLURM_JOB_ID}.out"
-echo "[GPU 2] trajL=0.05  log=$log2"
-common_env 2 802 _trajL0p05 0.05 "" "$log2"
+launch_stream 2 822 _trajL1p4  1.4142135623730951 "slurm-logs/qcd_s822_trajL1p4.${SLURM_JOB_ID}.out"
+echo "[GPU 2] trajL=sqrt(2)"
 sleep 2
-
-# GPU 3: trajL=sqrt(2), heavier mass m_l=m_s=-0.15
-log3="slurm-logs/qcd_s803_trajL1p4_m0p15.${SLURM_JOB_ID}.out"
-echo "[GPU 3] trajL=sqrt(2)  m_l=m_s=-0.15  log=$log3"
-common_env 3 803 _trajL1p4_m0p15 1.4142135623730951 \
-  "MASS_LIGHT=-0.15 MASS_STRANGE=-0.15" "$log3"
+launch_stream 3 823 _trajL2p0  2.0               "slurm-logs/qcd_s823_trajL2p0.${SLURM_JOB_ID}.out"
+echo "[GPU 3] trajL=2.0"
 sleep 2
 
 wait
