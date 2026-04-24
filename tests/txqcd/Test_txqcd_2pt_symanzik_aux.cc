@@ -75,11 +75,26 @@ int main(int argc, char **argv) {
   mkdir_p(meas_dir());
 
   std::vector<std::vector<ComplexD>> aux_pi, aux_sigma, aux_s;
+  std::vector<RealD> vev_pi, vev_p;
+  std::vector<std::vector<RealD>> vev_t;
 
   TXQCDField U(&Grid);
   for (int traj : trajs) {
     std::cout << GridLogMessage << "[aux symanzik] traj=" << traj << std::endl;
     LoadTxqcdConfig(U, sRNG, pRNG, traj);
+
+    RealD V = (RealD)Grid.gSites();
+    vev_pi.push_back(TensorRemove(sum(trace(U.pi))).real() / V);
+    vev_p.push_back(TensorRemove(sum(trace(U.p))).real() / V);
+    {
+      std::vector<RealD> t6;
+      for (int mu = 0; mu < Nd; ++mu)
+        for (int nu = mu + 1; nu < Nd; ++nu) {
+          auto t_mn = PeekIndex<1>(U.t, mu, nu);
+          t6.push_back(TensorRemove(sum(trace(t_mn))).real() / V);
+        }
+      vev_t.push_back(t6);
+    }
 
     auto pi_all = SliceSumPiAll(U.pi);
     auto pi_tr  = SliceSumTrace(U.pi);
@@ -111,6 +126,9 @@ int main(int argc, char **argv) {
     write(wr, "aux_pi", aux_pi);
     write(wr, "aux_sigma", aux_sigma);
     write(wr, "aux_s", aux_s);
+    write(wr, "vev_pi", vev_pi);
+    write(wr, "vev_p", vev_p);
+    write(wr, "vev_t", vev_t);
   }
 
   std::cout << GridLogMessage << "Auxiliary correlators written to "

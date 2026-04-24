@@ -110,6 +110,8 @@ int main(int argc, char **argv) {
   std::vector<std::vector<ComplexD>> loop_ud;
   std::vector<RealD> vev_sigma, vev_s, trminv_tx, trminv_qcd;
   std::vector<RealD> trminv_strange_tx, trminv_strange_qcd;
+  std::vector<RealD> polyakov_re_tx, polyakov_im_tx;
+  std::vector<RealD> polyakov_re_qcd, polyakov_im_qcd;
 
   Smear_Stout<PeriodicGimplR> Stout(stout_rho);
   SmearedConfiguration<PeriodicGimplR> SmearPolicy(&Grid, stout_nsmear, Stout);
@@ -123,6 +125,12 @@ int main(int argc, char **argv) {
       sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
       pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
       LoadTxqcdConfig(U, sRNG, pRNG, traj);
+
+      {
+        ComplexD poly = WilsonLoops<PeriodicGimplR>::avgPolyakovLoop(U.U);
+        polyakov_re_tx.push_back(poly.real());
+        polyakov_im_tx.push_back(poly.imag());
+      }
 
       SmearPolicy.set_Field(U.U);
       LatticeGaugeField Usmeared = SmearPolicy.get_SmearedU();
@@ -157,6 +165,12 @@ int main(int argc, char **argv) {
       pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
 
+      {
+        ComplexD poly = WilsonLoops<PeriodicGimplR>::avgPolyakovLoop(Umu);
+        polyakov_re_qcd.push_back(poly.real());
+        polyakov_im_qcd.push_back(poly.imag());
+      }
+
       SmearPolicy.set_Field(Umu);
       LatticeGaugeField Usmeared = SmearPolicy.get_SmearedU();
 
@@ -177,11 +191,15 @@ int main(int argc, char **argv) {
     write(wr, "vev_s", vev_s);
     write(wr, "trminv", trminv_tx);
     write(wr, "trminv_strange", trminv_strange_tx);
+    write(wr, "polyakov_re", polyakov_re_tx);
+    write(wr, "polyakov_im", polyakov_im_tx);
   }
   {
     Hdf5Writer wr(meas_dir() + "/meas_qcd_disc.h5");
     write(wr, "trminv", trminv_qcd);
     write(wr, "trminv_strange", trminv_strange_qcd);
+    write(wr, "polyakov_re", polyakov_re_qcd);
+    write(wr, "polyakov_im", polyakov_im_qcd);
   }
 
   std::cout << GridLogMessage << "Disconnected + VEV symanzik measurements written to "
