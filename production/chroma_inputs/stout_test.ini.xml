@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<chroma>
+<annotation>
+Apply STOUT_GAUGE_STATE with rho=0.125, n_smear=1, orthog_dir=-1 (4D isotropic)
+to a chroma LIME cfg, then measure plaquette of both the original and the
+smeared field.  Used to compare chroma vs Grid stout convention.
+</annotation>
+
+<Param>
+<InlineMeasurements>
+
+  <!-- Plaquette of raw gauge field -->
+  <elem>
+    <Name>PLAQUETTE</Name>
+    <Frequency>1</Frequency>
+    <Param><version>2</version></Param>
+    <NamedObject>
+      <gauge_id>default_gauge_field</gauge_id>
+    </NamedObject>
+  </elem>
+
+  <!-- Apply STOUT_GAUGE_STATE (rho=0.125, n_smear=1, 4D isotropic) -->
+  <elem>
+    <Name>APPLY_GAUGE_STATE</Name>
+    <Frequency>1</Frequency>
+    <Param>
+      <version>1</version>
+      <GaugeState>
+        <Name>STOUT_GAUGE_STATE</Name>
+        <rho>0.125</rho>
+        <n_smear>1</n_smear>
+        <orthog_dir>-1</orthog_dir>
+        <GaugeBC>
+          <Name>PERIODIC_GAUGEBC</Name>
+        </GaugeBC>
+      </GaugeState>
+    </Param>
+    <NamedObject>
+      <gauge_id>default_gauge_field</gauge_id>
+      <output_id>stout_smeared_field</output_id>
+    </NamedObject>
+  </elem>
+
+  <!-- Plaquette of stout-smeared field -->
+  <elem>
+    <Name>PLAQUETTE</Name>
+    <Frequency>1</Frequency>
+    <Param><version>2</version></Param>
+    <NamedObject>
+      <gauge_id>stout_smeared_field</gauge_id>
+    </NamedObject>
+  </elem>
+
+</InlineMeasurements>
+
+  <nrow>16 16 16 48</nrow>
+</Param>
+
+<RNG>
+  <Seed><elem>11</elem><elem>11</elem><elem>11</elem><elem>0</elem></Seed>
+</RNG>
+
+<Cfg>
+  <cfg_type>SCIDAC</cfg_type>
+  <cfg_file>/lustre2/nplqcd/agrebe/cfgs/cl3_16_48_b6p1_m0p2450/cl3_16_48_b6p1_m0p2450_a_cfg_11100.lime</cfg_file>
+</Cfg>
+
+</chroma>

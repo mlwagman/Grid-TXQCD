@@ -99,7 +99,12 @@ int main(int argc, char **argv) {
 
     Smear.set_Field(Umu);
     LatticeGaugeField Usm = Smear.get_SmearedU();
-    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw);
+    // Match chroma's <boundary>1 1 1 -1</boundary> — antiperiodic time BC.
+    WilsonImplParams impl_p;
+    impl_p.boundary_phases.resize(Nd, 1.0);
+    impl_p.boundary_phases[Nd - 1] = -1.0;
+    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw,
+           WilsonAnisotropyCoefficients(), impl_p);
     MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
     ConjugateGradient<LatticeFermion> CG(cg_tolerance, cg_max);
 

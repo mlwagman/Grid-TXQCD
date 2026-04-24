@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<chroma>
+<annotation>
+Measure chiral condensate on chroma cfg_11100 with stout-smeared Wilson-Clover
+fermion at mass=-0.245, csw=1.24930970916466.  Matches production Grid params.
+</annotation>
+
+<Param>
+<InlineMeasurements>
+
+  <elem>
+    <Name>PSI_BAR_PSI</Name>
+    <Frequency>1</Frequency>
+    <Param>
+      <version>1</version>
+      <Mass>-0.2450</Mass>
+      <FermionAction>
+        <FermAct>CLOVER</FermAct>
+        <Mass>-0.2450</Mass>
+        <clovCoeff>1.24930970916466</clovCoeff>
+        <AnisoParam>
+          <anisoP>false</anisoP>
+          <t_dir>3</t_dir>
+          <xi_0>1</xi_0>
+          <nu>1</nu>
+        </AnisoParam>
+        <FermState>
+          <Name>STOUT_FERM_STATE</Name>
+          <rho>0.125</rho>
+          <n_smear>1</n_smear>
+          <orthog_dir>-1</orthog_dir>
+          <FermionBC>
+            <FermBC>SIMPLE_FERMBC</FermBC>
+            <boundary>1 1 1 -1</boundary>
+          </FermionBC>
+        </FermState>
+      </FermionAction>
+      <InvertParam>
+        <invType>CG_INVERTER</invType>
+        <RsdCG>1.0e-8</RsdCG>
+        <MaxCG>30000</MaxCG>
+      </InvertParam>
+    </Param>
+    <NamedObject>
+      <gauge_id>default_gauge_field</gauge_id>
+    </NamedObject>
+  </elem>
+
+</InlineMeasurements>
+
+  <nrow>16 16 16 48</nrow>
+</Param>
+
+<RNG>
+  <Seed><elem>7777</elem><elem>0</elem><elem>0</elem><elem>0</elem></Seed>
+</RNG>
+
+<Cfg>
+  <cfg_type>SCIDAC</cfg_type>
+  <cfg_file>/lustre2/nplqcd/agrebe/cfgs/cl3_16_48_b6p1_m0p2450/cl3_16_48_b6p1_m0p2450_a_cfg_11100.lime</cfg_file>
+</Cfg>
+
+</chroma>

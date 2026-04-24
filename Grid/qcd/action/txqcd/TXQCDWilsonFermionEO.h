@@ -30,13 +30,21 @@ class TXQCDWilsonFermionEO {
   typedef WilsonFermion<Impl> WilsonOp;
   typedef typename Impl::GaugeField GaugeField;
 
+  static typename Impl::ImplParams DefaultImplParams() {
+    typename Impl::ImplParams p;
+    p.boundary_phases.resize(Nd, 1.0);
+    p.boundary_phases[Nd - 1] = -1.0;  // antiperiodic time
+    return p;
+  }
+
   TXQCDWilsonFermionEO(GaugeField &Umu, GridCartesian &grid,
                        GridRedBlackCartesian &rbgrid, RealD mass,
                        LatticeSigmaField &sigma, LatticePiField &pi,
                        LatticeSFieldC &s, LatticePFieldC &p,
-                       LatticeTField &t)
+                       LatticeTField &t,
+                       typename Impl::ImplParams impl_p = DefaultImplParams())
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
-        Dw_(Umu, grid, rbgrid, mass),
+        Dw_(Umu, grid, rbgrid, mass, impl_p),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t),
         sigma_e_(&rbgrid), sigma_o_(&rbgrid),
         pi_e_(&rbgrid), pi_o_(&rbgrid),

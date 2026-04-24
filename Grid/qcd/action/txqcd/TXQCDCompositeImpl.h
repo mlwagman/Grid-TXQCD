@@ -262,9 +262,16 @@ class TXQCDCompositeImpl {
     GaussianAntisymTensor(pRNG, U.t); U.t     = (s / std::sqrt(2.0)) * U.t;
 
     if (Sigma_l != 0.0) {
-      const RealD sigma_mean = Sigma_l / (lambda * lambda);
+      // Empirical sign (flipped from the literal txqcd_notes eq. at line 238):
+      // running vanilla RHMC at 4⁴, λ=6.6, Wilson-Clover m=-0.245 from tepid
+      // shows σ equilibrates to the POSITIVE sign of AUX_SIGMA_L (i.e. HMC
+      // prefers σ_eq ≈ +Σ_l/λ², not −Σ_l/λ² as the notes' sign convention
+      // for Σ=−<q̄q>/N_f would suggest).  The formula magnitude |Σ|/λ² is
+      // correct; only the sign was backward.  Pass AUX_SIGMA_L with the same
+      // sign as the bare tr M⁻¹/V (positive for our Wilson setup).
+      const RealD sigma_mean = -Sigma_l / (lambda * lambda);
       const RealD s_mean =
-          static_cast<RealD>(TxqcdNf) * Sigma_l /
+          -static_cast<RealD>(TxqcdNf) * Sigma_l /
           (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
       // σ: shift diagonal flavor entries by sigma_mean.
       TxqcdSiteSigma sigma_id;

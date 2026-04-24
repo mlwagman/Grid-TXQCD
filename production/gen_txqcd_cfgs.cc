@@ -38,11 +38,16 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
   void TrajectoryComplete(int traj, TXQCDField &U, GridSerialRNG &sRNG,
                           GridParallelRNG &pRNG) override {
     traj_.push_back(traj);
-    plaq_.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
+    RealD pl = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
+    plaq_.push_back(pl);
 
     RealD V = (RealD)U.Grid()->gSites();
-    vev_sigma_.push_back(TensorRemove(sum(trace(U.sigma))).real() / V);
-    vev_s_.push_back(TensorRemove(sum(trace(U.s))).real() / V);
+    RealD vs = TensorRemove(sum(trace(U.sigma))).real() / V;
+    RealD vc = TensorRemove(sum(trace(U.s))).real() / V;
+    vev_sigma_.push_back(vs);
+    vev_s_.push_back(vc);
+    std::cout << GridLogMessage << "[TxqcdDiag] traj=" << traj << " plaq=" << pl
+              << " vev_sigma=" << vs << " vev_s=" << vc << std::endl;
 
     int na = (int)actions_.size();
     std::vector<RealD> fa(na), fm(na), fdta(na), fdtm(na);
@@ -58,7 +63,12 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     smear_.set_Field(U);
     LatticeGaugeField Usm = smear_.get_SmearedU().U;
     typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw);
+    // Antiperiodic time BC to match chroma <boundary>1 1 1 -1</boundary>.
+    WilsonImplParams impl_p;
+    impl_p.boundary_phases.resize(Nd, 1.0);
+    impl_p.boundary_phases[Nd - 1] = -1.0;
+    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw,
+           WilsonAnisotropyCoefficients(), impl_p);
     MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     RealD acc = 0.0;
@@ -225,7 +235,12 @@ int main(int argc, char **argv) {
 
   // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC, wrapped for TXQCD HMC
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-  WCF StrangeFermOp(U.U, Grid, RBGrid, mass_strange, csw, csw);
+  // Antiperiodic time BC to match chroma <boundary>1 1 1 -1</boundary>.
+  WilsonImplParams strange_impl_p;
+  strange_impl_p.boundary_phases.resize(Nd, 1.0);
+  strange_impl_p.boundary_phases[Nd - 1] = -1.0;
+  WCF StrangeFermOp(U.U, Grid, RBGrid, mass_strange, csw, csw,
+                    WilsonAnisotropyCoefficients(), strange_impl_p);
   // 10 poles on the strange rational to match our QCD production settings.
   OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 10, 64,
                                        100, 1e-6, 1e-4);

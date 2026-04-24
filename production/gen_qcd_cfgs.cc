@@ -1,4 +1,7 @@
 #include "params.h"
+#include <cstring>
+#include <cstdio>
+#include <Grid/parallelIO/IldgIO.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/action/gauge/PlaqPlusRectangleAction.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -192,7 +195,10 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
   void TrajectoryComplete(int traj, LatticeGaugeField &U, GridSerialRNG &sRNG,
                           GridParallelRNG &pRNG) override {
     traj_.push_back(traj);
-    plaq_.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U));
+    RealD pl = WilsonLoops<PeriodicGimplR>::avgPlaquette(U);
+    plaq_.push_back(pl);
+    std::cout << GridLogMessage << "[QcdDiag] traj=" << traj << " plaq=" << pl
+              << std::endl;
 
     int na = (int)actions_.size();
     std::vector<RealD> fa(na), fm(na), fdta(na), fdtm(na);
@@ -208,7 +214,13 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
     smear_.set_Field(U);
     LatticeGaugeField Usm = smear_.get_SmearedU();
     typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw);
+    // Antiperiodic BC in time (direction Nd-1=3) to match chroma's
+    // <boundary>1 1 1 -1</boundary>.  Grid's default is all-periodic.
+    WilsonImplParams impl_p;
+    impl_p.boundary_phases.resize(Nd, 1.0);
+    impl_p.boundary_phases[Nd - 1] = -1.0;  // antiperiodic time
+    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw,
+           WilsonAnisotropyCoefficients(), impl_p);
     MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     RealD V = (RealD)grid_.gSites();
@@ -292,6 +304,30 @@ int main(int argc, char **argv) {
     typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
     NerscIO::readConfiguration<GaugeStats>(Umu, header, cf);
     start_traj = latest;
+  } else if (const char *ic = std::getenv("IMPORT_CFG"); ic && *ic) {
+    // Import an external thermalized config (chroma LIME or NERSC) as the
+    // starting gauge field — skips tepid-start thermalization entirely.
+    std::cout << GridLogMessage << "IMPORT_CFG=" << ic << std::endl;
+    // Auto-detect NERSC vs LIME by magic bytes (same logic as compute_plaq).
+    FILE *f = std::fopen(ic, "rb");
+    char magic[16] = {0};
+    if (f) { std::fread(magic, 1, sizeof(magic), f); std::fclose(f); }
+    FieldMetaData header;
+    if (std::memcmp(magic, "BEGIN_HEADER", 12) == 0) {
+      typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
+      NerscIO::readConfiguration<GaugeStats>(Umu, header, std::string(ic));
+    } else {
+      IldgReader IR;
+      IR.open(std::string(ic));
+      IR.readConfiguration(Umu, header);
+      IR.close();
+    }
+    // Still need RNG seeds — use stream-id offset as default.
+    int sid = std::max(0, stream_id);
+    sRNG.SeedFixedIntegers({11 + 100*sid, 12 + 100*sid, 13 + 100*sid,
+                            14 + 100*sid, 15 + 100*sid});
+    pRNG.SeedFixedIntegers({16 + 100*sid, 17 + 100*sid, 18 + 100*sid,
+                            19 + 100*sid, 20 + 100*sid});
   } else {
     // Offset RNG seeds by 100 × stream_id so streams are independent.
     int sid = std::max(0, stream_id);
@@ -340,13 +376,23 @@ int main(int argc, char **argv) {
     }
   }
   typedef WilsonCloverFermion<WilsonImplF, CloverHelpers<WilsonImplF>> WCF_f;
-  WCF_f FermOpF(UmuF, GridF, RBGridF, mass_light, csw, csw);
+  // Antiperiodic BC in time to match chroma's <boundary>1 1 1 -1</boundary>.
+  // Grid default is all-periodic → wrong det(M) → equilibrium plaq shift.
+  WilsonImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;  // antiperiodic time
+  WilsonImplParams impl_pF;
+  impl_pF.boundary_phases.resize(Nd, 1.0);
+  impl_pF.boundary_phases[Nd - 1] = -1.0;
+  WCF_f FermOpF(UmuF, GridF, RBGridF, mass_light, csw, csw,
+                WilsonAnisotropyCoefficients(), impl_pF);
 
   // Light quarks (Nf=2): EO-preconditioned LogDet + Schur.
   // Action solver (accept/reject): tight DP CG at cg_tol=1e-8.
   // Derivative solver (MD force): mixed-precision CG (SP inner + DP correction),
   // outer tolerance 1e-6 (mdtol bias cancels on Metropolis accept/reject).
-  WCF FermOp(Umu, Grid, RBGrid, mass_light, csw, csw);
+  WCF FermOp(Umu, Grid, RBGrid, mass_light, csw, csw,
+             WilsonAnisotropyCoefficients(), impl_p);
   ConjugateGradient<LatticeFermion> CG_action(cg_tol, cg_max);
   SchurDifferentiableOperator<WilsonImplR> SchurOpD(FermOp);
   SchurDifferentiableOperator<WilsonImplF> SchurOpF(FermOpF);
@@ -362,8 +408,10 @@ int main(int argc, char **argv) {
 
   // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC.
   // MD force uses mixed-precision multishift CG (SP inner + DP reliable).
-  WCF StrangeFermOp(Umu, Grid, RBGrid, mass_strange, csw, csw);
-  WCF_f StrangeFermOpF(UmuF, GridF, RBGridF, mass_strange, csw, csw);
+  WCF StrangeFermOp(Umu, Grid, RBGrid, mass_strange, csw, csw,
+                    WilsonAnisotropyCoefficients(), impl_p);
+  WCF_f StrangeFermOpF(UmuF, GridF, RBGridF, mass_strange, csw, csw,
+                       WilsonAnisotropyCoefficients(), impl_pF);
   // 10 poles (chroma typically uses 10-12 for Nf=1 Wilson-Clover at this mass).
   OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 10, 64,
                                        100, 1e-6, 1e-4);

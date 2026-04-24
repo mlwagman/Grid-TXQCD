@@ -1,26 +1,54 @@
 #pragma once
 #include <Grid/Grid.h>
+#include <cstdlib>
 
 using namespace Grid;
 
 namespace TXQCDProduction {
 
-// ===== Lattice geometry =====
-inline Coordinate lattice_size() { return Coordinate(std::vector<int>{16, 16, 16, 48}); }
+namespace detail {
+inline RealD env_real(const char *name, RealD def) {
+  if (const char *s = std::getenv(name); s && *s) return std::atof(s);
+  return def;
+}
+inline int env_int(const char *name, int def) {
+  if (const char *s = std::getenv(name); s && *s) return std::atoi(s);
+  return def;
+}
+inline Coordinate env_latt(const char *name,
+                            const std::vector<int> &def) {
+  const char *s = std::getenv(name);
+  if (!s || !*s) return Coordinate(def);
+  std::vector<int> v; std::string t;
+  for (const char *p = s; *p; ++p) {
+    if (*p == '.') { if (!t.empty()) v.push_back(std::atoi(t.c_str())); t.clear(); }
+    else t.push_back(*p);
+  }
+  if (!t.empty()) v.push_back(std::atoi(t.c_str()));
+  if ((int)v.size() != Nd) return Coordinate(def);
+  return Coordinate(v);
+}
+}
 
-// ===== Quark masses =====
-constexpr RealD mass_light   = -0.2450;
-constexpr RealD mass_strange = -0.2450;
-constexpr RealD csw = 1.24930970916466;
+// ===== Lattice geometry (override: LATT=L.L.L.T) =====
+inline Coordinate lattice_size() {
+  return detail::env_latt("LATT", std::vector<int>{16, 16, 16, 48});
+}
+
+// Runtime-overridable physics params (env var in parentheses).  Defaults are
+// production values; set the env var to test small-lattice / bisection points.
+inline const RealD mass_light   = detail::env_real("MASS_LIGHT",   -0.2450); // MASS_LIGHT
+inline const RealD mass_strange = detail::env_real("MASS_STRANGE", -0.2450); // MASS_STRANGE
+inline const RealD csw          = detail::env_real("CSW",           1.24930970916466); // CSW
 
 // ===== Gauge action =====
-constexpr RealD beta = 6.1;
-constexpr RealD u0 = 0.832605301399891;
-constexpr RealD lambda = 0.5;
+inline const RealD beta   = detail::env_real("BETA",   6.1);               // BETA
+inline const RealD u0     = detail::env_real("U0",     0.832605301399891); // U0
+inline const RealD lambda = detail::env_real("LAMBDA", 0.5);               // LAMBDA
 
 // ===== Stout smearing for inversions =====
-constexpr RealD stout_rho_inv = 0.125;
-constexpr int   stout_nsmear_inv = 1;
+inline const RealD stout_rho_inv   = detail::env_real("STOUT_RHO",    0.125); // STOUT_RHO
+inline const int   stout_nsmear_inv = detail::env_int("STOUT_NSMEAR", 1);      // STOUT_NSMEAR
 
 // ===== Stout smearing for source/sink construction =====
 constexpr RealD stout_rho_src = 0.16;
