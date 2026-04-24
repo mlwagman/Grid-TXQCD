@@ -42,7 +42,7 @@ constexpr int n_vev_noise = 8;
 constexpr int n_noise_disco = 32;
 
 // ===== HMC =====
-constexpr int n_therm = 500;
+constexpr int n_therm = 100;
 constexpr int n_prod = 1000;
 constexpr int meas_skip = 10;
 

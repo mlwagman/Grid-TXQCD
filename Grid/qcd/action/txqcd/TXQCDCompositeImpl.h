@@ -230,6 +230,59 @@ class TXQCDCompositeImpl {
     U.t     = Zero();
   }
 
+  // Aux drawn from the AuxiliaryFieldGaussianAction's thermal equilibrium
+  // (variance 1/lambda^2 per Hermitian DOF).  Pairs with a configurable-scale
+  // weak-field gauge: U_mu = exp(i * wf_scale * Σ_a c_a t_a) per link via
+  // LieRandomize (bypassing Grid's hard-coded 0.01 in TepidConfiguration).
+  // Default wf_scale = 0.1 matches chroma's WEAK_FIELD convention.
+  //
+  // Optional Sigma_l: light-quark chiral-condensate guess per site
+  //   Σ_l ≡ −<q̄q>/N_f  (txqcd_notes.tex eq. above eq. 238).
+  // When Sigma_l != 0, σ and s are initialized at their equilibrium means
+  //   <σ_ab> = δ_ab · Σ_l / λ²
+  //   <s^ij> = δ_ij · N_f · Σ_l / (√2 · N_c · λ²)
+  // plus the usual Gaussian fluctuation of width 1/λ.  Skips the mean-drift
+  // phase of thermalization at large λ where aux fields start far from <σ>.
+  // Sigma_l=0 (default) gives the zero-mean initialization.
+  static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
+                                             RealD lambda,
+                                             double wf_scale = 0.1,
+                                             RealD Sigma_l = 0.0) {
+    // Scaled weak-field gauge.
+    LatticeColourMatrix Ulink(U.U.Grid());
+    for (int mu = 0; mu < Nd; ++mu) {
+      SU<Nc>::LieRandomize(pRNG, Ulink, wf_scale);
+      PokeIndex<LorentzIndex>(U.U, Ulink, mu);
+    }
+    RealD s = 1.0 / lambda;
+    HermitianGaussian(pRNG, U.sigma); U.sigma = s * U.sigma;
+    HermitianGaussian(pRNG, U.pi);    U.pi    = s * U.pi;
+    HermitianGaussian(pRNG, U.s);     U.s     = s * U.s;
+    HermitianGaussian(pRNG, U.p);     U.p     = s * U.p;
+    GaussianAntisymTensor(pRNG, U.t); U.t     = (s / std::sqrt(2.0)) * U.t;
+
+    if (Sigma_l != 0.0) {
+      const RealD sigma_mean = Sigma_l / (lambda * lambda);
+      const RealD s_mean =
+          static_cast<RealD>(TxqcdNf) * Sigma_l /
+          (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
+      // σ: shift diagonal flavor entries by sigma_mean.
+      TxqcdSiteSigma sigma_id;
+      sigma_id = Zero();
+      for (int a = 0; a < TxqcdNf; ++a) sigma_id()()(a, a) = sigma_mean;
+      LatticeSigmaField shift_sigma(U.sigma.Grid());
+      shift_sigma = sigma_id;
+      U.sigma = U.sigma + shift_sigma;
+      // s: shift diagonal color entries by s_mean.
+      TxqcdSiteS s_id;
+      s_id = Zero();
+      for (int i = 0; i < Nc; ++i) s_id()()(i, i) = s_mean;
+      LatticeSFieldC shift_s(U.s.Grid());
+      shift_s = s_id;
+      U.s = U.s + shift_s;
+    }
+  }
+
   static const int num_colours = Nc;
 };
 

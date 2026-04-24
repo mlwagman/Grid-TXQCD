@@ -1,0 +1,498 @@
+\documentclass[%
+%  reprint,
+ %preprint,
+% onecolumn,
+    twocolumn,
+superscriptaddress,
+%groupedaddress,
+%unsortedaddress,
+%runinaddress,
+%frontmatterverbose, 
+preprintnumbers,
+nofootinbib,
+%nobibnotes,
+%bibnotes,
+ amsmath,amssymb,
+ aps,
+ prd,
+ floatfix,
+]{revtex4-2}
+
+% WIDTHS per \the\columnwidth
+% Column: 246pt / 72.27pt/in = 3.4039 in
+% Widetext: 510pt / 72.27pt/in = 7.05687 in
+
+\usepackage{graphicx}% Include figure files
+\usepackage{duckuments} % DEBUG: removeme
+\usepackage{dcolumn}% Align table columns on decimal point
+\usepackage{bm}% bold math
+\usepackage{braket}
+\usepackage{mathtools} % ensuremath etc
+\usepackage{enumitem} % for bullet dedentation
+\usepackage{slashed}
+
+\usepackage[pdftex]{xcolor}
+\usepackage{hyperref}% add hypertext capabilities
+\hypersetup{
+    colorlinks=true,     % false: boxed links; true: colored links
+    linkcolor=blue,      % color of internal links
+    citecolor=blue,      % color of links to bibliography
+    filecolor=blue,      % color of file links
+    urlcolor=blue        % color of external links
+}
+
+\usepackage{cleveref}
+\crefname{equation}{Eq.}{Eqs.}
+\crefname{figure}{Fig.}{Figs.}
+\crefname{table}{Tab.}{Tabs.}
+\crefname{section}{Sec.}{Secs.}
+\crefname{appendix}{App.}{Apps.}
+\Crefname{table}{Table}{Tables}
+\Crefname{figure}{Figure}{Figures}
+
+\newcommand{\tx}[0]{\text{TX}}
+\newcommand{\qcd}[0]{\text{QCD}}
+\newcommand{\txqcd}[0]{\text{TXQCD}}
+
+%%% NOTATION MACROS
+\newcommand{\aset}[1]{\{#1\}}
+\newcommand{\RRvec}[0]{\xi}
+\newcommand{\RRmat}[0]{E}
+\newcommand{\Pm}[1]{\mathcal{P}^{(#1)}}
+\newcommand{\HEq}[0]{\rightarrow}
+\newcommand{\Span}{\mathrm{span}}
+\newcommand{\herm}{\mathfrak{h}}
+
+%%% EDITING MACROS
+\definecolor{red}{rgb}{1.0, 0, 0}
+\newcommand{\draftnote}[1]{{\color{red} {#1}}}
+\newcommand{\todo}[1]{{\color{red} \textbf{TODO:} {#1}}}
+\newcommand{\dan}[1]{{\color{purple} {#1}}}
+\newcommand{\ryan}[1]{{\color{cyan} {#1}}}
+\newcommand{\mike}[1]{{\color{magenta} {#1}}}
+\newcommand{\dimitra}[1]{{\color{olive} {#1}}}
+
+
+%%% CONVENIENCE MACROS
+
+\begin{document}
+
+%\preprint{FERMILAB-PUB-25-0131-T,MIT-CTP/5849}
+
+% \title{Coincidences in Krylov Space\\(or, Rayleigh-Ritz is all you need)}
+\title{Notes on tensor extended QCD}
+
+% \author{Ryan Abbott}
+%  \affiliation{Center for Theoretical Physics, Massachusetts Institute of Technology, Cambridge, MA 02139, USA}
+%  \affiliation{The NSF AI Institute for Artificial Intelligence and Fundamental Interactions}
+% \author{Daniel C. Hackett}
+%  \affiliation{Fermi National Accelerator Laboratory, Batavia, IL 60510, U.S.A.}
+% \author{George T.\ Fleming}
+%  \affiliation{Fermi National Accelerator Laboratory, Batavia, IL 60510, U.S.A.}
+% \author{Dimitra A. Pefkou}
+%  \affiliation{Department of Physics, University of California, Berkeley, CA 94720, USA}
+%  \affiliation{Nuclear Science Division, Lawrence Berkeley National Laboratory, Berkeley, CA 94720, USA}
+ \author{Michael L. Wagman}
+  \affiliation{Fermi National Accelerator Laboratory, Batavia, IL 60510, U.S.A.}
+
+
+
+%\begin{abstract}
+%     We introduce a new twist on Kaplan's extended QCD proposal~\cite{Kaplan:2013dca}.
+%\end{abstract}
+
+
+\maketitle
+
+
+\section{Introduction}
+\label{sec:intro}
+
+Kaplan proposed eXtended QCD (XQCD) in Ref.~\cite{Kaplan:2013dca} in particular as a way improve the signal-to-noise problem arising for nucleon correlators based on successful applications to NJL models~\cite{Grabowska:2012ik,Nicholson:2012xt}.
+A scalar auxiliary field picks up a VEV that shifts the quark propagator poles, therefore effectively adding a ``constituent quark mass.''
+At the same time, pions are kept light through the presence of disconnected diagrams induced by mixing with a flavored pseudoscalar auxiliary field.
+The additional attraction arising from the presence of this auxiliary scalar is compensated by repulsion arising from auxiliary vector and axial-vector fields.
+The balance between the different auxiliary fields, and therefore exact equivalence with QCD, is guaranteed by adding auxiliary fields associated with quark bilinears whose products sum to zero by a Fierz identity.
+
+
+Unfortunately, quark determinants in XQCD are complex---the SNR problem is traded for a sign problem. These notes explore a variation on XQCD that involves antisymmetric-tensor auxiliary fields and preserves reality of the quark determinant.
+
+\section{Tensor XQCD}
+
+Tensor XQCD (TXQCD) is defined by adding a new term to the QCD Lagrangian in Euclidean spacetime,
+\begin{equation}\label{eq:LTX}
+\begin{split}
+   \mathcal{L}_{\tx} &= \frac{\lambda^2}{2} \left[ \left(\sigma_{ab} + \frac{ \overline{q}^i_a q^i_b }{\lambda^2} \right)\left(\sigma_{ba} + \frac{ \overline{q}^j_b q^j_a }{\lambda^2} \right) \right. \\
+   &\hspace{20pt} + \left(\pi_{ab} + \frac{ \overline{q}^i_a \gamma_5 q^i_b }{\lambda^2} \right)\left(\pi_{ba} + \frac{ \overline{q}^j_b \gamma_5 q^j_a }{ \lambda^2} \right) \\
+   &\hspace{20pt} + \left(s^{ij} + \frac{ \overline{q}^i_a q^j_a }{\sqrt{2} \lambda^2} \right)\left(s^{ji} + \frac{ \overline{q}^j_b q^i_b }{\sqrt{2} \lambda^2} \right) \\
+    &\hspace{20pt} + \left(p^{ij} + \frac{ \overline{q}^i_a \gamma_5 q^j_a }{\sqrt{2} \lambda^2} \right)\left(p^{ji} + \frac{ \overline{q}^j_b \gamma_5 q^i_b }{\sqrt{2} \lambda^2} \right) \\
+    &\hspace{20pt} \left. + \left(t_{\mu\nu}^{ij} + \frac{ \overline{q}^i_a \sigma_{\mu\nu} q^j_a }{2 \lambda^2} \right)\left(t_{\mu\nu}^{ji} + \frac{ \overline{q}^j_b \sigma_{\mu\nu} q^i_b }{2 \lambda^2} \right) \right],
+   \end{split}
+\end{equation}
+where the auxiliary fields $\sigma_{ab}(x)$, $\pi_{ab}(x)$, $s^{ij}(x)$, $p^{ij}(x)$ and $t^{ij}_{\mu\nu}(x) = -t^{ij}_{\nu\mu}(x)$ are Hermitian matrices in either flavor $a,b,\ldots$ or color $i,j,\ldots$ indices, $q_a^i$ and $\overline{q}_a^i$  are quark and antiquark fields with spinor indices implicit, and $\sigma_{\mu\nu} \equiv (i/2)[\gamma_{\mu},\gamma_{\nu}]$  is Hermitian, $\sigma_{\mu\nu} = \sigma_{\mu\nu}^\dagger$.
+
+The parameter $\lambda$ and all auxiliary fields have mass dimension one.
+
+The Fierz identity
+\begin{equation}
+\begin{split}
+    0 &= (\overline{q}^i_a q^j_b)(\overline{q}^k_c  q^l_d) + (\overline{q}^i_a  \gamma_5 q^j_b)(\overline{q}^k_c  \gamma_5 q^l_d)  \\
+    &\hspace{10pt} + \frac{1}{2} (\overline{q}^i_a q^l_d)(\overline{q}^k_c q^j_b) + \frac{1}{2}  (\overline{q}^i_a \gamma_5 q^l_d)(\overline{q}^k_c \gamma_5 q^j_b) \\
+    &\hspace{10pt} + \frac{1}{4} (\overline{q}^i_a \sigma_{\mu\nu} q^l_d)(\overline{q}^k_c \sigma_{\mu\nu} q^j_b) ,
+    \end{split}
+\end{equation}
+which follows from
+\begin{equation}
+\begin{split}
+    &\delta_{
+    \alpha\beta} \delta_{\gamma\delta} + [\gamma_5]_{\alpha\beta}[\gamma_5]_{\gamma\delta} \\
+    &\hspace{10pt} = \frac{1}{2} \delta_{\alpha\delta} \delta_{\gamma\beta} + \frac{1}{2} [\gamma_5]_{\alpha\delta}[\gamma_5]_{\gamma\beta} + \frac{1}{4} [\sigma_{\mu\nu}]_{\alpha\delta}[\sigma_{\mu\nu}]_{\gamma\beta},
+    \end{split}
+\end{equation}
+shows that the quartic quark interactions in $\mathcal{L}_{\tx}$ vanish. This provides the equivalent expression
+\begin{equation}
+\begin{split}
+    \mathcal{L}_{\tx} &= \frac{\lambda^2}{2}\text{Tr}
+    [\bm{\sigma}^2 + \bm{\pi}^2 + s^2 + p^2 + t_{\mu\nu} t_{\mu\nu}] \\
+    & + \overline{q}^i_a\left[ \sigma_{ab} + \pi_{ab}\gamma_5 + \frac{s^{ij}}{\sqrt{2}}  + \frac{p^{ij}}{\sqrt{2}}  \gamma_5 + \frac{t_{\mu\nu}^{ij}}{2}  \sigma_{\mu\nu}    \right]q^j_b,
+    \end{split}
+\end{equation}
+where boldface symbols denote $N_f \times N_f$ flavor matrices and $s$, $p$, and $t_{\mu\nu}$ are implicitly $N_c \times N_c$ color matrices.
+
+Path integrals of $S_{\tx} \equiv \sum_x \mathcal{L}_{\tx}$ are Gaussian and can be performed analytically e.g. by shifting the real (imaginary) part of each auxiliary field component by ($-i$ times) the symmetric (antisymmetric) part of the corresponding quark bilinear matrix in \cref{eq:LTX},
+\begin{equation}\label{eq:aux}
+\begin{split}
+    \int \mathcal{D}\sigma\mathcal{D}\pi\mathcal{D}s\mathcal{D}p\mathcal{D}t_{\mu\nu} \ e^{-S_{\tx}} = \mathcal{N}, \\
+    \end{split}
+\end{equation}
+where $\mathcal{N}$ is a normalization constant that depends on $\lambda$ but is independent of the quark field.
+By first performing the auxiliary field integrals, observables in TXQCD can be seen to be identical to those in QCD by construction
+\begin{equation}
+\begin{split}
+\left< \mathcal{O} \right>_{\txqcd} &\equiv \frac{1}{Z \mathcal{N}} \int \mathcal{D}(...)\mathcal{D}\overline{q} \mathcal{D}q\ e^{-S_{\qcd} - S_{\tx}} \mathcal{O} \\
+&= \frac{1}{Z} \int \mathcal{D}U \mathcal{D}\overline{q} \mathcal{D}q\ e^{-S_{\qcd}} \mathcal{O} \\
+&= \left< \mathcal{O} \right>_{\qcd},
+\end{split}
+\end{equation}
+where $\mathcal{D}(...)$ is $\mathcal{D}U$ times the auxiliary field path integral measure in \cref{eq:aux} and $Z$ is the usual QCD partition function.
+Here, it is assumed that $\mathcal{O}$ is constructed from products of QCD quark and gluon operators and does not contain auxiliary fields explicitly, although more general expectation values can be physically interpreted~\cite{Kaplan:2013dca}.
+
+
+\subsection{Quark determinant reality}
+
+Instead integrating out the quarks first gives
+\begin{equation}\label{eq:TXQCD}
+\begin{split}
+\left< \mathcal{O}_{\txqcd} \right> 
+&= \frac{1}{Z} \int \mathcal{D}(...) \ e^{-S_g} e^{-\frac{\lambda^2}{2} \sum_x \text{Tr}[\bm{\sigma}^2+ \bm{\pi}^2 + s^2 + p^2 + t_{\mu\nu}t_{\mu\nu} ]} \\
+&\hspace{20pt} \times \det(\slashed{D}_{\txqcd} + m),
+\end{split}
+\end{equation}
+where $S_g$ is the QCD gauge action and
+\begin{equation}
+\begin{split}
+     \bm{\slashed{D}}_{\txqcd} &= \slashed{D}_{\qcd} + \bm{\sigma} + \bm{\pi} \gamma_5   \\
+    &\hspace{10pt} + \frac{s}{\sqrt{2}} + \frac{p}{\sqrt{2}} \gamma_5 + \frac{1}{2} t_{\mu\nu}\sigma_{\mu\nu}.
+    \end{split}
+\end{equation}
+
+Suppose the QCD Dirac operator $\slashed{D}_{\qcd}$ satisfies $\gamma_5 \slashed{D}_{\qcd} \gamma_5 = \slashed{D}_{\qcd}^\dagger$.
+Then
+\begin{equation}
+\begin{split}
+    &\gamma_5 \slashed{D}_{\txqcd} \gamma_5 \\
+    &= \slashed{D}_{\qcd}^\dagger + \bm{\sigma} + \bm{\pi} \gamma_5  + \frac{s}{\sqrt{2}} + \frac{p}{\sqrt{2}} \gamma_5 + \frac{1}{2} t_{\mu\nu}\sigma_{\mu\nu} \\
+    &= \slashed{D}_{\qcd}^\dagger + \left( \bm{\sigma} + \bm{\pi} \gamma_5  + \frac{s}{\sqrt{2}} + \frac{p}{\sqrt{2}} \gamma_5 + \frac{1}{2} t_{\mu\nu}\sigma_{\mu\nu} \right)^\dagger \\
+    &= \slashed{D}_{\txqcd}^\dagger.
+    \end{split}
+\end{equation}
+It follows that $\det(\slashed{D}_{\txqcd} + m)$ is real.
+
+It can be further shown that the eigenvalues of $\slashed{D}_{\txqcd}$ are either real or come in complex conjugate pairs.
+To see this, assume that $\mu$ is an eigenvalue of $\slashed{D}_{\txqcd}$ and therefore a root of the characteristic equation, $\det(\mu  - \slashed{D}_{\txqcd}) = 0$.
+This means
+\begin{equation}
+    \begin{split}
+        & \det(\mu -  \slashed{D}_{\txqcd}^\dagger ) \\
+        &=  \det(\mu  - \gamma_5 \slashed{D}_{\txqcd} \gamma_5 ) \\
+        &= \det(\gamma_5) \det(\mu  - \slashed{D}_{\txqcd} ) \det( \gamma_5 ) \\
+        &= \det(\mu - \slashed{D}_{\txqcd}) \\
+        &= 0.
+    \end{split}
+\end{equation}
+It follows that $\det \slashed{D}_{\txqcd}$ is positive iff $\slashed{D}_{\txqcd}$ has an even number of exactly real, negative eigenvalues.
+
+In practice, positivity can be verified as with strange quark determinants in QCD: perform simulations with $|\det(\slashed{D}_{\txqcd})|$, compute the lowest eigenvalues of the Hermitian operator
+\begin{equation}
+    \gamma_5 \slashed{D}_{\txqcd} = ( \gamma_5 \slashed{D}_{\txqcd})^\dagger, 
+\end{equation}
+for instance with the Lanczos algorithm,
+and verify that the smallest eigenvalue is positive.
+If so, this is sufficient to guarantee that $\det(\gamma_5 \slashed{D}_{\txqcd}) = \det( \slashed{D}_{\txqcd}) \geq 0$ for a given field configuration.
+
+
+\subsection{VEVs and mean-field picture}
+
+As in the original XQCD setup~\cite{Kaplan:2013dca}, the scalar auxiliary fields get VEVs
+\begin{equation}
+    \lambda^2 \left< \sigma_{ab} \right> = -\delta_{ab} \frac{1}{N_f} \left< \overline{q}^i_c q^i_c \right> \equiv \delta_{ab} \Sigma,
+\end{equation}
+and
+\begin{equation}
+    \lambda^2 \left< s^{ij} \right> = -\delta^{ij} \frac{1}{\sqrt{2} N_c} \left< \overline{q}^k_a q^k_a \right> = \delta^{ij} \frac{N_f}{\sqrt{2} N_c} \Sigma.
+\end{equation}
+Within a mean-field approximation for the gluon and auxiliary fields, this shifts the pole in the fermion propagator as $m \rightarrow m + M$, where the generated ``constituent quark mass'' $M$ is
+\begin{equation}\label{eq:M_Sigma}
+\begin{split}
+    M =  \left< \frac{\text{Tr}[\bm{\sigma}]}{N_f}   + \frac{\text{Tr}[s]}{\sqrt{2} N_c}  \right>  = \frac{\Sigma}{\lambda^2}\left( 1 + \frac{N_f}{2N_c} \right).
+    \end{split}
+\end{equation}
+Quark propagators, whose magnitude in QCD decays with a correlation length set by the inverse of $m_\pi /2$, will have their decay rate set by $m_\pi/2 + M$. 
+
+If $\lambda$ is chosen so that $3M \sim M_N - (3/2) m_\pi$, then the magnitudes of baryon correlation functions will decay at a rate set by $M_N$ rather then the usual $(3/2)m_\pi$.
+Within this mean-field picture, the quark propagator products entering nucleon correlators in TXQCD are $\sim e^{-M_N t}$, exponentially closer to average baryon correlator values than the $\sim e^{-(3/2)m_\pi t}$ arising in QCD.
+Phase fluctuations are therefore not required to contribute a significant amount of the nucleon mass in TXQCD correlators, unlike in QCD where they contribute $M_N - (3/2)m_\pi$~\cite{Wagman:2016bam}.
+Since the variance of a phase is $O(1)$, these phase fluctuations lead to the $M_N - (3/2)m_\pi$ exponential SNR degradation of nucleon correlators.
+Removing the need for phase fluctuations to contribute most of the nucleon mass should correspondingly improve the SNR problem.
+
+If $M \sim \Lambda_{\rm QCD}$ is achieved, then based off the empirical positivity of strange-quark determinants one expects one may expect positivity of the TXQCD determinant to be achieved as well.
+
+What about pion correlators? Pions $\overline{q}\tau^A \gamma_5 q$ couple to the $\bm{\pi}$ auxiliary field, and therefore pion correlators include disconnected contributions that can produce light pion poles as in Ref.~\cite{Kaplan:2013dca}. 
+This allows the existence of pseudo-Golstone pion poles to be reconciled with the presence of an $O(\Lambda_{\rm QCD})$ constituent quark mass.
+
+\section{TXQCD$_2$}
+
+In two dimensions, the analog of the chiral-even Fierz relation above is 
+\begin{equation}
+\begin{split}
+    0 &= (\overline{q}^i_a q^j_b)(\overline{q}^k_c  q^l_d) + (\overline{q}^i_a  \sigma_3 q^j_b)(\overline{q}^k_c  \sigma_3 q^l_d)  \\
+    &\hspace{10pt} + (\overline{q}^i_a q^l_d)(\overline{q}^k_c q^j_b) + (\overline{q}^i_a \sigma_3 q^l_d)(\overline{q}^k_c \sigma_3 q^j_b) ,
+    \end{split}
+\end{equation}
+which follows from
+\begin{equation}
+\begin{split}
+    &\delta_{
+    \alpha\beta} \delta_{\gamma\delta} + [\sigma_3]_{\alpha\beta}[\sigma_3]_{\gamma\delta} = \delta_{\alpha\delta} \delta_{\gamma\beta} +  [\sigma_3]_{\alpha\delta}[\sigma_3]_{\gamma\beta},
+    \end{split}
+\end{equation}
+allows us to construct an analogous auxiliary field action for QCD$_2$,
+\begin{equation}\label{eq:LTX2}
+\begin{split}
+   \mathcal{L}_{\tx_2} &= \frac{\lambda^2}{2} \left[ \left(\sigma_{ab} + \frac{ \overline{q}^i_a q^i_b }{\lambda} \right)\left(\sigma_{ba} + \frac{ \overline{q}^j_b q^j_a }{\lambda} \right) \right. \\
+   &\hspace{20pt} + \left(\pi_{ab} + \frac{ \overline{q}^i_a \sigma_3 q^i_b }{\lambda^2} \right)\left(\pi_{ba} + \frac{ \overline{q}^j_b \sigma_3 q^j_a }{ \lambda} \right) \\
+   &\hspace{20pt} + \left(s^{ij} + \frac{ \overline{q}^i_a q^j_a }{\lambda} \right)\left(s^{ji} + \frac{ \overline{q}^j_b q^i_b }{\lambda} \right) \\
+    &\hspace{20pt} \left. + \left(p^{ij} + \frac{ \overline{q}^i_a \sigma_3 q^j_a }{\lambda} \right)\left(p^{ji} + \frac{ \overline{q}^j_b \sigma_3 q^i_b }{\lambda} \right) \right],
+   \end{split}
+\end{equation}
+which has the equivalent form
+\begin{equation}
+\begin{split}
+    \mathcal{L}_{\tx_2}  &= \frac{\lambda^2}{2}\text{Tr}
+    [\bm{\sigma}^2 + \bm{\pi}^2 + s^2 + p^2] \\
+    & \hspace{10pt} + \lambda \overline{q}^i_a\left[ \sigma_{ab} + \pi_{ab}\sigma_3 + s^{ij} + p^{ij}  \sigma_3   \right]q^j_b.
+   \end{split}
+\end{equation}
+As in the four-dimensional case, auxiliary field integrals of $e^{-S_{\tx_2}}$, where $S_{\tx_2} \equiv \sum_x \mathcal{L}_{\tx_2}$, are Gaussian and can be performed analytically to show that TXQCD$_2$ observables defined by the action $S_{\qcd_2} + S_{\txqcd_2}$ are identical to QCD$_2$ observables after auxiliary field integration.
+In the two-dimensional case, $\lambda$ still has mass dimension one but the auxiliary fields have mass dimension zero, as appropriate for canonically normalized scalars with $D=2$.
+
+
+Instead integrating out the quarks first gives
+\begin{equation}\label{eq:TXQCD2}
+\begin{split}
+\left< \mathcal{O}_{\txqcd_2} \right> 
+&= \frac{1}{Z} \int \mathcal{D}(...) \ e^{-S_g} e^{-\frac{\lambda^2}{2} \sum_x \text{Tr}[\bm{\sigma}^2+ \bm{\pi}^2 + s^2 + p^2 ]} \\
+&\hspace{20pt} \times \det(\slashed{D}_{\txqcd_2} + m),
+\end{split}
+\end{equation}
+where $S_g$ is the QCD$_2$ gauge action and
+\begin{equation}
+\begin{split}
+  \bm{\slashed{D}}_{\txqcd_2} &= \slashed{D}_{\qcd_2} + \lambda\left( \bm{\sigma} + \bm{\pi} \sigma_3  + s + p \sigma_3 \right).
+    \end{split}
+\end{equation}
+
+
+Suppose the QCD$_2$ Dirac operator $\slashed{D}_{\qcd_2}$ satisfies $\sigma_3 \slashed{D}_{\qcd_2} \sigma_3 = \slashed{D}_{\qcd_2}^\dagger$.
+Then
+\begin{equation}
+\begin{split}
+    &\sigma_3 \slashed{D}_{\txqcd} \sigma_3 \\
+    &= \slashed{D}_{\qcd_2}^\dagger + \lambda \left(\bm{\sigma} + \bm{\pi} \sigma_3  + s + p \sigma_3\right) \\
+    &= \slashed{D}_{\qcd_2}^\dagger + \lambda \left( \bm{\sigma} + \bm{\pi} \sigma_3  + s + p \sigma_3 \right)^\dagger \\
+    &= \slashed{D}_{\txqcd_2}^\dagger.
+    \end{split}
+\end{equation}
+It follows that $\det(\slashed{D}_{\txqcd_2} + m)$ is real.
+
+As in the four-dimensional case, the scalar fields get VEVs
+\begin{equation}
+    \lambda \left< \sigma_{ab} \right> = -\delta_{ab} \frac{1}{N_f} \left< \overline{q}^i_c q^i_c \right> \equiv \delta_{ab} \Sigma,
+\end{equation}
+and
+\begin{equation}
+    \lambda \left< s^{ij} \right> = -\delta^{ij} \frac{1}{N_c} \left< \overline{q}^k_a q^k_a \right> = \delta^{ij} \frac{N_f}{N_c} \Sigma.
+\end{equation}
+The corresponding constituent quark mass is
+\begin{equation}\label{eq:M_Sigma_2}
+\begin{split}
+    M =  \lambda \left< \frac{\text{Tr}[\bm{\sigma}]}{N_f}   + \frac{\text{Tr}[s]}{N_c}  \right>  = \Sigma \left( 1 + \frac{N_f}{N_c} \right).
+    \end{split}
+\end{equation}
+
+The is a critical difference between the role of $\lambda$ in TXQCD and TXQCD$_2$.
+Upon rescaling all auxiliary fields as $\bm{\sigma} \rightarrow \lambda \bm{\sigma}$, $\bm{\pi} \rightarrow \lambda \bm{\pi}$, $s \rightarrow \lambda s$, and $p\rightarrow \lambda p$, the TXQCD$_2$ action becomes independent of $\lambda$.
+This means that not only expectation values but also quark propagators and configuration-by-configuration values of correlation functions will be independent of $\lambda$.
+The parameter $\lambda$ cannot affect the variances of observables or any other practical aspect of Monte Carlo calculations of TXQCD$_2$.
+Numerical simulations may set $\lambda = 1$ for convenience with no need to study different values of $\lambda$ besides as a consistency check on the implementation.
+Unfortunately, this means that there is no possibility to optimize SNR by tuning $\lambda$; the result for any $\lambda > 0$ is universal.
+Note however that $\lambda = 0$ is a singular point where the auxiliary field path integrals diverge and therefore it is consistent for configuration-by-configuration values of e.g. quark propagators to differ between QCD$_2$ (where $M$ vanishes) and TXQCD$_2$ with $\lambda > 0$.
+
+\section{One-site integral equations}
+
+\subsection{Two dimensions}
+
+The equivalence of QCD$_2$ and XQCD$_2$ implies the determinant relation
+\begin{equation}
+  \begin{split}
+  \det(A) &= \int \mathcal{D}\sigma \mathcal{D}\pi \mathcal{D}s \mathcal{D}p \ e^{-\frac{\lambda^2}{2} \sum_x \text{Tr}[\bm{\sigma}^2+ \bm{\pi}^2 + s^2 + p^2 ]} \\
+  &\hspace{10pt} \times \det(A  + \bm{\sigma} + \bm{\pi} \sigma_3  + s + p \sigma_3 )
+  \end{split}
+\end{equation}
+is true for any tensor field $A_{ab\alpha\beta}^{ij}(x,y)$ with $\alpha,\beta \in \{1,2\}$, $i,j\in \{1,\ldots,N_c\}$, and $a,b\in \{1,\ldots,N_f\}$.
+%2N+4*(N-1)
+%=6N-4
+For a single lattice site, this becomes a $(6N_f+6N_c - 8)$-dimensional integral equation,
+\begin{equation}
+  \begin{split}
+    &\det(A_{ab\alpha\beta}^{ij}) = \int_{-\infty}^{\infty} \prod_a d\sigma_{aa}d\pi_{aa} \prod_{b>a} d\sigma_{ab}^R d\sigma_{ab}^I d\pi_{ab}^R d\pi_{ab}^I \\ 
+    &\hspace{40pt}\times \prod_i ds^{ii}dp^{ii} \prod_{j>i} ds^{ij}_R ds^{ij}_I dp^{ij}_R dp^{ij}_I \\
+    &\hspace{40pt} \times  e^{-\frac{\lambda^2}{2} \sum_{a,b} \left( |\sigma_{ab}|^2 + |\pi_{ab}|^2 \right)} e^{-\frac{\lambda^2}{2} \sum_{i,j} \left( |s^{ij}|^2 + |p^{ij}|^2 \right) } \\
+    &\hspace{40pt} \times \det\left[A_{ab\alpha\beta}^{ij}  + \left(\sigma_{ab}\delta_{\alpha\beta} + \pi_{ab} [\sigma_3]_{\alpha\beta}\right)\delta^{ij} \right. \\
+    &\hspace{70pt} \left. + \left(s^{ij}\delta_{\alpha\beta} + p^{ij} [\sigma_3]_{\alpha\beta}\right)\delta_{ab} \vphantom{A_{ab\alpha\beta}^{ij}}\right],
+  \end{split}
+\end{equation}
+with all indices and integral measures written out fully explicitly and $R$ ($I$) subscripts/superscripts denote real (imaginary) parts.
+We have verified this integral relation by performing the Gaussian integrals on the right-hand-side analytically for a few choices of $A$, $N_f$, and $N_c$.
+
+For $N_c = 1$ or $N_f = 1$, valid integral relations are obtained when restricting the auxiliary fields to be purely real and symmetric. For $N_c, N_f \geq 2$ it is necessary to include imaginary parts that are antisymmetric in the relevant matrix indices in order to obtain valid relations.
+Does this reflect the fact that $(\overline{u}^i u^j)$ and $(\overline{u}^i \sigma_3 u^j)$ are symmetric under $i\leftrightarrow j$ but $(\overline{q}^i_a q^j_b)$ is not?
+In the latter case, antisymmetric matrix components are required in order to obtain Gaussian auxiliary field integerals with means that describe all components of $(\overline{q}^i_a q^j_b)$; however, the Fierz identities appear to involve only $(\overline{q}^i_a q^i_b)$ and $(\overline{q}^i_a q^j_a)$ so it's not obvious to me where this restriction arises from.
+
+The result for $A_{ab\alpha\beta}^{ij} = \delta_{ab}\delta_{\alpha\beta}\delta^{ij}$ gives the normalization constant
+\begin{equation}
+    \mathcal{N} = 2^{N_f + N_c} \left( \frac{\pi}{\lambda^2} \right)^{3N_f + 3N_c - 4 },
+\end{equation}
+which for the full $2D$ theory is simply raised to the $V$ power, where $V$ is the number of lattice sites.
+
+The result for $A_{ab\alpha\beta}^{ij} = a^2 m \delta_{ab}\delta_{\alpha\beta}\delta^{ij}$ divided by the free quark partition function $(a^2 m)^{2N_f N_c}$ gives the result for $N_f$ flavors of static Wilson-like quarks with masses $m a \gg 1$,
+\begin{equation}
+  \begin{split}
+    \Sigma &= \frac{\lambda}{N_f}\left< \text{Tr}\bm{\sigma} \right> = \frac{\lambda}{N_f} \left< \text{Tr}s \right> \\
+    &= \frac{2 N_c}{m a^2} \left[ 1 + O\left(\frac{1}{m a}\right) \right].
+  \end{split}
+\end{equation}
+This is consistent with a direct calculation using the QCD$_2$ quark propagator,
+\begin{equation}
+  \begin{split}
+    -\frac{1}{N_f}\left< \overline{q}^i_a q^i_a \right>_{\qcd_2} &= \frac{1}{N_f} \left< \text{Tr}\left[ \slashed{D}_{\qcd_2}^{-1} \right] \right> \\
+    &= \frac{2 N_c}{m a^2} \left[ 1 + O\left(\frac{1}{m a}\right) \right],
+  \end{split}
+\end{equation}
+since $[\slashed{D}_{\qcd_2}]_{\alpha\beta ab}^{ij} = a^2 m \delta_{\alpha\beta}\delta_{ab}\delta^{ij}$ plus kinetic and other terms suppressed by $1/(ma)$.
+It is interesting to note that although a direct calculation using the \txqcd$_2$ propagator is also guaranteed to give the same answer, such a calculation is significantly more complicated to perform than the calculation of $\left< \text{Tr}\bm{\sigma} \right>$
+\begin{equation}
+  \begin{split}
+    &-\frac{1}{N_f}\left< \overline{q}^i_a q^i_a \right>_{\txqcd_2} = \frac{1}{N_f} \left< \text{Tr}\left[ \slashed{D}_{\txqcd_2}^{-1} \right] \right> \\
+    &= \frac{1}{\mathcal{N} (a^2 m)^{2N_f N_c}} \int_{-\infty}^{\infty} \prod_a d\sigma_{aa}d\pi_{aa} \prod_{b>a} d\sigma_{ab}^R d\sigma_{ab}^I d\pi_{ab}^R d\pi_{ab}^I \\ 
+    &\hspace{40pt}\times \prod_i ds^{ii}dp^{ii} \prod_{j>i} ds^{ij}_R ds^{ij}_I dp^{ij}_R dp^{ij}_I \\
+    &\hspace{40pt} \times  e^{-\frac{\lambda^2}{2} \sum_{a,b} \left( |\sigma_{ab}|^2 + |\pi_{ab}|^2 \right)} e^{-\frac{\lambda^2}{2} \sum_{i,j} \left( |s^{ij}|^2 + |p^{ij}|^2 \right) } \\
+    &\hspace{40pt} \times \det\left[a^2 m \delta^{ij}\delta_{\alpha\beta}\delta_{ab}  + \left(\sigma_{ab}\delta_{\alpha\beta} + \pi_{ab} [\sigma_3]_{\alpha\beta}\right)\delta^{ij} \right. \\
+    &\hspace{70pt} \left. + \left(s^{ij}\delta_{\alpha\beta} + p^{ij} [\sigma_3]_{\alpha\beta}\right)\delta_{ab} \vphantom{A_{ab\alpha\beta}^{ij}}\right] \\
+    &\hspace{40pt} \times \text{Tr}\left[a^2 m \delta^{ij}\delta_{\alpha\beta}\delta_{ab}  + \left(\sigma_{ab}\delta_{\alpha\beta} + \pi_{ab} [\sigma_3]_{\alpha\beta}\right)\delta^{ij} \right. \\
+    &\hspace{70pt} \left. + \left(s^{ij}\delta_{\alpha\beta} + p^{ij} [\sigma_3]_{\alpha\beta}\right)\delta_{ab} \vphantom{A_{ab\alpha\beta}^{ij}}\right],
+  \end{split}
+\end{equation}
+because the inverse Dirac operator is a rational, rather than polynomial, function of the auxiliary fields.
+
+The constituent quark mass in this limit is
+\begin{equation}
+  \begin{split}
+    M &= \frac{\lambda}{N_f}\left< \text{Tr}\bm{\sigma} \right> + \frac{\lambda}{N_c} \left< \text{Tr} s \right> \\
+    &= \frac{2(N_c + N_f)}{m a^2} \left[ 1 + O\left(\frac{1}{ma}\right) \right].
+  \end{split}
+\end{equation}
+Importantly, the constituent quark mass is equal to a positive constant times the bare quark mass $m$ in this limit, meaning that the inclusion of TXQCD$_2$ auxiliary fields increases the decay rate of quark propagators in free field theory.
+
+As discussed above, specifically in $D=2$ all TXQCD$_2$ observables are independent of $\lambda$.
+This means that $M$ takes an action-dependent value that cannot be tuned by changing $\lambda$.
+This is guaranteed to be the case even outside the large $ma$ limit by \cref{eq:M_Sigma_2}, $M = \Sigma (1 + N_f/N_c)$.
+It can also be seen from the fact that $\lambda$ can be removed from the theory entirely be rescaling all auxiliary fields by $\lambda$, e.g. $s \rightarrow \lambda s$.
+
+
+\subsection{Four dimensions}
+
+In the four-dimensional case, equivalence of QCD and TXQCD implies
+\begin{equation}
+  \begin{split}
+  \det(A) &= \int \mathcal{D}\sigma \mathcal{D}\pi \mathcal{D}s \mathcal{D}p \mathcal{D}t_{\mu\nu} \ e^{-\frac{\lambda^2}{2} \sum_x \text{Tr}[\bm{\sigma}^2+ \bm{\pi}^2 + s^2 + p^2 + t_{\mu\nu}t_{\mu\nu}]} \\
+  &\hspace{10pt} \times \det\left(A  + \bm{\sigma} + \bm{\pi} \gamma_5  + \frac{s}{\sqrt{2}} + \frac{p \gamma_5 }{\sqrt{2}} + \frac{t^{ij}_{\mu\nu} \sigma_{\mu\nu} }{2} \right),
+  \end{split}
+\end{equation}
+is valid for any $A_{ab\alpha\beta}^{ij}(x,y)$ with $\alpha,\beta \in \{1,\ldots,4\}$, $i,j\in~\{1,\ldots,N_c\}$, and $a,b\in \{1,\ldots,N_f\}$.
+%8N+16*(N-1)
+%=24N-16
+For a single lattice site, this becomes a $(6N_f+24N_c - 20)$-dimensional integral equation,
+\begin{equation}
+  \begin{split}
+    &\det(A_{ab\alpha\beta}^{ij}) = \int_{-\infty}^{\infty} \prod_a d\sigma_{aa}d\pi_{aa} \prod_{b>a} d\sigma_{ab}^R d\sigma_{ab}^I d\pi_{ab}^R d\pi_{ab}^I \\ 
+    &\hspace{40pt}\times \prod_i ds^{ii}dp^{ii} \prod_{j>i} ds^{ij}_R ds^{ij}_I dp^{ij}_R dp^{ij}_I \\
+     &\hspace{40pt}\times \prod_{\mu} \prod_{\nu > \mu} \prod_i dt_{\mu\nu}^{ii} \prod_{j>i} d[t_{\mu\nu}^{ij}]_R d[t_{\mu\nu}^{ij}]_I  \\
+    &\hspace{40pt} \times  e^{-\frac{\lambda^2}{2} \sum_{a,b} \left( |\sigma_{ab}|^2 + |\pi_{ab}|^2 \right)} e^{-\frac{\lambda^2}{2} \sum_{i,j} \left( |s^{ij}|^2 + |p^{ij}|^2 \right) } \\
+    &\hspace{40pt} \times e^{-\lambda^2 \sum_{i,j} \sum_{\mu < \nu} |t_{\mu\nu}^{ij}|^2  } \\
+    &\hspace{40pt} \times \det\left[A_{ab\alpha\beta}^{ij}  + \left(\sigma_{ab}\delta_{\alpha\beta} + \pi_{ab} [\gamma_5]_{\alpha\beta}\right)\delta^{ij} \right. \\
+    &\hspace{70pt} \left. + \frac{1}{\sqrt{2}} \left(s^{ij}\delta_{\alpha\beta} + p^{ij} [\gamma_5]_{\alpha\beta} \right)\delta_{ab} \right. \\
+    &\hspace{70pt} \left. + \frac{1}{2} \sum_{\mu,\nu} t^{ij}_{\mu\nu}[\sigma_{\mu\nu}]_{\alpha\beta} \delta_{ab}  \vphantom{A_{ab\alpha\beta}^{ij}}\right].
+  \end{split}
+\end{equation}
+We have again verified this integral relation analytically for a few choices of $A$, $N_f$, and $N_c$.
+%As in the $D=2$ case, complex Hermitian auxiliary field matrices are required to obtain valid identities when $N_c, N_f \geq 2$.
+
+The result for $A_{ab\alpha\beta}^{ij} = \delta_{ab}\delta_{\alpha\beta}\delta^{ij}$ gives the normalization constant
+\begin{equation}
+    \mathcal{N} = 2^{N_f - 5N_c + 6} \left( \frac{\pi}{\lambda^2} \right)^{3N_f + 12N_c - 10 },
+\end{equation}
+which for the full $4D$ theory is simply raised to the $V$ power, where $V$ is the number of lattice sites.
+
+The result for $A_{ab\alpha\beta}^{ij} = a^4 m \delta_{ab}\delta_{\alpha\beta}\delta^{ij}$  divided by the free quark partition function $(a^4 m)^{4N_f N_c}$ can be used to compute the chiral condensate for $D=4$ LQCD with $N_f$ static Wilson-like quarks with masses $m a \gg 1$,
+\begin{equation}
+  \begin{split}
+    \Sigma &= \frac{\lambda^2}{N_f}\left< \text{Tr}\bm{\sigma} \right> = \frac{\sqrt{2} \lambda^2}{N_f} \left< \text{Tr}s \right> \\
+    &= \frac{4 N_c}{m a^4} \left[ 1 + O\left(\frac{1}{m a}\right) \right].
+  \end{split}
+\end{equation}
+This is consistent with a direct calculation using the QCD quark propagator,
+\begin{equation}
+  \begin{split}
+    -\frac{1}{N_f}\left< \overline{q}^i_a q^i_a \right>_{\qcd} &= \frac{1}{N_f} \left< \text{Tr}\left[ \slashed{D}_{\qcd}^{-1} \right] \right> \\
+    &= \frac{4 N_c}{m a^4} \left[ 1 + O\left(\frac{1}{m a}\right) \right],
+  \end{split}
+\end{equation}
+since $[\slashed{D}_{\qcd}]_{\alpha\beta ab}^{ij} = a^4 m \delta_{\alpha\beta}\delta_{ab}\delta^{ij}$ plus kinetic and other terms suppressed by $1/(ma)$.
+As in the two-dimensional case, direct calculation using the TXQCD quark propagator trace must give the same answer but is much more cumbersome than TXQCD auxiliary field expectation value above.
+
+The constituent quark mass is
+\begin{equation}
+  \begin{split}
+    M &= \frac{1}{N_f}\left< \text{Tr}\bm{\sigma} \right> + \frac{1}{\sqrt{2} N_c} \left< \text{Tr} s \right> \\
+    &= \frac{4 N_c}{\lambda^2 m a^4}\left( 1 + \frac{N_f}{2N_c} \right) \left[ 1 + O\left(\frac{1}{m a}\right) \right].
+  \end{split}
+\end{equation}
+This is consistent with \cref{eq:M_Sigma}, $\lambda^2 M = \Sigma (1 + N_f/(2N_c))$.
+As in the two-dimensional case, the sign of $M$ is identical to the sign of $m$ and the decay rate of quark propagators is increased in free field theory.
+Unlike the two-dimensional case, $M$ is proportional to $\lambda^{-2}$ and can be tuned to any desired value by changing $\lambda$.
+There is a one-parameter family of TXQCD theories in $D=4$ that give identical expectation values for QCD fields but can have different variances of e.g. products of quark propagators viewed as functions of the gluon field.  
+
+\bibliography{Lanczos_bib}
+
+\end{document}

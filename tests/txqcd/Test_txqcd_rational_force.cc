@@ -26,11 +26,14 @@ static RealD HermitianTrInner(const LatticeSFieldC &E,
   return TensorRemove(sum(trace(E * F))).real();
 }
 static RealD TensorTrInner(const LatticeTField &E, const LatticeTField &F) {
+  // `total += ...` inside a thread_for is a data race across threads; the
+  // original pattern gave non-deterministic AN on GPU builds despite a
+  // deterministic force.  Lattices are tiny in this test; serial loop.
   GridBase *grid = E.Grid();
   RealD total = 0.0;
   autoView(Ev, E, CpuRead);
   autoView(Fv, F, CpuRead);
-  thread_for(ss, grid->oSites(), {
+  for (uint64_t ss = 0; ss < grid->oSites(); ++ss) {
     for (int mu = 0; mu < Nd; ++mu) {
       for (int nu = mu + 1; nu < Nd; ++nu) {
         for (int i = 0; i < Nc; ++i) {
@@ -41,7 +44,7 @@ static RealD TensorTrInner(const LatticeTField &E, const LatticeTField &F) {
         }
       }
     }
-  });
+  }
   grid->GlobalSum(total);
   return total;
 }

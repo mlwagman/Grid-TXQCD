@@ -252,10 +252,13 @@ int main(int argc, char **argv) {
   // an independent Markov chain.  STREAM_ID unset => default behaviour
   // (cfgs/qcd, original seed) for backwards compatibility.
   int stream_id = -1;
-  if (const char *sid = std::getenv("STREAM_ID")) stream_id = std::atoi(sid);
+  if (const char *sid = std::getenv("STREAM_ID"); sid && *sid) stream_id = std::atoi(sid);
   std::string cfg_dir = (stream_id < 0)
       ? qcd_cfg_dir()
       : (qcd_cfg_dir() + "_s" + std::to_string(stream_id));
+  // Optional suffix so action-variant / tuning variants don't clobber the
+  // main stream dirs (e.g. SUFFIX=_lwfix → cfgs/qcd_s0_lwfix).
+  if (const char *sfx = std::getenv("SUFFIX"); sfx && *sfx) cfg_dir += sfx;
   std::cout << GridLogMessage << "STREAM_ID=" << stream_id
             << " cfg_dir=" << cfg_dir << std::endl;
 
@@ -296,7 +299,29 @@ int main(int argc, char **argv) {
                             14 + 100*sid, 15 + 100*sid});
     pRNG.SeedFixedIntegers({16 + 100*sid, 17 + 100*sid, 18 + 100*sid,
                             19 + 100*sid, 20 + 100*sid});
-    SU<Nc>::TepidConfiguration(pRNG, Umu);
+    std::string start_type = "tepid";
+    if (const char *st = std::getenv("START_TYPE"); st && *st) start_type = st;
+    // WEAK_FIELD_SCALE: U_mu = exp(i * scale * Σ_a c_a t_a) per link via
+    // LieRandomize.  Grid's default TepidConfiguration uses scale=0.01 which
+    // gives plaq ≈ 0.99996; chroma's WEAK_FIELD uses ≈0.1 giving plaq ≈ 0.997.
+    // Default raised to 0.1 to match chroma's convention.
+    double wf_scale = 0.1;
+    if (const char *ws = std::getenv("WEAK_FIELD_SCALE"); ws && *ws) wf_scale = std::atof(ws);
+    std::cout << GridLogMessage << "START_TYPE=" << start_type
+              << "  WEAK_FIELD_SCALE=" << wf_scale << std::endl;
+    if (start_type == "hot") {
+      SU<Nc>::HotConfiguration(pRNG, Umu);
+    } else if (start_type == "cold") {
+      SU<Nc>::ColdConfiguration(pRNG, Umu);
+    } else {
+      // Scaled tepid / weak-field: LieRandomize per link with caller-chosen
+      // scale, bypassing Grid's hard-coded 0.01.
+      LatticeColourMatrix Ulink(Umu.Grid());
+      for (int mu = 0; mu < Nd; ++mu) {
+        SU<Nc>::LieRandomize(pRNG, Ulink, wf_scale);
+        PokeIndex<LorentzIndex>(Umu, Ulink, mu);
+      }
+    }
   }
 
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
@@ -348,8 +373,15 @@ int main(int argc, char **argv) {
       StrangeSchurPF(StrangeFermOp, StrangeFermOpF, &RBGridF, strange_rat, 50);
   StrangeSchurPF.is_smeared = true;
 
-  typedef SymanzikGaugeAction<PeriodicGimplR> SymanzikR;
-  SymanzikR GaugeAction(beta, u0);
+  // Grid's SymanzikGaugeAction(β,u0) uses the RBC/Iwasaki convention
+  // (c_plaq = β·(1−8c1) ≈ 1.96β, c_rect = −β/(12·u0²)) — NOT the Lüscher-
+  // Weisz tree-level action chroma's LW_TREE_GAUGEACT uses.  Chroma's source
+  // literally sets  c0 = β  (the 5/3 is absorbed into β_XML) and
+  //                 c1 = −c0/(20·u0²) = −β/(20·u0²).
+  // So to match the chroma reference ensemble cl3_16_48_b6p1 at XML β=6.1
+  // we construct PlaqPlusRectangleAction directly with chroma's coefficients.
+  typedef PlaqPlusRectangleAction<PeriodicGimplR> PlaqRectR;
+  PlaqRectR GaugeAction(beta, -beta / (20.0 * u0 * u0));
   GaugeAction.is_smeared = true;
 
   typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
@@ -367,12 +399,30 @@ int main(int argc, char **argv) {
   Aset.push_back(L1);
   Aset.push_back(L2);
 
-  IntegratorParameters MD;
-  MD.name = "MinimumNorm2";
-  MD.MDsteps = 7;
-  MD.trajL = sqrt(2.0);
+  // INTEGRATOR env var: "MinimumNorm2" (default) or "ForceGradient".  Added
+  // to allow direct comparison against TXQCD runs using the same integrator.
+  std::string integrator_name = "MinimumNorm2";
+  if (const char *env = std::getenv("INTEGRATOR"); env && *env)
+    integrator_name = env;
 
-  int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
+  IntegratorParameters MD;
+  MD.name = integrator_name;
+  MD.MDsteps = 7;
+  if (const char *ms = std::getenv("MDSTEPS"); ms && *ms) MD.MDsteps = std::atoi(ms);
+  MD.trajL = sqrt(2.0);
+  if (const char *tl = std::getenv("TRAJL"); tl && *tl) MD.trajL = std::atof(tl);
+  std::cout << GridLogMessage << "INTEGRATOR=" << integrator_name
+            << "  MDsteps=" << MD.MDsteps
+            << "  trajL=" << MD.trajL << std::endl;
+
+  // NoMetropolisUntil: default 10 - start_traj ≥ 0; override via NO_METROP env
+  // var (0 = chroma-style Metropolis-from-trajectory-0).  With thermal aux /
+  // weak-field gauge the initial configuration is close enough to equilibrium
+  // that skipping Metropolis for the first few trajs risks settling into a
+  // pure-MD equilibrium that differs from the Metropolis one.
+  int no_metrop = std::max(0, 10 - start_traj);
+  if (const char *nm = std::getenv("NO_METROP"); nm && *nm) no_metrop = std::atoi(nm);
+  std::cout << GridLogMessage << "NoMetropolisUntil=" << no_metrop << std::endl;
   HMCparameters HMCp;
   HMCp.StartTrajectory     = start_traj;
   HMCp.Trajectories        = total_traj - no_metrop - start_traj;
@@ -384,10 +434,6 @@ int main(int argc, char **argv) {
 
   Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
   SmearedConfiguration<PeriodicGimplR> Smear(&Grid, stout_nsmear_inv, Stout);
-
-  typedef MinimumNorm2<PeriodicGimplR,
-                       SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
-  IntT MDyn(&Grid, MD, Aset, Smear);
   Smear.set_Field(Umu);
 
   struct Ckpt : public HmcObservable<LatticeGaugeField> {
@@ -415,8 +461,21 @@ int main(int argc, char **argv) {
   }, Smear, Grid, RBGrid, pRNG);
 
   std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
-  HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);
-  HMC.evolve();
+
+  // Branch on integrator.  Both types compiled, chosen at runtime.
+  if (integrator_name == "ForceGradient") {
+    typedef ForceGradient<PeriodicGimplR,
+                          SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
+    IntT MDyn(&Grid, MD, Aset, Smear);
+    HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);
+    HMC.evolve();
+  } else {
+    typedef MinimumNorm2<PeriodicGimplR,
+                         SmearedConfiguration<PeriodicGimplR>, Reps> IntT;
+    IntT MDyn(&Grid, MD, Aset, Smear);
+    HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);
+    HMC.evolve();
+  }
 
   std::cout << GridLogMessage << "QCD gauge generation complete." << std::endl;
   Grid_finalize();

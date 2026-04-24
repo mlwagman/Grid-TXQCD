@@ -37,8 +37,22 @@ nvidia-smi --query-gpu=index,name --format=csv,noheader
 for i in $(seq 0 $((N_STREAMS-1))); do
   logfile="slurm-logs/qcd_s${i}.${SLURM_JOB_ID}.out"
   echo "[stream $i] GPU=$i  log=$logfile"
+  # mpirun -np 1 is needed — direct ./gen_qcd_cfgs invocation fails at
+  # MPI_Init_thread with "SLURM detected, OMPI not built with SLURM PMI
+  # support" on the current libGrid (post-LIME rebuild).
+  # --map-by ppr:1:socket:PE=16 : each rank sees 16 processing elements
+  # spread over its socket; does NOT collapse to 1-2 cores (mpirun's
+  # default) and does NOT fully unbind (--bind-to none empirically crushes
+  # GPU utilisation for MP-CG workloads).
+  # Forward tunable env vars (MDSTEPS, WEAK_FIELD_SCALE, NO_METROP, START_TYPE)
+  # through the prefix so mpirun inherits them.  Any unset var falls through to
+  # the binary's default.
   CUDA_VISIBLE_DEVICES=$i STREAM_ID=$i \
-      ./gen_qcd_cfgs --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
+      MDSTEPS="${MDSTEPS-}" WEAK_FIELD_SCALE="${WEAK_FIELD_SCALE-}" \
+      NO_METROP="${NO_METROP-}" START_TYPE="${START_TYPE-}" \
+      SUFFIX="${SUFFIX-}" \
+      mpirun -np 1 --map-by ppr:1:socket:PE=16 \
+          ./gen_qcd_cfgs --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
       >"$logfile" 2>&1 &
   sleep 2   # stagger startup so CUDA init messages don't interleave
 done
