@@ -156,7 +156,9 @@ int main(int argc, char **argv) {
   // Match chroma's XML-β convention for reference-ensemble compatibility.
   typedef PlaqPlusRectangleAction<PeriodicGimplR> PlaqRectR;
   GaugeActionAdapter<PlaqRectR> GaugeAction(beta, -beta / (20.0 * u0 * u0));
-  GaugeAction.is_smeared = true;
+  // Chroma's LW_TREE_GAUGEACT operates on the THIN (unsmeared) gauge links;
+  // stout only wraps the fermion via STOUT_FERM_STATE.  Set is_smeared=false.
+  GaugeAction.is_smeared = false;
 
   AuxiliaryFieldGaussianAction AuxAction(lambda_runtime);
 

@@ -430,7 +430,12 @@ int main(int argc, char **argv) {
   // we construct PlaqPlusRectangleAction directly with chroma's coefficients.
   typedef PlaqPlusRectangleAction<PeriodicGimplR> PlaqRectR;
   PlaqRectR GaugeAction(beta, -beta / (20.0 * u0 * u0));
-  GaugeAction.is_smeared = true;
+  // Chroma's LW_TREE_GAUGEACT operates on the THIN (unsmeared) gauge links;
+  // stout only wraps the fermion via STOUT_FERM_STATE.  Setting
+  // is_smeared=false here makes the gauge action see thin U directly —
+  // matching chroma.  is_smeared=true was the cause of the Δplaq=0.12
+  // equilibrium shift vs chroma's 0.5135.
+  GaugeAction.is_smeared = false;
 
   typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
   // Outer (fermion) level: 7 steps/trajectory.  Inner (gauge) level: 4 gauge
