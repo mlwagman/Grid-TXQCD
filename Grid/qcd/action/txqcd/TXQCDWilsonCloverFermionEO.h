@@ -330,21 +330,29 @@ class TXQCDWilsonCloverFermionEO {
 
  public:
   // SIMD path: do the per-site 24×24 mat-vec inside a single accelerator_for
-  // over outer SIMD sites.  Faster than the legacy un/revec scalar path on
-  // small lattices, but currently triggers MultiShift CG divergence to NaN
-  // on the 16³×48 production lattice — disabled by default until the bug is
-  // tracked down.  Opt in with TXQCD_MOOEEINV_SIMD=1.
+  // over outer SIMD sites — the production-default fast path.  TXQCD_MOOEEINV_SCALAR=1
+  // forces the legacy un/revec scalar path for A/B testing.
+  //
+  // Caveat: at exactly identity gauge (WEAK_FIELD_SCALE=0) on the 16³×48
+  // production lattice the SIMD path triggers MultiShift CG divergence to
+  // NaN — likely a degenerate-eigenvalue artifact from the translation-
+  // invariant Schur operator (CG iteration order interacts with the SIMD
+  // accumulator non-trivially when many shifts are exactly degenerate).
+  // Real production HMC never starts from exact identity (configs come
+  // from a warm start or an imported chroma cfg), so this hasn't been
+  // observed in actual runs.  If you need to verify SIMD correctness from
+  // a synthetic identity start, set TXQCD_MOOEEINV_SCALAR=1.
   void ApplyMooeeInv(int cb, const TXQCDFermionNf &in,
                      TXQCDFermionNf &out) {
     auto t_total0 = usecond();
-    static int use_simd = []() {
-      const char *e = std::getenv("TXQCD_MOOEEINV_SIMD");
+    static int use_scalar = []() {
+      const char *e = std::getenv("TXQCD_MOOEEINV_SCALAR");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
-    if (use_simd) {
-      ApplyMooeeInvSimd(cb, in, out);
-    } else {
+    if (use_scalar) {
       ApplyMooeeInvScalar(cb, in, out);
+    } else {
+      ApplyMooeeInvSimd(cb, in, out);
     }
     t_apply_inv_us_ += usecond() - t_total0;
     n_apply_inv_++;
