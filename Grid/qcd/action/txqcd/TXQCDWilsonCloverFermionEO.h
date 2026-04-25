@@ -329,23 +329,22 @@ class TXQCDWilsonCloverFermionEO {
   }
 
  public:
-  // Fast path: do the per-site 24×24 mat-vec inside a single accelerator_for
-  // over outer SIMD sites.  Reads/writes the SIMD-vectorized fermion fields
-  // directly via coalescedRead/Write — no unvectorize→Eigen→revectorize
-  // roundtrip.  Defaults to this path; set TXQCD_MOOEEINV_SCALAR=1 to run
-  // the legacy scalar path instead (used for correctness comparison and
-  // bisecting performance regressions).
+  // SIMD path: do the per-site 24×24 mat-vec inside a single accelerator_for
+  // over outer SIMD sites.  Faster than the legacy un/revec scalar path on
+  // small lattices, but currently triggers MultiShift CG divergence to NaN
+  // on the 16³×48 production lattice — disabled by default until the bug is
+  // tracked down.  Opt in with TXQCD_MOOEEINV_SIMD=1.
   void ApplyMooeeInv(int cb, const TXQCDFermionNf &in,
                      TXQCDFermionNf &out) {
     auto t_total0 = usecond();
-    static int use_scalar = []() {
-      const char *e = std::getenv("TXQCD_MOOEEINV_SCALAR");
+    static int use_simd = []() {
+      const char *e = std::getenv("TXQCD_MOOEEINV_SIMD");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
-    if (use_scalar) {
-      ApplyMooeeInvScalar(cb, in, out);
-    } else {
+    if (use_simd) {
       ApplyMooeeInvSimd(cb, in, out);
+    } else {
+      ApplyMooeeInvScalar(cb, in, out);
     }
     t_apply_inv_us_ += usecond() - t_total0;
     n_apply_inv_++;
