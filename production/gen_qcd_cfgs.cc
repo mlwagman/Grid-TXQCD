@@ -281,6 +281,8 @@ int main(int argc, char **argv) {
   GridRedBlackCartesian RBGrid(&Grid);
 
   int total_traj = n_therm + n_prod;
+  if (const char *nt = std::getenv("N_TRAJ"); nt && *nt) total_traj = std::atoi(nt);
+  std::cout << GridLogMessage << "total_traj=" << total_traj << std::endl;
   mkdir_p(cfg_dir);
 
   GridSerialRNG   sRNG;
@@ -393,17 +395,33 @@ int main(int argc, char **argv) {
   // outer tolerance 1e-6 (mdtol bias cancels on Metropolis accept/reject).
   WCF FermOp(Umu, Grid, RBGrid, mass_light, csw, csw,
              WilsonAnisotropyCoefficients(), impl_p);
-  ConjugateGradient<LatticeFermion> CG_action(cg_tol, cg_max);
+  RealD cg_action_tol = cg_tol;
+  if (const char *t = std::getenv("CG_TOL"); t && *t) cg_action_tol = std::atof(t);
+  std::cout << GridLogMessage << "CG_TOL=" << cg_action_tol << std::endl;
+  ConjugateGradient<LatticeFermion> CG_action(cg_action_tol, cg_max);
   SchurDifferentiableOperator<WilsonImplR> SchurOpD(FermOp);
   SchurDifferentiableOperator<WilsonImplF> SchurOpF(FermOpF);
+  // CG_MD_TOL env var: MD force CG tolerance.  Default 1e-6 (chroma-style),
+  // but force-FD test showed 0.2% force-action mismatch in TwoFlavourSchurMP
+  // at this tol → tightening here lets us probe whether the residual
+  // mismatch is just sloppy CG or something structural.
+  RealD cg_md_tol = 1e-6;
+  if (const char *t = std::getenv("CG_MD_TOL"); t && *t) cg_md_tol = std::atof(t);
+  std::cout << GridLogMessage << "CG_MD_TOL=" << cg_md_tol << std::endl;
   MixedPrecCGWrapper<LatticeFermion, LatticeFermionF,
                      SchurDifferentiableOperator<WilsonImplR>,
                      SchurDifferentiableOperator<WilsonImplF>>
-      CG_md(1e-6, cg_max, 50, &RBGridF, SchurOpD, SchurOpF);
+      CG_md(cg_md_tol, cg_max, 50, &RBGridF, SchurOpD, SchurOpF);
   QCDLogDetCloverEOAction<WilsonImplR> LightLogDet(FermOp, 2);
   LightLogDet.is_smeared = true;
+  // SOLVER_DEBUG=1 forces DP CG_action also for the derivative — used to
+  // disentangle MP-CG bug from structural deriv vs S inconsistency.
+  bool solver_debug = false;
+  if (const char *t = std::getenv("SOLVER_DEBUG"); t && std::atoi(t)) solver_debug = true;
   TwoFlavourSchurCloverActionMP<WilsonImplR, WilsonImplF>
-      LightSchurPF(FermOp, FermOpF, CG_md, CG_action);
+      LightSchurPF(FermOp, FermOpF,
+                   solver_debug ? (OperatorFunction<LatticeFermion>&)CG_action : (OperatorFunction<LatticeFermion>&)CG_md,
+                   CG_action);
   LightSchurPF.is_smeared = true;
 
   // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC.
@@ -514,6 +532,98 @@ int main(int argc, char **argv) {
   }, Smear, Grid, RBGrid, pRNG);
 
   std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
+
+  // TEST_FORCE_FD: skip HMC, run force-FD consistency check on each action
+  // through the full Smearer wiring (so we test the smeared_force chain rule
+  // for is_smeared=true actions).  Compares dS_actual = S(U_+ε) − S(U_−ε)
+  // against analytic dS_pred = −2ε Σ Re tr(p · U·∂S/∂U).  Ratio → 1 means
+  // deriv() is consistent with S() at this U.  Diverging ratio at small ε →
+  // analytic-vs-numeric force inconsistency.
+  if (const char *t = std::getenv("TEST_FORCE_FD"); t && std::atoi(t)) {
+    std::vector<std::pair<std::string, Action<LatticeGaugeField>*>> actions = {
+        {"PlaqRect",      &GaugeAction},
+        {"LightLogDet",   &LightLogDet},
+        {"LightSchurPF",  &LightSchurPF},
+        {"StrangeLogDet", &StrangeLogDet},
+        {"StrangeSchurPF", &StrangeSchurPF}};
+
+    // FD_NO_SMEAR=1 disables stout smearing on all fermion actions for the
+    // test — isolates whether bug is in plain Schur+clover deriv() or in the
+    // SmearedConfiguration chain-rule plumbing.
+    if (const char *fns = std::getenv("FD_NO_SMEAR"); fns && std::atoi(fns)) {
+      LightLogDet.is_smeared = false;
+      LightSchurPF.is_smeared = false;
+      StrangeLogDet.is_smeared = false;
+      StrangeSchurPF.is_smeared = false;
+      std::cout << GridLogMessage << "[FD] FD_NO_SMEAR=1 — fermion is_smeared=false" << std::endl;
+    }
+
+    // Refresh pseudofermions against the loaded U (smeared, where applicable).
+    Smear.set_Field(Umu);
+    for (auto &p : actions) p.second->refresh(Smear, sRNG, pRNG);
+
+    LatticeGaugeField mom(&Grid);
+    {
+      LatticeColourMatrix mommu(&Grid);
+      for (int mu = 0; mu < Nd; ++mu) {
+        SU<Nc>::GaussianFundamentalLieAlgebraMatrix(pRNG, mommu);
+        PokeIndex<LorentzIndex>(mom, mommu, mu);
+      }
+    }
+
+    LatticeGaugeField Umu_save(&Grid); Umu_save = Umu;
+    LatticeGaugeField UdSdU(&Grid);
+    for (auto &[name, act] : actions) {
+      // Restore U + smear chain to the reference cfg.
+      Umu = Umu_save;
+      Smear.set_Field(Umu);
+      // Compute analytic derivative through Smearer (respects is_smeared +
+      // applies smeared_force chain rule when needed).
+      act->deriv(Smear, UdSdU);
+      // Apply the same projection the integrator does after deriv().  Only the
+      // Lie-algebra (Ta) part of dSdU is physically meaningful — anything else
+      // is dropped before the momentum update.
+      UdSdU = PeriodicGimplR::projectForce(UdSdU);
+      ComplexD dSpred(0.0, 0.0);
+      for (int mu = 0; mu < Nd; ++mu) {
+        auto UdSdUmu = PeekIndex<LorentzIndex>(UdSdU, mu);
+        auto pmu     = PeekIndex<LorentzIndex>(mom, mu);
+        LatticeComplex dS_mu = -2.0 * trace(pmu * UdSdUmu);
+        dSpred += TensorRemove(sum(dS_mu));
+      }
+      RealD S0 = act->S(Smear);
+      std::cout << GridLogMessage << "[FD][" << name << "] S(U)=" << std::setprecision(15) << S0
+                << "  dS_pred=" << dSpred << std::endl;
+      for (RealD eps : {1e-2, 1e-3, 1e-4, 1e-5}) {
+        // U_± = (1 ± ε p) U with the smear chain refreshed via set_Field.
+        LatticeGaugeField Up(&Grid), Um(&Grid);
+        {
+          autoView(Up_v, Up, CpuWrite);
+          autoView(Um_v, Um, CpuWrite);
+          autoView(U_v,  Umu_save, CpuRead);
+          autoView(p_v,  mom, CpuRead);
+          thread_foreach(i, p_v, {
+            for (int mu = 0; mu < Nd; ++mu) {
+              Up_v[i](mu) = U_v[i](mu) + p_v[i](mu) * U_v[i](mu) * eps;
+              Um_v[i](mu) = U_v[i](mu) - p_v[i](mu) * U_v[i](mu) * eps;
+            }
+          });
+        }
+        Umu = Up; Smear.set_Field(Umu);
+        RealD Sp = act->S(Smear);
+        Umu = Um; Smear.set_Field(Umu);
+        RealD Sm = act->S(Smear);
+        RealD dS_actual = Sp - Sm;
+        ComplexD ratio = dS_actual / (2.0 * eps * dSpred);
+        std::cout << GridLogMessage << "[FD][" << name << "]"
+                  << " ε=" << std::scientific << std::setprecision(2) << eps
+                  << " dS_act/2ε=" << std::setprecision(8) << dS_actual / (2.0 * eps)
+                  << " dS_pred=" << dSpred << " ratio=" << ratio << std::endl;
+      }
+    }
+    Grid_finalize();
+    return 0;
+  }
 
   // Branch on integrator.  Both types compiled, chosen at runtime.
   if (integrator_name == "ForceGradient") {
