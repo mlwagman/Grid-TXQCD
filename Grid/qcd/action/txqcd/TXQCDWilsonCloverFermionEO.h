@@ -67,6 +67,39 @@ class TXQCDWilsonCloverFermionEO {
     ImportFields();
   }
 
+  ~TXQCDWilsonCloverFermionEO() {
+    PrintTimers("destructor");
+  }
+
+  // ---- Profiling ----
+  // Accumulating wall-time counters around the 24×24-inverse hotspots.
+  // Profiles where time is spent so we can decide whether to swap the
+  // dense per-site inverse for a Schur / Woodbury solve.
+  void ResetTimers() {
+    t_precompute_us_ = 0;
+    t_apply_inv_us_ = 0;
+    t_unvec_us_ = 0;
+    t_revec_us_ = 0;
+    n_precompute_ = n_apply_inv_ = 0;
+  }
+  void PrintTimers(const char *tag) const {
+    if (n_precompute_ == 0 && n_apply_inv_ == 0) return;
+    auto fmt = [](uint64_t us) { return double(us) * 1e-6; };
+    std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
+              << "] PrecomputeInverses: " << n_precompute_
+              << " calls, " << fmt(t_precompute_us_) << " s ("
+              << (n_precompute_ ? fmt(t_precompute_us_) / n_precompute_ * 1e3 : 0)
+              << " ms/call)" << std::endl;
+    std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
+              << "] ApplyMooeeInv:    " << n_apply_inv_
+              << " calls, " << fmt(t_apply_inv_us_) << " s ("
+              << (n_apply_inv_ ? fmt(t_apply_inv_us_) / n_apply_inv_ * 1e3 : 0)
+              << " ms/call)" << std::endl;
+    std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
+              << "] -- of which un/revectorize: "
+              << fmt(t_unvec_us_ + t_revec_us_) << " s" << std::endl;
+  }
+
   void ImportGauge(const GaugeField &U) {
     Dw_.ImportGauge(U);
     ImportFields();
@@ -192,6 +225,14 @@ class TXQCDWilsonCloverFermionEO {
 
   SMU::SpinMatrices sm_;
 
+  // Profiling counters; use ResetTimers + PrintTimers to read them.
+  mutable uint64_t t_precompute_us_{0};
+  mutable uint64_t t_apply_inv_us_{0};
+  mutable uint64_t t_unvec_us_{0};
+  mutable uint64_t t_revec_us_{0};
+  mutable uint64_t n_precompute_{0};
+  mutable uint64_t n_apply_inv_{0};
+
   void ImportFields() {
     pickCheckerboard(Even, sigma_e_, sigma_);
     pickCheckerboard(Odd, sigma_o_, sigma_);
@@ -218,6 +259,7 @@ class TXQCDWilsonCloverFermionEO {
     auto aux_e = SMU::UnvectorizeAux(sigma_e_, pi_e_, s_e_, p_e_, t_e_);
     auto aux_o = SMU::UnvectorizeAux(sigma_o_, pi_o_, s_o_, p_o_, t_o_);
 
+    auto t0 = usecond();
     if (csw_ != 0.0) {
       auto cl_e = SMU::UnvectorizeClover(FS_e_);
       auto cl_o = SMU::UnvectorizeClover(FS_o_);
@@ -227,6 +269,8 @@ class TXQCDWilsonCloverFermionEO {
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_);
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_);
     }
+    t_precompute_us_ += usecond() - t0;
+    n_precompute_++;
   }
 
   void ApplyDeltaCB(int cb, const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -241,14 +285,17 @@ class TXQCDWilsonCloverFermionEO {
 
   void ApplyMooeeInv(int cb, const TXQCDFermionNf &in,
                      TXQCDFermionNf &out) {
+    auto t_total0 = usecond();
     auto &inv = (cb == Even) ? inv_even_ : inv_odd_;
 
     typedef typename LatticeFermion::vector_object::scalar_object FermSobj;
     std::array<std::vector<FermSobj>, TxqcdNf> in_s, out_s;
+    auto t_unv0 = usecond();
     for (int a = 0; a < TxqcdNf; ++a) {
       unvectorizeToLexOrdArray(in_s[a], in.f[a]);
       out_s[a].resize(in_s[a].size());
     }
+    t_unvec_us_ += usecond() - t_unv0;
 
     uint64_t nsites = in_s[0].size();
     SMU::SiteVector v, w;
@@ -272,10 +319,14 @@ class TXQCDWilsonCloverFermionEO {
           }
     }
 
+    auto t_rev0 = usecond();
     for (int a = 0; a < TxqcdNf; ++a) {
       vectorizeFromLexOrdArray(out_s[a], out.f[a]);
       out.f[a].Checkerboard() = cb;
     }
+    t_revec_us_ += usecond() - t_rev0;
+    t_apply_inv_us_ += usecond() - t_total0;
+    n_apply_inv_++;
   }
 };
 
