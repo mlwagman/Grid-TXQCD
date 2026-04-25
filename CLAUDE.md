@@ -62,6 +62,26 @@ All new code lives under `Grid/qcd/action/txqcd/` (hub: `Txqcd.h`). Two existing
 - **HMC driver pattern.** TXQCD drivers bypass `HMCResourceManager` (which assumes a gauge-only field) and wire `HybridMonteCarlo + Integrator + RNGs` by hand. See `HMC/TXQCD_Wilson_small.cc` or `production/gen_txqcd_cfgs.cc` as the templates.
 - **Measurement inversions** (`meas_conn_*`, `meas_disco_*`): use full-volume `MdagM` CG, *not* EO. This is intentional — measurement inversions are one-shot, HMC forces are what benefit from EO.
 
+## HMC integrator conventions vs chroma
+
+**Grid's `eps` is ~1/4 of chroma's `dt` for the same physical step size**, so chroma's `n_steps=7 tau0=sqrt(2)` (dt_chroma=0.202) matches Grid's `MDsteps=28 trajL=sqrt(2)` (eps_grid=0.0505) — not Grid's MDsteps=7. The factor-of-4 comes from two compounding conventions:
+
+- **Var(P) ratio = 4×.** Grid samples momenta with `Var(P_grid)=2` (CPS_MD_TIME, `HMC_MOMENTUM_DENOMINATOR=2`); chroma samples with `Var(P_chroma)=1/2`.
+- **Implicit kinetic mass differs.** Grid's `H = (1/2)|P|²` with Var(P)=2 ⇒ effective `m_grid=2`. Chroma's `H = |P|²` with Var(P)=1/2 ⇒ effective `m_chroma=1/2`. Combined with the σ ratio above, `dU = P·dt` relates Grid's eps to chroma's dt by a factor of 4.
+
+**Empirical confirmation (chroma `cl3_16_48_b6p1_m0p2450` 1-trajectory tests from a chroma cfg, NO_METROP=1):**
+
+| Grid MDs at trajL=√2 | eps | dH | plaq |
+|---|---|---|---|
+| 7 (chroma's nominal MDs, 4× too large) | 0.20 | 1.5M | 0.42 |
+| 14 | 0.10 | 22k | 0.51 |
+| 28 (≡ chroma's stable setting) | 0.05 | -0.18 | 0.5135 ✓ |
+| 56 | 0.025 | 0.029 | 0.5135 ✓ |
+
+**Chroma's reference setup** (read directly from `.lime` config XML headers): `LCM_STS_MIN_NORM_2`, `lambda=0.1789`, `n_steps=7`, `tau0=1.414`, multi-rate gauge sub-integrator with `n_steps=4`. The non-default Omelyan λ matters less than the dt convention (chroma λ at Grid MDs=7 still gave dH=1.4M; only halving Grid's eps to MDs=14 reduced dH appreciably). For Grid: use `INTEGRATOR=ForceGradient MDSTEPS=20-28 TRAJL=√2` for production; we get ~50-70% acceptance at MDs=20.
+
+Force consistency (`production/gen_qcd_cfgs.cc TEST_FORCE_FD=1`) verifies all action gradients match `(S(U+εp)−S(U−εp))/2ε` to 8 digits at `CG_TOL=1e-13` — the integrator instability at chroma's nominal MDs=7 is a true symplectic-stability boundary, not a force/action bug.
+
 ## Repo layout pointers
 
 - `Grid/` — the library itself; almost all new code lives under `Grid/qcd/action/txqcd/`.
