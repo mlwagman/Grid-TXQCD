@@ -25,10 +25,26 @@
 
 NAMESPACE_BEGIN(Grid);
 
+// SIMD-vectorized 24×24 site matrix used as the precomputed Mooee^{-1}.
+// Storing the per-site inverse in Grid's iMatrix tensor layout lets the
+// per-CG-iteration apply run inside a single accelerator_for over outer
+// SIMD sites — eliminating the unvectorize→Eigen→revectorize roundtrip
+// that previously dominated.
+template <class vtype>
+using TxqcdSiteInvMatrix = iScalar<iScalar<iMatrix<vtype, TxqcdNf * Ns * Nc>>>;
+
+template <class Simd>
+using TxqcdLatticeInvMatrix = Lattice<TxqcdSiteInvMatrix<Simd>>;
+
 class TXQCDWilsonCloverFermionEO {
  public:
   typedef TXQCDSiteMatrixUtil SMU;
   static constexpr int kDim = SMU::kDim;
+  // SIMD type of the underlying gauge field (matches LatticeFermion's vtype).
+  typedef typename LatticeFermion::vector_object::scalar_type FermScalar;
+  typedef typename LatticeFermion::vector_object::vector_type FermVtype;
+  typedef TxqcdSiteInvMatrix<FermVtype> SiteInvMat;
+  typedef Lattice<SiteInvMat> InvField;
 
   typedef WilsonImplR Impl;
   typedef WilsonFermion<Impl> WilsonOp;
@@ -222,6 +238,11 @@ class TXQCDWilsonCloverFermionEO {
 
   std::vector<SMU::SiteMatrix> inv_even_;
   std::vector<SMU::SiteMatrix> inv_odd_;
+  // SIMD-vectorized mirrors of inv_even_/inv_odd_ used by the fast accelerator
+  // apply path.  Packed once per ImportFields, then read via coalescedRead in
+  // the per-CG ApplyMooeeInvSIMD kernel.
+  std::unique_ptr<InvField> inv_simd_e_;
+  std::unique_ptr<InvField> inv_simd_o_;
 
   SMU::SpinMatrices sm_;
 
@@ -269,8 +290,32 @@ class TXQCDWilsonCloverFermionEO {
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_);
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_);
     }
+    PackInverseToSimd(inv_even_, inv_simd_e_, Even);
+    PackInverseToSimd(inv_odd_,  inv_simd_o_, Odd);
     t_precompute_us_ += usecond() - t0;
     n_precompute_++;
+  }
+
+  // Pack the scalar Eigen 24×24 inverse into a SIMD-vectorized lattice field
+  // suitable for accelerator_for kernels.  Done once per ImportFields, so the
+  // per-CG-iteration apply path can read directly from SIMD storage.
+  void PackInverseToSimd(const std::vector<SMU::SiteMatrix> &scalar_inv,
+                         std::unique_ptr<InvField> &simd_field, int cb) {
+    if (!simd_field) simd_field.reset(new InvField(&rbgrid_));
+    typedef typename InvField::vector_object::scalar_object SiteScalar;
+    std::vector<SiteScalar> tmp(scalar_inv.size());
+    thread_for(x, scalar_inv.size(), {
+      const auto &E = scalar_inv[x];
+      for (int r = 0; r < kDim; ++r)
+        for (int c = 0; c < kDim; ++c) {
+          // Eigen stores std::complex<double>; SiteScalar uses Grid's
+          // ComplexD (interface compatible).
+          auto z = E(r, c);
+          tmp[x]()()(r, c) = ComplexD(z.real(), z.imag());
+        }
+    });
+    vectorizeFromLexOrdArray(tmp, *simd_field);
+    simd_field->Checkerboard() = cb;
   }
 
   void ApplyDeltaCB(int cb, const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -283,9 +328,89 @@ class TXQCDWilsonCloverFermionEO {
     ApplyDelta(sig, pi, sc, pc, tc, in, out);
   }
 
+ public:
+  // Fast path: do the per-site 24×24 mat-vec inside a single accelerator_for
+  // over outer SIMD sites.  Reads/writes the SIMD-vectorized fermion fields
+  // directly via coalescedRead/Write — no unvectorize→Eigen→revectorize
+  // roundtrip.  Defaults to this path; set TXQCD_MOOEEINV_SCALAR=1 to run
+  // the legacy scalar path instead (used for correctness comparison and
+  // bisecting performance regressions).
   void ApplyMooeeInv(int cb, const TXQCDFermionNf &in,
                      TXQCDFermionNf &out) {
     auto t_total0 = usecond();
+    static int use_scalar = []() {
+      const char *e = std::getenv("TXQCD_MOOEEINV_SCALAR");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (use_scalar) {
+      ApplyMooeeInvScalar(cb, in, out);
+    } else {
+      ApplyMooeeInvSimd(cb, in, out);
+    }
+    t_apply_inv_us_ += usecond() - t_total0;
+    n_apply_inv_++;
+  }
+
+  void ApplyMooeeInvSimd(int cb, const TXQCDFermionNf &in,
+                         TXQCDFermionNf &out) {
+    GRID_ASSERT(inv_simd_e_ && inv_simd_o_);
+    InvField &inv_simd = (cb == Even) ? *inv_simd_e_ : *inv_simd_o_;
+    GridBase *fg = in.f[0].Grid();
+    out.f[0].Checkerboard() = cb;
+    out.f[1].Checkerboard() = cb;
+
+    autoView(inv_v, inv_simd, AcceleratorRead);
+    autoView(in0_v, in.f[0], AcceleratorRead);
+    autoView(in1_v, in.f[1], AcceleratorRead);
+    autoView(out0_v, out.f[0], AcceleratorWrite);
+    autoView(out1_v, out.f[1], AcceleratorWrite);
+
+    typedef decltype(coalescedRead(in0_v[0])) FermSitePerLane;
+    const int Nsimd = LatticeFermion::vector_object::Nsimd();
+
+    accelerator_for(s, fg->oSites(), Nsimd, {
+      // Per-lane reads: view(s) returns the scalar object for the current
+      // SIMD lane (each GPU thread handles one lane).  view[s] is the
+      // raw vobj and is only used for coalescedWrite.
+      auto Mlane = inv_v(s);
+      auto in0   = in0_v(s);
+      auto in1   = in1_v(s);
+      FermSitePerLane out0_acc;
+      FermSitePerLane out1_acc;
+      // Use the actual element type returned by these reads to declare the
+      // accumulator (Coalesced types differ between CPU/GPU builds).
+      typedef typename std::remove_reference<decltype(Mlane()()(0, 0))>::type MEl;
+      // r = a*Ns*Nc + alpha*Nc + i  ; flavor a in {0,1}.
+      for (int a_out = 0; a_out < TxqcdNf; ++a_out) {
+        for (int alpha_out = 0; alpha_out < Ns; ++alpha_out) {
+          for (int i_out = 0; i_out < Nc; ++i_out) {
+            int r = a_out * Ns * Nc + alpha_out * Nc + i_out;
+            MEl sum;
+            zeroit(sum);
+            for (int a_in = 0; a_in < TxqcdNf; ++a_in) {
+              for (int alpha_in = 0; alpha_in < Ns; ++alpha_in) {
+                for (int i_in = 0; i_in < Nc; ++i_in) {
+                  int c = a_in * Ns * Nc + alpha_in * Nc + i_in;
+                  auto Mrc = Mlane()()(r, c);
+                  auto v_in = (a_in == 0)
+                       ? in0()(alpha_in)(i_in)
+                       : in1()(alpha_in)(i_in);
+                  sum = sum + Mrc * v_in;
+                }
+              }
+            }
+            if (a_out == 0) out0_acc()(alpha_out)(i_out) = sum;
+            else            out1_acc()(alpha_out)(i_out) = sum;
+          }
+        }
+      }
+      coalescedWrite(out0_v[s], out0_acc);
+      coalescedWrite(out1_v[s], out1_acc);
+    });
+  }
+
+  void ApplyMooeeInvScalar(int cb, const TXQCDFermionNf &in,
+                           TXQCDFermionNf &out) {
     auto &inv = (cb == Even) ? inv_even_ : inv_odd_;
 
     typedef typename LatticeFermion::vector_object::scalar_object FermSobj;
@@ -325,8 +450,6 @@ class TXQCDWilsonCloverFermionEO {
       out.f[a].Checkerboard() = cb;
     }
     t_revec_us_ += usecond() - t_rev0;
-    t_apply_inv_us_ += usecond() - t_total0;
-    n_apply_inv_++;
   }
 };
 
