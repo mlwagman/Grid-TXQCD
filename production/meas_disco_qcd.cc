@@ -62,10 +62,15 @@ int main(int argc, char **argv) {
 
   std::cout << GridLogMessage << "[disco QCD] traj=" << traj << std::endl;
 
-  WCF Dw(Usmeared, Grid, RBGrid, mass_light, csw, csw);
+  WilsonImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;
+  WCF Dw(Usmeared, Grid, RBGrid, mass_light, csw, csw,
+         WilsonAnisotropyCoefficients(), impl_p);
   RealD trminv = StochasticTrMinv(Dw, &Grid, pRNG, n_noise_disco);
 
-  WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw);
+  WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw,
+           WilsonAnisotropyCoefficients(), impl_p);
   RealD trminv_strange = StochasticTrMinv(Dw_s, &Grid, pRNG, n_noise_disco);
 
   std::string outfile = qcd_data_dir() + "/disco_qcd_" + std::to_string(traj) + ".h5";

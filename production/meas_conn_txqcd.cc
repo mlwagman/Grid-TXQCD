@@ -127,8 +127,11 @@ int main(int argc, char **argv) {
   auto U_src_links = ExtractLinks(U_src);
 
   // Build TXQCD operator on inversion-smeared links
+  WilsonImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;
   TXQCDWilsonCloverOp Mop(U_inv, Grid, RBGrid, mass_light,
-                           U.sigma, U.pi, U.s, U.p, U.t, csw);
+                           U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
 
   int T = latt[Nd - 1];
   auto sources = SourceGrid(latt);

@@ -121,8 +121,12 @@ int main(int argc, char **argv) {
   SmearInv.set_Field(U.U);
   LatticeGaugeField Usmeared = SmearInv.get_SmearedU();
 
+  WilsonImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;
+
   TXQCDWilsonCloverOp Mop(Usmeared, Grid, RBGrid, mass_light,
-                           U.sigma, U.pi, U.s, U.p, U.t, csw);
+                           U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
 
   std::cout << GridLogMessage << "[disco TXQCD] traj=" << traj << std::endl;
 
@@ -130,7 +134,8 @@ int main(int argc, char **argv) {
   RealD trminv = StochasticTrMinv_TX(Mop, &Grid, pRNG, n_noise_disco);
 
   // Strange quark VEV (standard QCD operator on smeared links)
-  WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw);
+  WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw,
+           WilsonAnisotropyCoefficients(), impl_p);
   RealD trminv_strange = StochasticTrMinv_QCD(Dw_s, &Grid, pRNG, n_noise_disco);
 
   // Aux field VEVs

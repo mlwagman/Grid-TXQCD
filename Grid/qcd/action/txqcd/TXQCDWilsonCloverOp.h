@@ -29,12 +29,21 @@ class TXQCDWilsonCloverOp {
   typedef WilsonFermion<Impl> WilsonOp;
   typedef typename Impl::GaugeField GaugeField;
 
+  // Default impl params: antiperiodic time BC for fermions (matches chroma).
+  static typename Impl::ImplParams DefaultImplParams() {
+    typename Impl::ImplParams p;
+    p.boundary_phases.resize(Nd, 1.0);
+    p.boundary_phases[Nd - 1] = -1.0;
+    return p;
+  }
+
   TXQCDWilsonCloverOp(GaugeField &Umu, GridCartesian &grid,
                 GridRedBlackCartesian &rbgrid, RealD mass,
                 const LatticeSigmaField &sigma, const LatticePiField &pi,
                 const LatticeSFieldC &s, const LatticePFieldC &p,
-                const LatticeTField &t, RealD csw = 0.0)
-      : Dw(Umu, grid, rbgrid, mass), csw_(csw), Umu_(Umu),
+                const LatticeTField &t, RealD csw = 0.0,
+                typename Impl::ImplParams impl_p = DefaultImplParams())
+      : Dw(Umu, grid, rbgrid, mass, impl_p), csw_(csw), Umu_(Umu),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t) {
     if (csw_ != 0.0) {
       for (int mu = 0; mu < Nd; ++mu)

@@ -103,7 +103,11 @@ int main(int argc, char **argv) {
   auto U_src_links = ExtractLinks(U_src);
 
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-  WCF Dw(U_inv, Grid, RBGrid, mass_light, csw, csw);
+  WilsonImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;
+  WCF Dw(U_inv, Grid, RBGrid, mass_light, csw, csw,
+         WilsonAnisotropyCoefficients(), impl_p);
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(cg_tol, cg_max);
 
