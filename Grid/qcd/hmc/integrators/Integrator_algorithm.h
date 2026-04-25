@@ -137,10 +137,15 @@ public:
 };
 
 template <class FieldImplementation_, class SmearingPolicy, class RepresentationPolicy = Representations<FundamentalRepresentation> >
-class MinimumNorm2 : public Integrator<FieldImplementation_, SmearingPolicy, RepresentationPolicy> 
+class MinimumNorm2 : public Integrator<FieldImplementation_, SmearingPolicy, RepresentationPolicy>
 {
 private:
-  const RealD lambda = 0.1931833275037836;
+  // Default = Grid's hardcoded "minimum-error" Omelyan optimum.
+  // LAMBDA_MN2 env override lets us match chroma's stability-optimum 0.1789.
+  const RealD lambda = []() {
+    if (const char *l = std::getenv("LAMBDA_MN2"); l && *l) return std::atof(l);
+    return 0.1931833275037836;
+  }();
 
 public:
   typedef FieldImplementation_ FieldImplementation;
