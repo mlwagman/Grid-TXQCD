@@ -70,9 +70,10 @@ inline void axpy(TXQCDFermionNf &y, const ComplexD &a,
 // Apply Delta_{sigma,pi}: result[a] = sum_b (sigma_{a,b} in[b] + pi_{a,b} g5 in[b])
 // where sigma and pi are Nf x Nf Hermitian flavor-matrix site lattices.
 //
-// Uses direct autoView + thread_for (matching HermitianFlavorForce /
-// FlavorBilinear) so the Nf=2 flavor-matrix element access stays consistent
-// with the pattern known to work on GPU. The Nf=2 flavor loop is hardcoded.
+// Hardcoded Nf=2 unroll.  Runs as accelerator_for on GPU builds (and as
+// SIMD-vectorized OpenMP on CPU builds) by reading lattice views with the
+// canonical view(s) form and writing via coalescedWrite — eliminates the
+// CPU-only thread_for that previously dominated TXQCD MultiShift CG cost.
 inline void ApplyDeltaSigmaPi(const LatticeSigmaField &sigma,
                               const LatticePiField &pi,
                               const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -82,30 +83,45 @@ inline void ApplyDeltaSigmaPi(const LatticeSigmaField &sigma,
   std::array<LatticeFermion, TxqcdNf> g5_in{{LatticeFermion(grid),
                                              LatticeFermion(grid)}};
   for (int b = 0; b < TxqcdNf; ++b) g5_in[b] = g5 * in.f[b];
+  out.f[0].Checkerboard() = in.f[0].Checkerboard();
+  out.f[1].Checkerboard() = in.f[0].Checkerboard();
 
-  autoView(sigmav, sigma, CpuRead);
-  autoView(piv,    pi,    CpuRead);
-  autoView(in0v,   in.f[0], CpuRead);
-  autoView(in1v,   in.f[1], CpuRead);
-  autoView(g0v,    g5_in[0], CpuRead);
-  autoView(g1v,    g5_in[1], CpuRead);
+  autoView(sigmav, sigma, AcceleratorRead);
+  autoView(piv,    pi,    AcceleratorRead);
+  autoView(in0v,   in.f[0], AcceleratorRead);
+  autoView(in1v,   in.f[1], AcceleratorRead);
+  autoView(g0v,    g5_in[0], AcceleratorRead);
+  autoView(g1v,    g5_in[1], AcceleratorRead);
+  autoView(out0v,  out.f[0], AcceleratorWrite);
+  autoView(out1v,  out.f[1], AcceleratorWrite);
 
-  for (int a = 0; a < TxqcdNf; ++a) {
-    autoView(outav, out.f[a], CpuWrite);
-    thread_for(ss, grid->oSites(), {
-      auto sa0 = sigmav[ss]()()(a, 0);
-      auto sa1 = sigmav[ss]()()(a, 1);
-      auto pa0 = piv[ss]()()(a, 0);
-      auto pa1 = piv[ss]()()(a, 1);
+  const int Nsimd = LatticeFermion::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto sigma_lane = sigmav(ss);
+    auto pi_lane    = piv(ss);
+    auto in0_lane   = in0v(ss);
+    auto in1_lane   = in1v(ss);
+    auto g0_lane    = g0v(ss);
+    auto g1_lane    = g1v(ss);
+    typedef decltype(coalescedRead(out0v[0])) FermSitePerLane;
+    FermSitePerLane out0_acc, out1_acc;
+    for (int a = 0; a < TxqcdNf; ++a) {
+      auto sa0 = sigma_lane()()(a, 0);
+      auto sa1 = sigma_lane()()(a, 1);
+      auto pa0 = pi_lane()()(a, 0);
+      auto pa1 = pi_lane()()(a, 1);
       for (int alpha = 0; alpha < Ns; ++alpha) {
         for (int i = 0; i < Nc; ++i) {
-          outav[ss]()(alpha)(i) =
-              sa0 * in0v[ss]()(alpha)(i) + sa1 * in1v[ss]()(alpha)(i)
-            + pa0 *  g0v[ss]()(alpha)(i) + pa1 *  g1v[ss]()(alpha)(i);
+          auto val = sa0 * in0_lane()(alpha)(i) + sa1 * in1_lane()(alpha)(i)
+                   + pa0 *  g0_lane()(alpha)(i) + pa1 *  g1_lane()(alpha)(i);
+          if (a == 0) out0_acc()(alpha)(i) = val;
+          else        out1_acc()(alpha)(i) = val;
         }
       }
-    });
-  }
+    }
+    coalescedWrite(out0v[ss], out0_acc);
+    coalescedWrite(out1v[ss], out1_acc);
+  });
 }
 
 // Map the 6 antisymmetric (mu<nu) pairs to Grid's sigma_{mu,nu} generators.
