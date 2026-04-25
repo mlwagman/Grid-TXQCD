@@ -459,16 +459,26 @@ int main(int argc, char **argv) {
   // Outer (fermion) level: 7 steps/trajectory.  Inner (gauge) level: 4 gauge
   // sub-steps per fermion step -> 28 gauge force evaluations per trajectory.
   // Mirrors chroma's Min-Norm 7 / 7x4 convention on this ensemble.
+  // GAUGE_INNER_MULT env var lets us probe whether multi-rate is the source
+  // of FG instability at MDs=7 — set to 1 to put gauge force at outer level.
+  int gauge_inner_mult = 4;
+  if (const char *m = std::getenv("GAUGE_INNER_MULT"); m && *m) gauge_inner_mult = std::atoi(m);
+  std::cout << GridLogMessage << "GAUGE_INNER_MULT=" << gauge_inner_mult << std::endl;
   ActionLevel<LatticeGaugeField, Reps> L1(1);
+  ActionLevel<LatticeGaugeField, Reps> L2(std::max(1, gauge_inner_mult));
   L1.push_back(&LightLogDet);
   L1.push_back(&LightSchurPF);
   L1.push_back(&StrangeLogDet);
   L1.push_back(&StrangeSchurPF);
-  ActionLevel<LatticeGaugeField, Reps> L2(4);
-  L2.push_back(&GaugeAction);
   ActionSet<LatticeGaugeField, Reps> Aset;
-  Aset.push_back(L1);
-  Aset.push_back(L2);
+  if (gauge_inner_mult <= 1) {
+    L1.push_back(&GaugeAction);
+    Aset.push_back(L1);
+  } else {
+    L2.push_back(&GaugeAction);
+    Aset.push_back(L1);
+    Aset.push_back(L2);
+  }
 
   // INTEGRATOR env var: "MinimumNorm2" (default) or "ForceGradient".  Added
   // to allow direct comparison against TXQCD runs using the same integrator.
