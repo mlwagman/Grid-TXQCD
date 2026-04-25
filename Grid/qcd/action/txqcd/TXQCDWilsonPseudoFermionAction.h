@@ -37,22 +37,35 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
                                         const TXQCDFermionNf &X) {
   GridBase *grid = Y.Grid();
   LatticeSigmaField G(grid); G = Zero();
-  autoView(Gv, G, CpuWrite);
-  for (int a = 0; a < TxqcdNf; ++a) {
-    autoView(Yv, Y.f[a], CpuRead);
-    for (int b = 0; b < TxqcdNf; ++b) {
-      autoView(Xv, X.f[b], CpuRead);
-      thread_for(ss, grid->oSites(), {
-        vComplex acc; acc = Zero();
+  G.Checkerboard() = Y.f[0].Checkerboard();
+  // Fuse the Nf=2 outer loops into one accelerator_for over outer SIMD sites.
+  autoView(Gv,  G,       AcceleratorWrite);
+  autoView(Y0v, Y.f[0],  AcceleratorRead);
+  autoView(Y1v, Y.f[1],  AcceleratorRead);
+  autoView(X0v, X.f[0],  AcceleratorRead);
+  autoView(X1v, X.f[1],  AcceleratorRead);
+  const int Nsimd = LatticeFermion::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto Y0 = Y0v(ss); auto Y1 = Y1v(ss);
+    auto X0 = X0v(ss); auto X1 = X1v(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(Gv(ss))>::type>::type SigSitePerLane;
+    SigSitePerLane g_acc;
+    for (int a = 0; a < TxqcdNf; ++a) {
+      auto Y_a = (a == 0) ? Y0 : Y1;
+      for (int b = 0; b < TxqcdNf; ++b) {
+        auto X_b = (b == 0) ? X0 : X1;
+        decltype(conjugate(Y_a()(0)(0)) * X_b()(0)(0)) acc;
+        zeroit(acc);
         for (int alpha = 0; alpha < Ns; ++alpha) {
           for (int i = 0; i < Nc; ++i) {
-            acc = acc + conjugate(Yv[ss]()(alpha)(i)) * Xv[ss]()(alpha)(i);
+            acc = acc + conjugate(Y_a()(alpha)(i)) * X_b()(alpha)(i);
           }
         }
-        Gv[ss]()()(a, b) = acc;
-      });
+        g_acc()()(a, b) = acc;
+      }
     }
-  }
+    coalescedWrite(Gv[ss], g_acc);
+  });
   return G;
 }
 
@@ -60,14 +73,20 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
 inline LatticeSigmaField HermitianFlavorForce(const LatticeSigmaField &G) {
   GridBase *grid = G.Grid();
   LatticeSigmaField F(grid); F = Zero();
-  autoView(Fv, F, CpuWrite);
-  autoView(Gv, G, CpuRead);
-  thread_for(ss, grid->oSites(), {
+  F.Checkerboard() = G.Checkerboard();
+  autoView(Fv, F, AcceleratorWrite);
+  autoView(Gv, G, AcceleratorRead);
+  const int Nsimd = LatticeSigmaField::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto g = Gv(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(g)>::type>::type SigSitePerLane;
+    SigSitePerLane f_acc;
     for (int a = 0; a < TxqcdNf; ++a) {
       for (int b = 0; b < TxqcdNf; ++b) {
-        Fv[ss]()()(a, b) = -(Gv[ss]()()(b, a) + conjugate(Gv[ss]()()(a, b)));
+        f_acc()()(a, b) = -(g()()(b, a) + conjugate(g()()(a, b)));
       }
     }
+    coalescedWrite(Fv[ss], f_acc);
   });
   return F;
 }
@@ -84,27 +103,43 @@ inline LatticeSFieldC ColorBilinearSpinOp(const TXQCDFermionNf &Y,
                                           const Spin4Op &Op) {
   GridBase *grid = Y.Grid();
   LatticeSFieldC G(grid); G = Zero();
-  autoView(Gv, G, CpuWrite);
-  for (int a = 0; a < TxqcdNf; ++a) {
-    autoView(Yv, Y.f[a], CpuRead);
-    autoView(Xv, X.f[a], CpuRead);
-    thread_for(ss, grid->oSites(), {
-      for (int alpha = 0; alpha < Ns; ++alpha) {
-        for (int beta = 0; beta < Ns; ++beta) {
-          auto op_ab = Op(alpha, beta); // ComplexD
-          if (op_ab == ComplexD(0.0, 0.0)) continue;
-          for (int i = 0; i < Nc; ++i) {
-            for (int j = 0; j < Nc; ++j) {
-              Gv[ss]()()(i, j) =
-                  Gv[ss]()()(i, j) +
-                  conjugate(Yv[ss]()(alpha)(i)) * op_ab *
-                      Xv[ss]()(beta)(j);
+  G.Checkerboard() = Y.f[0].Checkerboard();
+  // Spin matrix Op is small (4×4 ComplexD).  Capture it via a flat 16-entry
+  // array so the lambda can access it through a __device__-friendly local.
+  std::array<ComplexD, Ns * Ns> opflat{};
+  for (int alpha = 0; alpha < Ns; ++alpha)
+    for (int beta = 0; beta < Ns; ++beta)
+      opflat[alpha * Ns + beta] = Op(alpha, beta);
+  autoView(Gv,  G,       AcceleratorWrite);
+  autoView(Y0v, Y.f[0],  AcceleratorRead);
+  autoView(Y1v, Y.f[1],  AcceleratorRead);
+  autoView(X0v, X.f[0],  AcceleratorRead);
+  autoView(X1v, X.f[1],  AcceleratorRead);
+  const int Nsimd = LatticeFermion::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto Y0 = Y0v(ss); auto Y1 = Y1v(ss);
+    auto X0 = X0v(ss); auto X1 = X1v(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(Gv(ss))>::type>::type SSitePerLane;
+    SSitePerLane g_acc;
+    for (int i = 0; i < Nc; ++i) {
+      for (int j = 0; j < Nc; ++j) {
+        decltype(conjugate(Y0()(0)(0)) * X0()(0)(0)) acc;
+        zeroit(acc);
+        for (int a = 0; a < TxqcdNf; ++a) {
+          auto Y_a = (a == 0) ? Y0 : Y1;
+          auto X_a = (a == 0) ? X0 : X1;
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int beta = 0; beta < Ns; ++beta) {
+              ComplexD op_ab = opflat[alpha * Ns + beta];
+              acc = acc + conjugate(Y_a()(alpha)(i)) * op_ab * X_a()(beta)(j);
             }
           }
         }
+        g_acc()()(i, j) = acc;
       }
-    });
-  }
+    }
+    coalescedWrite(Gv[ss], g_acc);
+  });
   return G;
 }
 
@@ -112,14 +147,20 @@ inline LatticeSFieldC ColorBilinearSpinOp(const TXQCDFermionNf &Y,
 inline LatticeSFieldC HermitianColorForce(const LatticeSFieldC &G) {
   GridBase *grid = G.Grid();
   LatticeSFieldC F(grid); F = Zero();
-  autoView(Fv, F, CpuWrite);
-  autoView(Gv, G, CpuRead);
-  thread_for(ss, grid->oSites(), {
+  F.Checkerboard() = G.Checkerboard();
+  autoView(Fv, F, AcceleratorWrite);
+  autoView(Gv, G, AcceleratorRead);
+  const int Nsimd = LatticeSFieldC::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto g = Gv(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(g)>::type>::type CSitePerLane;
+    CSitePerLane f_acc;
     for (int i = 0; i < Nc; ++i) {
       for (int j = 0; j < Nc; ++j) {
-        Fv[ss]()()(i, j) = -(Gv[ss]()()(j, i) + conjugate(Gv[ss]()()(i, j)));
+        f_acc()()(i, j) = -(g()()(j, i) + conjugate(g()()(i, j)));
       }
     }
+    coalescedWrite(Fv[ss], f_acc);
   });
   return F;
 }
