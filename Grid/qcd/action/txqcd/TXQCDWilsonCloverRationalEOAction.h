@@ -311,6 +311,7 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
   }
 
   // Accumulate aux-field force from a bilinear pair (Y, X) on any CB grid.
+ public:
   void AccumulateAuxForce(TXQCDField &dSdU, RealD ak,
                           const TXQCDFermionNf &Y, const TXQCDFermionNf &X,
                           const Gamma &g5, ComplexD inv_sqrt2,
@@ -380,17 +381,23 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
         LatticeSFieldC Ftfull(&grid_);
         Ftfull = Zero();
         setCheckerboard(Ftfull, Ft);
-        autoView(dst, dSdU.t, CpuWrite);
-        autoView(src, Ftfull, CpuRead);
-        thread_for(ss, grid_.oSites(), {
+        autoView(dst, dSdU.t, AcceleratorWrite);
+        autoView(src, Ftfull, AcceleratorRead);
+        const int Nsimd = LatticeTField::vector_object::Nsimd();
+        const RealD ak_local = ak;
+        const int mu_l = mu;
+        const int nu_l = nu;
+        accelerator_for(ss, grid_.oSites(), Nsimd, {
+          auto s_lane = src(ss);
+          auto d_lane = dst(ss);
           for (int i = 0; i < Nc; ++i) {
             for (int j = 0; j < Nc; ++j) {
-              dst[ss]()(mu, nu)(i, j) =
-                  dst[ss]()(mu, nu)(i, j) + ak * src[ss]()()(i, j);
-              dst[ss]()(nu, mu)(i, j) =
-                  dst[ss]()(nu, mu)(i, j) - ak * src[ss]()()(i, j);
+              auto v = ak_local * s_lane()()(i, j);
+              d_lane()(mu_l, nu_l)(i, j) = d_lane()(mu_l, nu_l)(i, j) + v;
+              d_lane()(nu_l, mu_l)(i, j) = d_lane()(nu_l, mu_l)(i, j) - v;
             }
           }
+          coalescedWrite(dst[ss], d_lane);
         });
       }
     }
