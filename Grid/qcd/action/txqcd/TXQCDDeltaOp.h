@@ -103,7 +103,8 @@ inline void ApplyDeltaSigmaPi(const LatticeSigmaField &sigma,
     auto in1_lane   = in1v(ss);
     auto g0_lane    = g0v(ss);
     auto g1_lane    = g1v(ss);
-    typedef decltype(coalescedRead(out0v[0])) FermSitePerLane;
+    // Same per-lane type as input fermion view; only declare it, don't read.
+    typedef decltype(in0_lane) FermSitePerLane;
     FermSitePerLane out0_acc, out1_acc;
     for (int a = 0; a < TxqcdNf; ++a) {
       auto sa0 = sigma_lane()()(a, 0);
