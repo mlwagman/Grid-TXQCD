@@ -133,6 +133,8 @@ int main(int argc, char **argv) {
   GridRedBlackCartesian RBGrid(&Grid);
 
   int total_traj = n_therm + n_prod;
+  if (const char *nt = std::getenv("N_TRAJ"); nt && *nt) total_traj = std::atoi(nt);
+  std::cout << GridLogMessage << "total_traj=" << total_traj << std::endl;
   mkdir_p(cfg_dir);
 
   GridSerialRNG   sRNG;
