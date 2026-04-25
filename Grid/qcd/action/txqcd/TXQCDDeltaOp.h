@@ -157,32 +157,100 @@ inline void ApplyDeltaColor(const LatticeSFieldC &s,
                             const LatticePFieldC &p,
                             const LatticeTField &t,
                             const TXQCDFermionNf &in, TXQCDFermionNf &out) {
-  const RealD inv_sqrt2 = 1.0 / std::sqrt(2.0);
+  GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
 
+  // Pre-rotate the input fermions once per flavor for γ5 and the 6 sigma_{μν}
+  // pairs.  Grid's Gamma * LatticeFermion is GPU-accelerated; doing this
+  // outside the per-site loop avoids in-loop temporaries (which were one of
+  // the dominant costs of MultiShift CG refresh on the production lattice).
+  std::array<LatticeFermion, TxqcdNf> g5_in{{LatticeFermion(grid),
+                                             LatticeFermion(grid)}};
+  // 6 (μν) pairs with μ<ν indexed by SMU::FmnIndex (XY,XZ,XT,YZ,YT,ZT).
+  constexpr int Npairs = 6;
+  std::vector<LatticeFermion> smn_in;
+  smn_in.reserve(Npairs * TxqcdNf);
   for (int a = 0; a < TxqcdNf; ++a) {
-    // s term: (1/sqrt 2) * s * v[a].
-    out.f[a] = inv_sqrt2 * (s * in.f[a]);
-    // p gamma5 term.
-    LatticeFermion g5v(in.Grid());
-    g5v = g5 * in.f[a];
-    out.f[a] = out.f[a] + inv_sqrt2 * (p * g5v);
-    // Tensor term: sum over (mu < nu) of t_{mu,nu} (sigma_{mu,nu} v[a]).
-    // Grid's Gamma::SigmaMN is the anti-Hermitian (1/2)[gamma_mu, gamma_nu];
-    // the TXQCD notes use the Hermitian sigma_{mu,nu} = (i/2)[gamma_mu,
-    // gamma_nu], which is i * Grid's version. We therefore multiply by i
-    // explicitly so t_{mu,nu} * sigma_{mu,nu} is Hermitian.
-    const ComplexD ci(0.0, 1.0);
+    g5_in[a] = g5 * in.f[a];
     for (int mu = 0; mu < Nd; ++mu) {
       for (int nu = mu + 1; nu < Nd; ++nu) {
         Gamma smn(SigmaMuNuAlgebra(mu, nu));
-        LatticeFermion smn_v(in.Grid());
-        smn_v = smn * in.f[a];
-        auto t_mn = PeekIndex<1>(t, mu, nu);
-        out.f[a] = out.f[a] + ci * (t_mn * smn_v);
+        smn_in.emplace_back(grid);
+        smn_in.back() = smn * in.f[a];
       }
     }
   }
+
+  out.f[0].Checkerboard() = in.f[0].Checkerboard();
+  out.f[1].Checkerboard() = in.f[0].Checkerboard();
+
+  autoView(sv,  s, AcceleratorRead);
+  autoView(pv,  p, AcceleratorRead);
+  autoView(tv,  t, AcceleratorRead);
+  autoView(in0v, in.f[0],   AcceleratorRead);
+  autoView(in1v, in.f[1],   AcceleratorRead);
+  autoView(g0v,  g5_in[0],  AcceleratorRead);
+  autoView(g1v,  g5_in[1],  AcceleratorRead);
+  // 12 sigma-rotated views ordered (a, k=μν-pair).
+  autoView(s00v, smn_in[0], AcceleratorRead);
+  autoView(s01v, smn_in[1], AcceleratorRead);
+  autoView(s02v, smn_in[2], AcceleratorRead);
+  autoView(s03v, smn_in[3], AcceleratorRead);
+  autoView(s04v, smn_in[4], AcceleratorRead);
+  autoView(s05v, smn_in[5], AcceleratorRead);
+  autoView(s10v, smn_in[6], AcceleratorRead);
+  autoView(s11v, smn_in[7], AcceleratorRead);
+  autoView(s12v, smn_in[8], AcceleratorRead);
+  autoView(s13v, smn_in[9], AcceleratorRead);
+  autoView(s14v, smn_in[10], AcceleratorRead);
+  autoView(s15v, smn_in[11], AcceleratorRead);
+  autoView(out0v, out.f[0], AcceleratorWrite);
+  autoView(out1v, out.f[1], AcceleratorWrite);
+
+  const ComplexD ci(0.0, 1.0);
+  const RealD inv_sqrt2 = 1.0 / std::sqrt(2.0);
+  const int Nsimd = LatticeFermion::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto s_lane  = sv(ss);
+    auto p_lane  = pv(ss);
+    auto t_lane  = tv(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(in0v(ss))>::type>::type FermSitePerLane;
+    FermSitePerLane out0_acc, out1_acc;
+    for (int a = 0; a < TxqcdNf; ++a) {
+      auto in_lane = (a == 0) ? in0v(ss) : in1v(ss);
+      auto g_lane  = (a == 0) ? g0v(ss)  : g1v(ss);
+      // Pull the 6 sigma-rotated lanes for this flavor.  The compiler can
+      // hoist these because they're independent.
+      auto smn00 = (a == 0) ? s00v(ss) : s10v(ss);
+      auto smn01 = (a == 0) ? s01v(ss) : s11v(ss);
+      auto smn02 = (a == 0) ? s02v(ss) : s12v(ss);
+      auto smn12 = (a == 0) ? s03v(ss) : s13v(ss);
+      auto smn13 = (a == 0) ? s04v(ss) : s14v(ss);
+      auto smn23 = (a == 0) ? s05v(ss) : s15v(ss);
+      for (int alpha = 0; alpha < Ns; ++alpha) {
+        for (int i = 0; i < Nc; ++i) {
+          // s, p (color matrices) and the 6 t_{μν} blocks contracted on
+          // color index j.
+          decltype(s_lane()()(i, 0) * in_lane()(alpha)(0)) val;
+          zeroit(val);
+          for (int j = 0; j < Nc; ++j) {
+            val = val + s_lane()()(i, j) * (inv_sqrt2 * in_lane()(alpha)(j))
+                      + p_lane()()(i, j) * (inv_sqrt2 * g_lane()(alpha)(j))
+                      + ci * (t_lane()(0, 1)(i, j) * smn00()(alpha)(j))
+                      + ci * (t_lane()(0, 2)(i, j) * smn01()(alpha)(j))
+                      + ci * (t_lane()(0, 3)(i, j) * smn02()(alpha)(j))
+                      + ci * (t_lane()(1, 2)(i, j) * smn12()(alpha)(j))
+                      + ci * (t_lane()(1, 3)(i, j) * smn13()(alpha)(j))
+                      + ci * (t_lane()(2, 3)(i, j) * smn23()(alpha)(j));
+          }
+          if (a == 0) out0_acc()(alpha)(i) = val;
+          else        out1_acc()(alpha)(i) = val;
+        }
+      }
+    }
+    coalescedWrite(out0v[ss], out0_acc);
+    coalescedWrite(out1v[ss], out1_acc);
+  });
 }
 
 // Apply the full Delta: sigma + pi + s + p + t pieces. Result overwrites out.
