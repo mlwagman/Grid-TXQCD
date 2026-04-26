@@ -16,13 +16,14 @@
 
 NAMESPACE_BEGIN(Grid);
 
-template <class Impl, class CloverHelpers = Grid::CloverHelpers<Impl>>
+template <class Impl,
+          class FermionOp = WilsonCloverFermion<Impl, Grid::CloverHelpers<Impl>>>
 class TwoFlavourSchurCloverAction
     : public Action<typename Impl::GaugeField> {
 public:
   INHERIT_IMPL_TYPES(Impl);
 
-  typedef WilsonCloverFermion<Impl, CloverHelpers> FermionOperator;
+  typedef FermionOp FermionOperator;
 
 protected:
   FermionOperator &FermOp;

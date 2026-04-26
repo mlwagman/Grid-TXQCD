@@ -51,8 +51,8 @@ for i in $(seq 0 $((N_STREAMS-1))); do
       MDSTEPS="${MDSTEPS-}" AUX_MULT="${AUX_MULT-}" GAUGE_MULT="${GAUGE_MULT-}" \
       WEAK_FIELD_SCALE="${WEAK_FIELD_SCALE-}" NO_METROP="${NO_METROP-}" \
       START_TYPE="${START_TYPE-}" HASEN_DM="${HASEN_DM-}" SUFFIX="${SUFFIX-}" \
-      AUX_SIGMA_L="${AUX_SIGMA_L-}" \
-      INTEGRATOR="${INTEGRATOR-}" TRAJL="${TRAJL-}" \
+      AUX_SIGMA_L="${AUX_SIGMA_L-}" N_TRAJ="${N_TRAJ-}" \
+      INTEGRATOR="${INTEGRATOR-}" TRAJL="${TRAJL-}" LAMBDA_MN2="${LAMBDA_MN2-}" \
       mpirun -np 1 --map-by ppr:1:socket:PE=16 \
           ./gen_txqcd_cfgs --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
       >"$logfile" 2>&1 &

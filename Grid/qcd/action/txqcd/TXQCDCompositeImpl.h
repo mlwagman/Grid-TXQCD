@@ -89,37 +89,20 @@ inline void GaussianAntisymTensor(GridParallelRNG &pRNG, LatticeTField &T) {
 }
 
 // Squared Frobenius norm of a Hermitian site-matrix field: sum_x Tr(X^2).
+// For Hermitian X: Tr(X^2) = Tr(X†X) = |X|_Frob^2 = norm2(X).  norm2's
+// reduction is bit-deterministic across runs, unlike Re(sum(trace(X*X))).
 template <class LatticeMat>
 inline RealD HermitianFieldSquareNorm(LatticeMat &X) {
-  return TensorRemove(sum(trace(X * X))).real();
+  return norm2(X);
 }
 
 inline RealD TensorFieldSquareNorm(LatticeTField &T) {
-  // (1/2) sum_{mu,nu} Tr(t_{mu,nu}^2) ; factor 1/2 keeps antisymmetric pairs
-  // from being double-counted across (mu<nu) vs (nu<mu).
-  autoView(T_v, T, CpuRead);
-  GridBase *grid = T.Grid();
-  RealD total = 0.0;
-  // Simple unoptimized reduction; Phase 4a only needs correctness, not speed.
-  thread_for(ss, grid->oSites(), {
-    for (int mu = 0; mu < Nd; ++mu) {
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        auto M = T_v[ss]()(mu, nu);
-        // Tr(M^2): sum_i,j M_ij * M_ji
-        for (int i = 0; i < Nc; ++i) {
-          for (int j = 0; j < Nc; ++j) {
-            auto v = M(i, j) * M(j, i);
-            // SIMD reduction: sum vComplex lanes.
-            auto vs = Reduce(v);
-            total += real(vs);
-          }
-        }
-      }
-    }
-  });
-  // MPI reduction
-  grid->GlobalSum(total);
-  return total;
+  // For an antisymmetric tensor with Hermitian color blocks:
+  //   Σ_{μ<ν} Tr(t_{μν}^2)  =  Σ_{μ<ν} norm2(t_{μν})  =  (1/2) · norm2(t)
+  // (each (μ,ν) pair counted twice in the full Σ_{μ,ν,μ≠ν} norm2).  Using
+  // norm2 replaces a thread_for with non-atomic accumulation (race condition
+  // → non-deterministic) with Grid's bit-deterministic global reduction.
+  return norm2(T) / 2.0;
 }
 
 // ---------- Composite FieldImplementation ----------
@@ -236,24 +219,34 @@ class TXQCDCompositeImpl {
   // LieRandomize (bypassing Grid's hard-coded 0.01 in TepidConfiguration).
   // Default wf_scale = 0.1 matches chroma's WEAK_FIELD convention.
   //
-  // Optional Sigma_l: light-quark chiral-condensate guess per site
-  //   Σ_l ≡ −<q̄q>/N_f  (txqcd_notes.tex eq. above eq. 238).
-  // When Sigma_l != 0, σ and s are initialized at their equilibrium means
-  //   <σ_ab> = δ_ab · Σ_l / λ²
-  //   <s^ij> = δ_ij · N_f · Σ_l / (√2 · N_c · λ²)
-  // plus the usual Gaussian fluctuation of width 1/λ.  Skips the mean-drift
-  // phase of thermalization at large λ where aux fields start far from <σ>.
-  // Sigma_l=0 (default) gives the zero-mean initialization.
-  static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
-                                             RealD lambda,
-                                             double wf_scale = 0.1,
-                                             RealD Sigma_l = 0.0) {
-    // Scaled weak-field gauge.
+  // Sigma is the user-facing "chiral-condensate-equivalent" that determines
+  // the σ and s aux equilibrium means.  Convention:
+  //   Σ ≡ vev_trminv / 2 = Tr[M⁻¹] / (4V)   on the same gauge field
+  // where vev_trminv is what production/compute_vev produces.  At equilibrium:
+  //   <σ_aa> = Σ / λ²                        (positive for positive Σ)
+  //   <s_ii> = (N_f / (√2 · N_c)) · Σ / λ²
+  // plus the usual Gaussian fluctuation of width 1/λ.  Sigma=0 (default)
+  // gives zero-mean aux init.  See reference memory
+  // "TXQCD aux init convention" for the factor-of-4 derivation (factor of 2
+  // in vev_trminv's denominator + factor of 2 from N_f-flavor symmetrization).
+  // Generate ONLY the weak-field gauge component of U (LieRandomize per μ).
+  // Caller can use the resulting U.U to compute the chiral condensate before
+  // the aux fields are filled — useful for AUX_INIT_AUTO.
+  static inline void GenerateWeakFieldGauge(GridParallelRNG &pRNG, Field &U,
+                                            double wf_scale) {
     LatticeColourMatrix Ulink(U.U.Grid());
     for (int mu = 0; mu < Nd; ++mu) {
       SU<Nc>::LieRandomize(pRNG, Ulink, wf_scale);
       PokeIndex<LorentzIndex>(U.U, Ulink, mu);
     }
+  }
+
+  // Fill the aux fields (σ, π, s, p, t) of U with Gaussian fluctuations of
+  // width 1/λ, with σ and s additionally offset on the diagonal so that
+  // <σ_aa>=Σ/λ² and <s_ii>=(N_f/(√2·N_c))·Σ/λ² match the equilibrium per
+  // the txqcd_notes convention.  Assumes U.U (gauge) is already populated.
+  static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
+                                   RealD lambda, RealD Sigma) {
     RealD s = 1.0 / lambda;
     HermitianGaussian(pRNG, U.sigma); U.sigma = s * U.sigma;
     HermitianGaussian(pRNG, U.pi);    U.pi    = s * U.pi;
@@ -261,17 +254,10 @@ class TXQCDCompositeImpl {
     HermitianGaussian(pRNG, U.p);     U.p     = s * U.p;
     GaussianAntisymTensor(pRNG, U.t); U.t     = (s / std::sqrt(2.0)) * U.t;
 
-    if (Sigma_l != 0.0) {
-      // Empirical sign (flipped from the literal txqcd_notes eq. at line 238):
-      // running vanilla RHMC at 4⁴, λ=6.6, Wilson-Clover m=-0.245 from tepid
-      // shows σ equilibrates to the POSITIVE sign of AUX_SIGMA_L (i.e. HMC
-      // prefers σ_eq ≈ +Σ_l/λ², not −Σ_l/λ² as the notes' sign convention
-      // for Σ=−<q̄q>/N_f would suggest).  The formula magnitude |Σ|/λ² is
-      // correct; only the sign was backward.  Pass AUX_SIGMA_L with the same
-      // sign as the bare tr M⁻¹/V (positive for our Wilson setup).
-      const RealD sigma_mean = -Sigma_l / (lambda * lambda);
+    if (Sigma != 0.0) {
+      const RealD sigma_mean = Sigma / (lambda * lambda);
       const RealD s_mean =
-          -static_cast<RealD>(TxqcdNf) * Sigma_l /
+          static_cast<RealD>(TxqcdNf) * Sigma /
           (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
       // σ: shift diagonal flavor entries by sigma_mean.
       TxqcdSiteSigma sigma_id;
@@ -288,6 +274,14 @@ class TXQCDCompositeImpl {
       shift_s = s_id;
       U.s = U.s + shift_s;
     }
+  }
+
+  static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
+                                             RealD lambda,
+                                             double wf_scale = 0.1,
+                                             RealD Sigma = 0.0) {
+    GenerateWeakFieldGauge(pRNG, U, wf_scale);
+    FillAuxFields(pRNG, U, lambda, Sigma);
   }
 
   static const int num_colours = Nc;

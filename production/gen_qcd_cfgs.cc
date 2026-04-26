@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <Grid/parallelIO/IldgIO.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/fermion/CompactWilsonCloverFermion.h>
 #include <Grid/qcd/action/gauge/PlaqPlusRectangleAction.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 #include <Grid/serialisation/Hdf5IO.h>
@@ -48,12 +49,15 @@ class MixedPrecCGWrapper : public OperatorFunction<FieldD> {
 // Subclass of TwoFlavourSchurCloverAction that keeps the SP operator in sync
 // with the raw gauge field before each deriv().  Passes the CG work to the
 // mixed-precision wrapper installed as the DerivativeSolver.
-template <class ImplD, class ImplF>
+template <class ImplD, class ImplF,
+          class FermOpD_ = WilsonCloverFermion<ImplD, CloverHelpers<ImplD>>,
+          class FermOpF_ = WilsonCloverFermion<ImplF, CloverHelpers<ImplF>>>
 class TwoFlavourSchurCloverActionMP
-    : public TwoFlavourSchurCloverAction<ImplD> {
+    : public TwoFlavourSchurCloverAction<ImplD, FermOpD_> {
  public:
-  typedef TwoFlavourSchurCloverAction<ImplD> Base;
-  typedef WilsonCloverFermion<ImplF, CloverHelpers<ImplF>> FermOpF;
+  typedef TwoFlavourSchurCloverAction<ImplD, FermOpD_> Base;
+  typedef FermOpD_ FermOpD;
+  typedef FermOpF_ FermOpF;
   typedef typename ImplD::GaugeField GaugeField;
 
   TwoFlavourSchurCloverActionMP(typename Base::FermionOperator &opD,
@@ -84,8 +88,8 @@ class TwoFlavourSchurCloverActionMP
 }  // namespace Grid
 
 // OneFlavourSchurCloverRationalActionMP — mixed-precision rational action
-// shared with gen_txqcd_cfgs.cc.  See production/MixedPrecRationalAction.h.
-#include "MixedPrecRationalAction.h"
+// shared with gen_txqcd_cfgs.cc.
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
 
 struct QcdDiag : public HmcObservable<LatticeGaugeField> {
   struct ActionRef { std::string name; Action<LatticeGaugeField> *action; };
@@ -348,8 +352,13 @@ int main(int argc, char **argv) {
                     WilsonAnisotropyCoefficients(), impl_p);
   WCF_f StrangeFermOpF(UmuF, GridF, RBGridF, mass_strange, csw, csw,
                        WilsonAnisotropyCoefficients(), impl_pF);
-  // 10 poles (chroma typically uses 10-12 for Nf=1 Wilson-Clover at this mass).
-  OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 10, 64,
+  // Chroma-matched bounds for the rat_3strange monomial on this ensemble:
+  // <lowerMin>0.0001</lowerMin> <upperMax>32</upperMax>, force <degree>13</degree>.
+  // Was (1e-4, 200, 10) — hi=200 wasted Remez fit on a region the spectrum
+  // doesn't reach (real top is ~24-30); degree=10 was less accurate than
+  // chroma's 13.  Force eval cost grows ~30% from extra poles; trade is
+  // fewer cleanup steps + tighter bound on |dH|.
+  OneFlavourRationalParams strange_rat(1e-4, 32.0, cg_max, cg_tol, 13, 64,
                                        100, 1e-6, 1e-4);
   QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
   StrangeLogDet.is_smeared = true;

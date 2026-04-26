@@ -9,3 +9,11 @@ compare
 cfgs/
 meas_2pt/
 logs/
+
+# Compiled binaries
+compute_plaq
+compute_vev
+test_force_gauge
+
+# Run logs
+slurm-logs/

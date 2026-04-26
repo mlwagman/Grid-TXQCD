@@ -41,17 +41,28 @@ int main(int argc, char **argv) {
   int n_noise = n_vev_noise;   // default from params.h (=8)
   RealD cg_tolerance = 1e-8;
   int rng_seed = 1234567;
+  RealD weakfield_scale = 0.0;  // if > 0, generate weak-field cfg in-place
+  int weakfield_seed_offset = 0;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--n-noise") { n_noise = std::atoi(argv[++i]); continue; }
     if (a == "--cg-tol")  { cg_tolerance = std::atof(argv[++i]); continue; }
     if (a == "--seed")    { rng_seed = std::atoi(argv[++i]); continue; }
+    if (a == "--weakfield") {
+      weakfield_scale = std::atof(argv[++i]);
+      continue;
+    }
+    if (a == "--weakfield-seed-offset") {
+      weakfield_seed_offset = std::atoi(argv[++i]);
+      continue;
+    }
     if (a.rfind("--", 0) == 0) { ++i; continue; }  // skip other grid flags + their values
     files.push_back(a);
   }
-  if (files.empty()) {
+  if (files.empty() && weakfield_scale == 0.0) {
     std::cerr << "Usage: compute_vev <cfg>... --grid L.L.L.T --mpi mx.my.mz.mt "
-                 "[--n-noise N] [--cg-tol T] [--seed S]\n";
+                 "[--n-noise N] [--cg-tol T] [--seed S]\n"
+                 "       compute_vev --weakfield <scale> --weakfield-seed-offset <K> ...\n";
     Grid_finalize();
     return 1;
   }
@@ -80,19 +91,40 @@ int main(int argc, char **argv) {
             << " n_noise=" << n_noise << " cg_tol=" << cg_tolerance
             << " seed=" << rng_seed << std::endl;
 
+  // If --weakfield given, prepend a synthetic "_weakfield" entry that triggers
+  // in-memory generation of a weak-field gauge with the same RNG seed as
+  // gen_txqcd_cfgs (seed_offset = LAMBDA*1000).
+  if (weakfield_scale > 0.0) {
+    files.insert(files.begin(), "_weakfield");
+  }
   for (const auto &f : files) {
-    CfgFormat fmt = detect_format(f);
     FieldMetaData header;
-    if (fmt == CfgFormat::NERSC) {
-      NerscIO::readConfiguration<GS>(Umu, header, f);
-    } else if (fmt == CfgFormat::LIME_ILDG) {
-      IldgReader reader;
-      reader.open(f);
-      reader.readConfiguration(Umu, header);
-      reader.close();
+    if (f == "_weakfield") {
+      GridParallelRNG wfRNG(&grid_);
+      int s = weakfield_seed_offset;
+      wfRNG.SeedFixedIntegers({1 + s, 2 + s, 3 + s, 4 + s, 5 + s});
+      LatticeColourMatrix Ulink(&grid_);
+      for (int mu = 0; mu < Nd; ++mu) {
+        SU<Nc>::LieRandomize(wfRNG, Ulink, weakfield_scale);
+        PokeIndex<LorentzIndex>(Umu, Ulink, mu);
+      }
+      std::cout << GridLogMessage
+                << "compute_vev: synthesized weak-field gauge with scale="
+                << weakfield_scale << " seed_offset=" << weakfield_seed_offset
+                << std::endl;
     } else {
-      std::cerr << "compute_vev: unknown format for " << f << std::endl;
-      continue;
+      CfgFormat fmt = detect_format(f);
+      if (fmt == CfgFormat::NERSC) {
+        NerscIO::readConfiguration<GS>(Umu, header, f);
+      } else if (fmt == CfgFormat::LIME_ILDG) {
+        IldgReader reader;
+        reader.open(f);
+        reader.readConfiguration(Umu, header);
+        reader.close();
+      } else {
+        std::cerr << "compute_vev: unknown format for " << f << std::endl;
+        continue;
+      }
     }
 
     RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu);

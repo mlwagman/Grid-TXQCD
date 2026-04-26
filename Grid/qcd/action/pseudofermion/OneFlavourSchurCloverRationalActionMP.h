@@ -11,18 +11,22 @@
 // computation consistent across drivers.
 
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/fermion/CloverHelpers.h>
 #include <Grid/algorithms/iterative/ConjugateGradientMultiShiftMixedPrec.h>
 
 namespace Grid {
 
-template <class ImplD, class ImplF>
+template <class ImplD, class ImplF,
+          class FermOpD_ = WilsonCloverFermion<ImplD, CloverHelpers<ImplD>>,
+          class FermOpF_ = WilsonCloverFermion<ImplF, CloverHelpers<ImplF>>>
 class OneFlavourSchurCloverRationalActionMP
-    : public OneFlavourSchurCloverRationalAction<ImplD> {
+    : public OneFlavourSchurCloverRationalAction<ImplD, FermOpD_> {
  public:
-  typedef OneFlavourSchurCloverRationalAction<ImplD> Base;
+  typedef OneFlavourSchurCloverRationalAction<ImplD, FermOpD_> Base;
   typedef typename Base::FermionField FermionField;
-  typedef typename Base::FermionOperator FermOpD;
-  typedef WilsonCloverFermion<ImplF, CloverHelpers<ImplF>> FermOpF;
+  typedef FermOpD_ FermOpD;
+  typedef FermOpF_ FermOpF;
   typedef typename ImplD::GaugeField GaugeField;
 
   OneFlavourSchurCloverRationalActionMP(FermOpD &opD, FermOpF &opF,

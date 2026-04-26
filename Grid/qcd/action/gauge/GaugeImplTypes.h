@@ -153,14 +153,18 @@ public:
   }
     
   static inline RealD FieldSquareNorm(Field& U){
-    LatticeComplex Hloc(U.Grid());
-    Hloc = Zero();
+    // For antihermitian SU(N) momentum P_mu: Tr(P_mu^2) = -|P_mu|_Frob^2.
+    // The lattice sum Σ_x Tr(P_mu^2) = -norm2(P_mu).  Using norm2 instead of
+    // Re(sum(trace(P*P))) gives a bit-deterministic reduction across runs;
+    // the previous LatticeComplex sum's reduction order was non-deterministic
+    // on GPU (~10⁻⁵ relative noise that was the dominant FP error in the HMC
+    // ΔH) while norm2's sum-of-squares pathway is deterministic at this scale.
+    RealD total = 0.0;
     for (int mu = 0; mu < Nd; mu++) {
       auto Umu = PeekIndex<LorentzIndex>(U, mu);
-      Hloc += trace(Umu * Umu);
+      total -= norm2(Umu);
     }
-    auto Hsum = TensorRemove(sum(Hloc));
-    return Hsum.real();
+    return total;
   }
 
   static inline void Project(Field &U) {

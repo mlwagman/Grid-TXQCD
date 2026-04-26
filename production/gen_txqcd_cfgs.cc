@@ -4,12 +4,13 @@
 #include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDSmearedConfiguration.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/fermion/CompactWilsonCloverFermion.h>
 #include <Grid/qcd/action/gauge/PlaqPlusRectangleAction.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 #include <Grid/serialisation/Hdf5IO.h>
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
-#include "MixedPrecRationalAction.h"
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
 
 using namespace TXQCDProduction;
 
@@ -213,19 +214,33 @@ int main(int argc, char **argv) {
     if (const char *st = std::getenv("START_TYPE"); st && *st) start_type = st;
     double wf_scale = 0.1;
     if (const char *ws = std::getenv("WEAK_FIELD_SCALE"); ws && *ws) wf_scale = std::atof(ws);
-    // Σ_l: light-quark condensate guess for aux init.  Two sources:
-    //   AUX_SIGMA_L env var (explicit override in lattice units), or
-    //   AUX_INIT=vev  → auto-measure ρ = 2·vev_trminv on the (pre-stout) weak-
-    //   field gauge using the same N_noise CG estimator as hmc_diagnostics,
-    //   then set Σ_l = -ρ.  Default 0.0 = zero-mean aux init (backwards
-    //   compatible).  When non-zero, shifts <σ_ab>=δ_ab·Σ_l/λ² and
-    //   <s_ij>=δ_ij·N_f·Σ_l/(√2·N_c·λ²).
-    RealD sigma_l_init = 0.0;
-    if (const char *sl = std::getenv("AUX_SIGMA_L"); sl && *sl)
-      sigma_l_init = std::atof(sl);
+    // Aux-field equilibrium offset is parameterized by Σ ≡ vev_trminv/2 =
+    // Tr[M⁻¹]/(4V) on the stout-smeared weak-field gauge (per the TXQCD aux
+    // init convention memory).  Equilibrium relations:
+    //   <σ_aa>  = Σ / λ²
+    //   <s_ii>  = (N_f/(√2·N_c)) · Σ / λ²
+    //
+    // Three input modes (in priority order):
+    //   AUX_INIT=value  → set Σ explicitly to this number
+    //   AUX_SIGMA_L=v   → legacy env var; Σ = −AUX_SIGMA_L/2  (since old
+    //                     code used Σ_l_old = −2·vev_trminv)
+    //   AUX_INIT_AUTO=1 (default if neither is set) → measure vev_trminv on
+    //                     the just-generated weak-field gauge with stout
+    //                     smearing + antiperiodic time BC, set Σ = vev_trminv/2.
+    RealD Sigma = 0.0;
+    bool auto_measure = false;
+    if (const char *si = std::getenv("AUX_INIT"); si && *si) {
+      Sigma = std::atof(si);
+    } else if (const char *sl = std::getenv("AUX_SIGMA_L"); sl && *sl) {
+      Sigma = -std::atof(sl) / 2.0;
+    } else {
+      auto_measure = true;
+    }
     std::cout << GridLogMessage << "START_TYPE=" << start_type
               << "  WEAK_FIELD_SCALE=" << wf_scale
-              << "  AUX_SIGMA_L=" << sigma_l_init << std::endl;
+              << (auto_measure ? "  AUX_INIT_AUTO=1"
+                               : "  AUX_INIT=" + std::to_string(Sigma))
+              << std::endl;
     if (start_type == "hot") {
       TXQCDCompositeImpl::HotConfiguration(pRNG, U);
     } else if (start_type == "cold") {
@@ -233,8 +248,56 @@ int main(int argc, char **argv) {
     } else if (start_type == "tepid") {
       TXQCDCompositeImpl::TepidConfiguration(pRNG, U);
     } else {
-      TXQCDCompositeImpl::ThermalAuxConfiguration(pRNG, U, lambda_runtime,
-                                                   wf_scale, sigma_l_init);
+      // Step 1: weak-field gauge.
+      TXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, wf_scale);
+      // Step 2: optionally auto-measure Σ on the just-generated gauge with
+      // production stout-smearing and antiperiodic time BC, matching the
+      // M_ee operator that the TXQCD HMC will use.
+      if (auto_measure) {
+        Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
+        SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv,
+                                                        Stout);
+        SmearMeas.set_Field(U.U);
+        LatticeGaugeField Usm = SmearMeas.get_SmearedU();
+        WilsonImplParams impl_p;
+        impl_p.boundary_phases.resize(Nd, 1.0);
+        impl_p.boundary_phases[Nd - 1] = -1.0;
+        typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>>
+            MeasFermOp;
+        MeasFermOp Dw(Usm, Grid, RBGrid, mass_light, csw, csw,
+                      WilsonAnisotropyCoefficients(), impl_p);
+        MdagMLinearOperator<MeasFermOp, LatticeFermion> HermOp(Dw);
+        ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+        RealD V = (RealD)Grid.gSites();
+        RealD acc = 0.0;
+        // Use a SEPARATE pRNG for the noise vectors so the main pRNG state
+        // (which feeds aux-field generation in step 3) remains the same as
+        // it would be in a non-AUX_INIT_AUTO run with the same seed.
+        GridParallelRNG noisePRNG(&Grid);
+        noisePRNG.SeedFixedIntegers(
+            {seed_offset + 11, seed_offset + 12, seed_offset + 13,
+             seed_offset + 14, seed_offset + 15});
+        for (int h = 0; h < n_vev_noise; ++h) {
+          LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
+          gaussian(noisePRNG, eta);
+          Dw.Mdag(eta, b);
+          x = Zero();
+          CG(HermOp, b, x);
+          acc += innerProduct(eta, x).real() / (2.0 * V);
+        }
+        RealD vev_trminv = acc / n_vev_noise;
+        Sigma = vev_trminv / 2.0;
+        std::cout << GridLogMessage
+                  << "[AUX_INIT_AUTO] vev_trminv=" << vev_trminv
+                  << "  Σ=" << Sigma
+                  << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
+                  << "  <s_ii>="
+                  << (TxqcdNf * Sigma) /
+                         (std::sqrt(2.0) * Nc * lambda_runtime * lambda_runtime)
+                  << std::endl;
+      }
+      // Step 3: fill aux fields (σ, π, s, p, t) using the measured Σ.
+      TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
     }
   }
 
@@ -271,8 +334,9 @@ int main(int argc, char **argv) {
 
   WCF StrangeFermOp(U.U, Grid, RBGrid, mass_strange, csw, csw,
                     WilsonAnisotropyCoefficients(), strange_impl_p);
-  // 10 poles on the strange rational to match our QCD production settings.
-  OneFlavourRationalParams strange_rat(1e-4, 200.0, cg_max, cg_tol, 10, 64,
+  // Chroma-matched bounds for the rat_3strange monomial: lo=1e-4, hi=32,
+  // force degree=13.  See gen_qcd_cfgs.cc note for details.
+  OneFlavourRationalParams strange_rat(1e-4, 32.0, cg_max, cg_tol, 13, 64,
                                        100, 1e-6, 1e-4);
   QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
   QCDActionAdapter StrangeLogDetAdapter(StrangeLogDet);

@@ -13,14 +13,15 @@
 
 NAMESPACE_BEGIN(Grid);
 
-template <class Impl, class CloverHelpers = Grid::CloverHelpers<Impl>>
+template <class Impl,
+          class FermionOp = WilsonCloverFermion<Impl, Grid::CloverHelpers<Impl>>>
 class OneFlavourSchurCloverRationalAction
     : public Action<typename Impl::GaugeField> {
 public:
   INHERIT_IMPL_TYPES(Impl);
 
   typedef OneFlavourRationalParams Params;
-  typedef WilsonCloverFermion<Impl, CloverHelpers> FermionOperator;
+  typedef FermionOp FermionOperator;
 
   Params param;
   MultiShiftFunction PowerQuarter;
