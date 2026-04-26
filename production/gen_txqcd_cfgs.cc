@@ -9,6 +9,7 @@
 #include <Grid/serialisation/Hdf5IO.h>
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
+#include "MixedPrecRationalAction.h"
 
 using namespace TXQCDProduction;
 
@@ -237,12 +238,37 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC, wrapped for TXQCD HMC
+  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC, wrapped for TXQCD HMC.
+  // Uses the mixed-precision rational action (matches gen_qcd_cfgs.cc): MD force
+  // runs ConjugateGradientMultiShiftMixedPrec with reliable updates, refresh and
+  // S keep full-DP multishift CG.  Roughly 2× faster than full-DP on the strange
+  // force eval, which dominates the per-traj cost outside the TXQCD light deriv.
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+  typedef WilsonCloverFermion<WilsonImplF, CloverHelpers<WilsonImplF>> WCF_f;
   // Antiperiodic time BC to match chroma <boundary>1 1 1 -1</boundary>.
   WilsonImplParams strange_impl_p;
   strange_impl_p.boundary_phases.resize(Nd, 1.0);
   strange_impl_p.boundary_phases[Nd - 1] = -1.0;
+  WilsonImplParams strange_impl_pF;
+  strange_impl_pF.boundary_phases.resize(Nd, 1.0);
+  strange_impl_pF.boundary_phases[Nd - 1] = -1.0;
+
+  // Single-precision sibling grids + gauge field for the MP CG.
+  GridCartesian        StrangeGridF(latt, GridDefaultSimd(Nd, vComplexF::Nsimd()), mpi);
+  GridRedBlackCartesian StrangeRBGridF(&StrangeGridF);
+  LatticeGaugeFieldF StrangeUmuF(&StrangeGridF);
+  {
+    LatticeColourMatrix  U_d(&Grid);
+    LatticeColourMatrixF U_f(&StrangeGridF);
+    for (int mu = 0; mu < Nd; ++mu) {
+      U_d = PeekIndex<LorentzIndex>(U.U, mu);
+      precisionChange(U_f, U_d);
+      PokeIndex<LorentzIndex>(StrangeUmuF, U_f, mu);
+    }
+  }
+  WCF_f StrangeFermOpF(StrangeUmuF, StrangeGridF, StrangeRBGridF, mass_strange,
+                       csw, csw, WilsonAnisotropyCoefficients(), strange_impl_pF);
+
   WCF StrangeFermOp(U.U, Grid, RBGrid, mass_strange, csw, csw,
                     WilsonAnisotropyCoefficients(), strange_impl_p);
   // 10 poles on the strange rational to match our QCD production settings.
@@ -251,8 +277,9 @@ int main(int argc, char **argv) {
   QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
   QCDActionAdapter StrangeLogDetAdapter(StrangeLogDet);
   StrangeLogDetAdapter.is_smeared = true;
-  OneFlavourSchurCloverRationalAction<WilsonImplR> StrangeSchurPF(
-      StrangeFermOp, strange_rat);
+  // MP rational: deriv() uses ConjugateGradientMultiShiftMixedPrec.
+  OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF> StrangeSchurPF(
+      StrangeFermOp, StrangeFermOpF, &StrangeRBGridF, strange_rat, 50);
   QCDActionAdapter StrangeSchurAdapter(StrangeSchurPF);
   StrangeSchurAdapter.is_smeared = true;
 
