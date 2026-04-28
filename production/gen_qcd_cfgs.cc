@@ -9,6 +9,7 @@
 #include <Grid/serialisation/Hdf5IO.h>
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/pseudofermion/TwoFlavourSchurCloverAction.h>
+#include <Grid/qcd/action/pseudofermion/TwoFlavour.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
 #include <Grid/algorithms/iterative/ConjugateGradientMixedPrec.h>
 #include <Grid/algorithms/iterative/ConjugateGradientMultiShiftMixedPrec.h>
@@ -470,6 +471,250 @@ int main(int argc, char **argv) {
 
   std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
 
+  // TEST_SIGMA_LOOP: σ-loop replay test.  Runs Wilson::MeeDeriv (the trusted
+  // reference) and our QCDLogDetCloverEOAction-style σ-loop with the SAME Λ =
+  // outerProduct(Xf, Yf) on the smeared gauge field, comparing the resulting
+  // gauge-force tensors element-by-element.  Both σ-loops should be bit-
+  // identical (they are literally the same code, modulo the Nf prefactor and
+  // a harmless mu==4 vs mu==3 typo that's invisible at csw_t==csw_r).  If
+  // they don't match, the bug is in the σ-loop itself.  If they do match,
+  // the bug must be in either (a) the Λ construction in deriv()
+  // [setCheckerboard(Lambda, CloverTermInvEven)] or (b) the smearing chain-
+  // rule integration in SmearedConfiguration::smeared_force.
+  if (const char *t = std::getenv("TEST_SIGMA_LOOP"); t && std::atoi(t)) {
+    Smear.set_Field(Umu);
+    LatticeGaugeField Usm = Smear.get_SmearedU();
+    FermOp.ImportGauge(Usm);
+
+    // Random Gaussian fermions η, ξ on full grid, then take even-parity halves.
+    LatticeFermion eta_full(&Grid), xi_full(&Grid);
+    gaussian(pRNG, eta_full);
+    gaussian(pRNG, xi_full);
+    LatticeFermion X_e(&RBGrid), Y_e(&RBGrid);
+    pickCheckerboard(Even, X_e, eta_full);
+    pickCheckerboard(Even, Y_e, xi_full);
+
+    // (1) Wilson::MeeDeriv (reference): builds Λ = outerProduct(Xf, Yf) with
+    // Xf, Yf zero-padded onto full grid and runs its σ-loop.
+    LatticeGaugeField force_W(&Grid);
+    FermOp.MeeDeriv(force_W, X_e, Y_e, DaggerNo);
+
+    // (2) Our σ-loop verbatim from QCDLogDetCloverEOAction::deriv, but driven
+    // with the same Λ Wilson built (rather than setCheckerboard(_, CloverTermInvEven)).
+    typedef WilsonImplR Impl;
+    typedef CloverHelpers<Impl> CH;
+    typedef typename Impl::PropagatorField PropagatorField;
+    typedef typename Impl::GaugeLinkField  GaugeLinkField;
+
+    LatticeFermion Xf(&Grid), Yf(&Grid);
+    Xf = Zero(); Yf = Zero();
+    setCheckerboard(Xf, X_e);
+    setCheckerboard(Yf, Y_e);
+    PropagatorField Lambda(&Grid);
+    FermOp.outerProductImpl(Lambda, Xf, Yf);
+
+    std::vector<GaugeLinkField> Ulinks(Nd, &Grid);
+    FermOp.extractLinkField(Ulinks, FermOp.Umu);
+
+    Gamma::Algebra sigma[] = {
+        Gamma::Algebra::SigmaXY,      Gamma::Algebra::SigmaXZ,
+        Gamma::Algebra::SigmaXT,      Gamma::Algebra::MinusSigmaXY,
+        Gamma::Algebra::SigmaYZ,      Gamma::Algebra::SigmaYT,
+        Gamma::Algebra::MinusSigmaXZ, Gamma::Algebra::MinusSigmaYZ,
+        Gamma::Algebra::SigmaZT,      Gamma::Algebra::MinusSigmaXT,
+        Gamma::Algebra::MinusSigmaYT, Gamma::Algebra::MinusSigmaZT};
+
+    GaugeLinkField force_mu(&Grid), lambda(&Grid);
+    LatticeGaugeField force_Q(&Grid);
+    force_Q = Zero();
+    int count = 0;
+    for (int mu = 0; mu < 4; mu++) {
+      force_mu = Zero();
+      for (int nu = 0; nu < 4; nu++) {
+        if (mu == nu) continue;
+        // QCDLogDetCloverEOAction's convention: nu==3||mu==3 -> csw_t.
+        RealD factor = (nu == 3 || mu == 3) ? 2.0 * FermOp.csw_t
+                                             : 2.0 * FermOp.csw_r;
+        PropagatorField Slambda = Gamma(sigma[count]) * Lambda;
+        FermOp.TraceSpinImpl(lambda, Slambda);
+        force_mu -= factor * CH::Cmunu(Ulinks, lambda, mu, nu);
+        count++;
+      }
+      pokeLorentz(force_Q, Ulinks[mu] * force_mu, mu);
+    }
+
+    // Compare.
+    LatticeGaugeField diff_F(&Grid);
+    diff_F = force_W - force_Q;
+    RealD nW = norm2(force_W);
+    RealD nQ = norm2(force_Q);
+    RealD nD = norm2(diff_F);
+    std::cout << GridLogMessage << "[SIGMA] |force_W|^2 = " << std::setprecision(15) << nW << std::endl;
+    std::cout << GridLogMessage << "[SIGMA] |force_Q|^2 = " << std::setprecision(15) << nQ << std::endl;
+    std::cout << GridLogMessage << "[SIGMA] |force_W - force_Q|^2 = " << std::setprecision(15) << nD << std::endl;
+    std::cout << GridLogMessage << "[SIGMA] relative diff = "
+              << std::sqrt(nD / nW) << std::endl;
+
+    // Per-direction breakdown — helps localise if only one mu is off.
+    for (int mu = 0; mu < Nd; ++mu) {
+      auto FW_mu = PeekIndex<LorentzIndex>(force_W, mu);
+      auto FQ_mu = PeekIndex<LorentzIndex>(force_Q, mu);
+      auto Dmu = FW_mu - FQ_mu;
+      std::cout << GridLogMessage << "[SIGMA] mu=" << mu
+                << " |W|^2=" << norm2(FW_mu)
+                << " |Q|^2=" << norm2(FQ_mu)
+                << " |W-Q|^2=" << norm2(Dmu) << std::endl;
+    }
+
+    Grid_finalize();
+    return 0;
+  }
+
+  // TEST_LAMBDA: Hutchinson Λ-construction test.  Compares
+  //   Λ_det   = setCheckerboard(0, CloverTermInvEven)         [QCDLogDet's Λ]
+  // vs
+  //   <Λ_stoch> = E_η[outerProduct(η_full, M_ee^{-1} η_full)] [Wilson-style]
+  // sample-by-sample averaged.  If Mee is Hermitian, <Λ_stoch>_{αβ,ab} → Mee^{-1}_{αβ,ab}
+  // = CloverTermInvEven_{αβ,ab} on even sites.  Disagreement (beyond 1/√N noise)
+  // means a transpose/dagger convention mismatch between how
+  // setCheckerboard(_, CloverTermInvEven) lays out indices and how
+  // outerProduct(_, _) does — which would explain why our QCDLogDet σ-loop
+  // produces a wrong force despite the σ-loop machinery being bit-identical.
+  // Number of noise samples set by N_LAMBDA_SAMPLES (default 32).
+  if (const char *t = std::getenv("TEST_LAMBDA"); t && std::atoi(t)) {
+    Smear.set_Field(Umu);
+    LatticeGaugeField Usm = Smear.get_SmearedU();
+    FermOp.ImportGauge(Usm);
+
+    int N_samples = 32;
+    if (const char *n = std::getenv("N_LAMBDA_SAMPLES"); n && *n) N_samples = std::atoi(n);
+    std::cout << GridLogMessage << "[LAMBDA] N_samples=" << N_samples << std::endl;
+
+    typedef WilsonImplR Impl;
+    typedef CloverHelpers<Impl> CH;
+    typedef typename Impl::PropagatorField PropagatorField;
+    typedef typename Impl::GaugeLinkField  GaugeLinkField;
+
+    // Λ_det: deterministic, the actual one QCDLogDet::deriv uses.
+    PropagatorField Lambda_det(&Grid);
+    Lambda_det = Zero();
+    setCheckerboard(Lambda_det, FermOp.CloverTermInvEven);
+
+    // Λ_stoch_avg: noise-averaged outerProduct(η, Mee^{-1}η), even support.
+    PropagatorField Lambda_stoch_avg(&Grid);
+    Lambda_stoch_avg = Zero();
+    for (int n = 0; n < N_samples; n++) {
+      LatticeFermion eta_full(&Grid), z_full(&Grid);
+      LatticeFermion eta_e(&RBGrid), z_e(&RBGrid);
+      gaussian(pRNG, eta_full);
+      pickCheckerboard(Even, eta_e, eta_full);
+      eta_full = Zero();
+      setCheckerboard(eta_full, eta_e);
+      // z_e = Mee^{-1} eta_e (on-site clover inverse on even checkerboard).
+      FermOp.MooeeInv(eta_e, z_e);
+      z_full = Zero();
+      setCheckerboard(z_full, z_e);
+
+      PropagatorField stoch(&Grid);
+      FermOp.outerProductImpl(stoch, eta_full, z_full);
+      Lambda_stoch_avg = Lambda_stoch_avg + stoch;
+    }
+    Lambda_stoch_avg = Lambda_stoch_avg * (1.0 / N_samples);
+
+    PropagatorField Lambda_diff(&Grid);
+    Lambda_diff = Lambda_det - Lambda_stoch_avg;
+    RealD nDet  = norm2(Lambda_det);
+    RealD nSto  = norm2(Lambda_stoch_avg);
+    RealD nDiff = norm2(Lambda_diff);
+    std::cout << GridLogMessage << "[LAMBDA] |Λ_det|^2 = " << std::setprecision(15) << nDet << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] |<Λ_stoch>|^2 = " << std::setprecision(15) << nSto << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] |Λ_det − <Λ_stoch>|^2 = " << std::setprecision(15) << nDiff << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] rel diff = " << std::sqrt(nDiff / nDet) << std::endl;
+
+    // Also try Λ_stoch_T = outerProduct(z_full, eta_full) — i.e. swap the
+    // roles, since outerProduct convention could matter.  <outerProduct(z, η)>
+    // = (Mee^{-1})^T_{αβ,ab} on even sites.
+    PropagatorField Lambda_stoch_T_avg(&Grid);
+    Lambda_stoch_T_avg = Zero();
+    for (int n = 0; n < N_samples; n++) {
+      LatticeFermion eta_full(&Grid), z_full(&Grid);
+      LatticeFermion eta_e(&RBGrid), z_e(&RBGrid);
+      gaussian(pRNG, eta_full);
+      pickCheckerboard(Even, eta_e, eta_full);
+      eta_full = Zero();
+      setCheckerboard(eta_full, eta_e);
+      FermOp.MooeeInv(eta_e, z_e);
+      z_full = Zero();
+      setCheckerboard(z_full, z_e);
+
+      PropagatorField stoch(&Grid);
+      FermOp.outerProductImpl(stoch, z_full, eta_full);
+      Lambda_stoch_T_avg = Lambda_stoch_T_avg + stoch;
+    }
+    Lambda_stoch_T_avg = Lambda_stoch_T_avg * (1.0 / N_samples);
+
+    PropagatorField Lambda_diff_T(&Grid);
+    Lambda_diff_T = Lambda_det - Lambda_stoch_T_avg;
+    std::cout << GridLogMessage << "[LAMBDA] (swapped order) |<Λ_stoch_T>|^2 = "
+              << std::setprecision(15) << norm2(Lambda_stoch_T_avg) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] (swapped order) |Λ_det − <Λ_stoch_T>|^2 = "
+              << std::setprecision(15) << norm2(Lambda_diff_T) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] (swapped order) rel diff = "
+              << std::sqrt(norm2(Lambda_diff_T) / nDet) << std::endl;
+
+    // Now apply the σ-loop to all three Λs and compare resulting forces.
+    auto sigma_loop = [&](const PropagatorField& Lam, LatticeGaugeField& force) {
+      Gamma::Algebra sigma_arr[] = {
+          Gamma::Algebra::SigmaXY,      Gamma::Algebra::SigmaXZ,
+          Gamma::Algebra::SigmaXT,      Gamma::Algebra::MinusSigmaXY,
+          Gamma::Algebra::SigmaYZ,      Gamma::Algebra::SigmaYT,
+          Gamma::Algebra::MinusSigmaXZ, Gamma::Algebra::MinusSigmaYZ,
+          Gamma::Algebra::SigmaZT,      Gamma::Algebra::MinusSigmaXT,
+          Gamma::Algebra::MinusSigmaYT, Gamma::Algebra::MinusSigmaZT};
+      std::vector<GaugeLinkField> Ulinks(Nd, &Grid);
+      FermOp.extractLinkField(Ulinks, FermOp.Umu);
+      GaugeLinkField fmu(&Grid), lam(&Grid);
+      force = Zero();
+      int cc = 0;
+      for (int mu = 0; mu < 4; mu++) {
+        fmu = Zero();
+        for (int nu = 0; nu < 4; nu++) {
+          if (mu == nu) continue;
+          RealD factor = (nu == 3 || mu == 3) ? 2.0 * FermOp.csw_t
+                                               : 2.0 * FermOp.csw_r;
+          PropagatorField Slam = Gamma(sigma_arr[cc]) * Lam;
+          FermOp.TraceSpinImpl(lam, Slam);
+          fmu -= factor * CH::Cmunu(Ulinks, lam, mu, nu);
+          cc++;
+        }
+        pokeLorentz(force, Ulinks[mu] * fmu, mu);
+      }
+    };
+
+    LatticeGaugeField force_det(&Grid), force_sto(&Grid), force_stoT(&Grid);
+    sigma_loop(Lambda_det, force_det);
+    sigma_loop(Lambda_stoch_avg, force_sto);
+    sigma_loop(Lambda_stoch_T_avg, force_stoT);
+
+    LatticeGaugeField fdiff = force_det - force_sto;
+    LatticeGaugeField fdiffT = force_det - force_stoT;
+    std::cout << GridLogMessage << "[LAMBDA] σ-loop |force_det|^2 = "
+              << std::setprecision(15) << norm2(force_det) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] σ-loop |force_sto|^2 = "
+              << std::setprecision(15) << norm2(force_sto) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] σ-loop |force_det − force_sto|^2 = "
+              << std::setprecision(15) << norm2(fdiff) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] σ-loop rel diff (det vs sto) = "
+              << std::sqrt(norm2(fdiff) / norm2(force_det)) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] σ-loop |force_det − force_stoT|^2 = "
+              << std::setprecision(15) << norm2(fdiffT) << std::endl;
+    std::cout << GridLogMessage << "[LAMBDA] σ-loop rel diff (det vs stoT) = "
+              << std::sqrt(norm2(fdiffT) / norm2(force_det)) << std::endl;
+
+    Grid_finalize();
+    return 0;
+  }
+
   // TEST_FORCE_FD: skip HMC, run force-FD consistency check on each action
   // through the full Smearer wiring (so we test the smeared_force chain rule
   // for is_smeared=true actions).  Compares dS_actual = S(U_+ε) − S(U_−ε)
@@ -477,12 +722,32 @@ int main(int argc, char **argv) {
   // deriv() is consistent with S() at this U.  Diverging ratio at small ε →
   // analytic-vs-numeric force inconsistency.
   if (const char *t = std::getenv("TEST_FORCE_FD"); t && std::atoi(t)) {
+    // FD_NONEO=1: also include non-EO TwoFlavourPseudoFermionAction for the
+    // light quark, computing S = Phi†(M†M)⁻¹Phi on the FULL Wilson-Clover
+    // operator (no EO splitting → no separate LogDet term → no
+    // QCDLogDetCloverEOAction smearing-chain-rule path).  Diagnostic only:
+    // if this passes FD with smearing while the EO version fails, the bug
+    // is localized to the EO LogDet's chain rule integration.
+    std::unique_ptr<TwoFlavourPseudoFermionAction<WilsonImplR>> LightTwoFlNonEO;
+    bool fd_noneo = false;
+    if (const char *fn = std::getenv("FD_NONEO"); fn && std::atoi(fn)) {
+      fd_noneo = true;
+      LightTwoFlNonEO.reset(new TwoFlavourPseudoFermionAction<WilsonImplR>(
+          FermOp, CG_action, CG_action));
+      LightTwoFlNonEO->is_smeared = true;
+      std::cout << GridLogMessage
+                << "[FD] FD_NONEO=1 — adding non-EO TwoFlavourPseudoFermion "
+                   "for full M operator FD test"
+                << std::endl;
+    }
+
     std::vector<std::pair<std::string, Action<LatticeGaugeField>*>> actions = {
         {"PlaqRect",      &GaugeAction},
         {"LightLogDet",   &LightLogDet},
         {"LightSchurPF",  &LightSchurPF},
         {"StrangeLogDet", &StrangeLogDet},
         {"StrangeSchurPF", &StrangeSchurPF}};
+    if (fd_noneo) actions.push_back({"LightTwoFlNonEO", LightTwoFlNonEO.get()});
 
     // FD_NO_SMEAR=1 disables stout smearing on all fermion actions for the
     // test — isolates whether bug is in plain Schur+clover deriv() or in the

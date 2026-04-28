@@ -108,9 +108,7 @@ public:
         RealD factor = (nu == 3 || mu == 3) ? 2.0 * FermOp.csw_t
                                              : 2.0 * FermOp.csw_r;
         CloverField Slambda = Gamma(sigma[count]) * Lambda;
-        lambda = Zero();
-        for (int s = 0; s < Ns; ++s)
-          lambda = lambda + PeekIndex<SpinIndex>(Slambda, s, s);
+        lambda = TraceIndex<SpinIndex>(Slambda);
         force_mu -= factor * CloverHelpers::Cmunu(Ulinks, lambda, mu, nu);
         count++;
       }

@@ -8,10 +8,20 @@
 #
 # All streams use:
 #   INTEGRATOR=MinimumNorm2  LAMBDA_MN2=0.1789
-#   MDSTEPS=7                TRAJL=sqrt(2)/4 = 0.353553391
+#   MDSTEPS=10               TRAJL=sqrt(2)/4 = 0.353553391  (was 7 = chroma
+#                                                            phys match, but
+#                                                            MDs=7 + tepid
+#                                                            locks in
+#                                                            metastable
+#                                                            plaq~0.534 basin)
 #   GAUGE_MULT=4 (TXQCD) / GAUGE_INNER_MULT=4 (QCD)
 #   AUX_MULT=2               (TXQCD only; chroma physical match)
-#   START_TYPE=thermal       WEAK_FIELD_SCALE=0.05  (cold-ish start)
+#   START_TYPE=thermal       WEAK_FIELD_SCALE=0.1   (cold-ish start; was
+#                                                    0.05 but several λ values
+#                                                    locked into a metastable
+#                                                    high-plaq basin from there
+#                                                    — see project memory
+#                                                    qcd_stuck_basin)
 #   N_TRAJ=200               (will checkpoint, can extend later)
 
 set -e
@@ -19,10 +29,10 @@ cd "$(dirname "$0")"
 
 COMMON_ENV="\
 INTEGRATOR=MinimumNorm2,LAMBDA_MN2=0.1789,\
-MDSTEPS=7,TRAJL=0.353553390593274,\
+MDSTEPS=10,TRAJL=0.353553390593274,\
 GAUGE_MULT=4,GAUGE_INNER_MULT=4,AUX_MULT=2,\
 HASEN_DM=0,\
-START_TYPE=thermal,WEAK_FIELD_SCALE=0.05,\
+START_TYPE=thermal,WEAK_FIELD_SCALE=0.1,\
 NO_METROP=0,N_TRAJ=200"
 # AUX_SIGMA_L deliberately NOT set → the binary auto-measures Σ from the
 # weak-field gauge (AUX_INIT_AUTO mode).  MDSTEPS=7 (eps=0.0505) is chroma

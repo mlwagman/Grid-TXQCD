@@ -100,6 +100,7 @@ Documentation/_build
 build.sh
 .vscode
 *.code-workspace
+.claude/
 
 # Eigen source #
 ################
