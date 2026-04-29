@@ -190,8 +190,9 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
           for (int sig = rho + 1; sig < Nd; ++sig) {
             // Odd-site sigma: sigma_1†-sigma_1 from 2Re[Y†(dM/dF)X]
             // = -(i*csw/2) Σ isigma(α,β)[Y*(α,j)X(β,i)+X*(α,j)Y(β,i)]
+            // Per-site terms independent → thread_for.
             std::vector<CMsobj> sig_odd(nsites_odd);
-            for (uint64_t x = 0; x < nsites_odd; ++x) {
+            thread_for(x, nsites_odd, {
               for (int i = 0; i < Nc; ++i)
                 for (int j = 0; j < Nc; ++j) {
                   std::complex<double> val(0,0);
@@ -218,11 +219,11 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
                   std::complex<double> cval = cv * val;
                   sig_odd[x]()()(i,j) = ComplexD(cval.real(), cval.imag());
                 }
-            }
+            });
 
             // Even-site sigma (same structure with Z,W)
             std::vector<CMsobj> sig_even(nsites_even);
-            for (uint64_t x = 0; x < nsites_even; ++x) {
+            thread_for(x, nsites_even, {
               for (int i = 0; i < Nc; ++i)
                 for (int j = 0; j < Nc; ++j) {
                   std::complex<double> val(0,0);
@@ -249,7 +250,7 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
                   std::complex<double> cval = cv * val;
                   sig_even[x]()()(i,j) = ComplexD(cval.real(), cval.imag());
                 }
-            }
+            });
 
             LatticeColourMatrix lam_odd(&rbgrid_);
             vectorizeFromLexOrdArray(sig_odd, lam_odd);
