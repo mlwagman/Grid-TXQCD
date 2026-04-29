@@ -312,10 +312,18 @@ int main(int argc, char **argv) {
   WCF_f FermOpF(UmuF, GridF, RBGridF, mass_light, csw, csw,
                 WilsonAnisotropyCoefficients(), impl_pF);
 
-  // Light quarks (Nf=2): EO-preconditioned LogDet + Schur.
-  // Action solver (accept/reject): tight DP CG at cg_tol=1e-8.
-  // Derivative solver (MD force): mixed-precision CG (SP inner + DP correction),
-  // outer tolerance 1e-6 (mdtol bias cancels on Metropolis accept/reject).
+  // Nf=3 degenerate quarks at mass = mass_light = -0.2450 (matches chroma's
+  // cl3_16_48_b6p1_m0p2450 ensemble: same mass for all three flavors).
+  // Chroma's action structure on this ensemble (per .lime XML):
+  //   - 1× N_FLAVOR_LOGDET_EVEN_EVEN with num_flavors=3
+  //   - 1× ONE_FLAVOR_EOPREC_CONSTDET_FERM_RAT with num_pf=3 (3 indep PFs)
+  // We mirror it with 1× QCDLogDetCloverEOAction(Nf=3) + 3× independent
+  // OneFlavourSchurCloverRationalActionMP at single mass.  This avoids the
+  // Schur EO M_pc^{-1} amplification of near-zero modes that caused the
+  // LightSchurPF force_max to spike (6 → 17) at trajs ~30 on tepid-start
+  // chains and lock the chain at plaq~0.530.  Rational expansions are
+  // bounded (Σ_k α_k (M†M+β_k)^{-1}, β_k > 0) and produce stable forces
+  // even on stiff cfgs.
   WCF FermOp(Umu, Grid, RBGrid, mass_light, csw, csw,
              WilsonAnisotropyCoefficients(), impl_p);
   RealD cg_action_tol = cg_tol;
@@ -324,10 +332,6 @@ int main(int argc, char **argv) {
   ConjugateGradient<LatticeFermion> CG_action(cg_action_tol, cg_max);
   SchurDifferentiableOperator<WilsonImplR> SchurOpD(FermOp);
   SchurDifferentiableOperator<WilsonImplF> SchurOpF(FermOpF);
-  // CG_MD_TOL env var: MD force CG tolerance.  Default 1e-6 (chroma-style),
-  // but force-FD test showed 0.2% force-action mismatch in TwoFlavourSchurMP
-  // at this tol → tightening here lets us probe whether the residual
-  // mismatch is just sloppy CG or something structural.
   RealD cg_md_tol = 1e-6;
   if (const char *t = std::getenv("CG_MD_TOL"); t && *t) cg_md_tol = std::atof(t);
   std::cout << GridLogMessage << "CG_MD_TOL=" << cg_md_tol << std::endl;
@@ -335,37 +339,23 @@ int main(int argc, char **argv) {
                      SchurDifferentiableOperator<WilsonImplR>,
                      SchurDifferentiableOperator<WilsonImplF>>
       CG_md(cg_md_tol, cg_max, 50, &RBGridF, SchurOpD, SchurOpF);
-  QCDLogDetCloverEOAction<WilsonImplR> LightLogDet(FermOp, 2);
-  LightLogDet.is_smeared = true;
-  // SOLVER_DEBUG=1 forces DP CG_action also for the derivative — used to
-  // disentangle MP-CG bug from structural deriv vs S inconsistency.
-  bool solver_debug = false;
-  if (const char *t = std::getenv("SOLVER_DEBUG"); t && std::atoi(t)) solver_debug = true;
-  TwoFlavourSchurCloverActionMP<WilsonImplR, WilsonImplF>
-      LightSchurPF(FermOp, FermOpF,
-                   solver_debug ? (OperatorFunction<LatticeFermion>&)CG_action : (OperatorFunction<LatticeFermion>&)CG_md,
-                   CG_action);
-  LightSchurPF.is_smeared = true;
 
-  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC.
-  // MD force uses mixed-precision multishift CG (SP inner + DP reliable).
-  WCF StrangeFermOp(Umu, Grid, RBGrid, mass_strange, csw, csw,
-                    WilsonAnisotropyCoefficients(), impl_p);
-  WCF_f StrangeFermOpF(UmuF, GridF, RBGridF, mass_strange, csw, csw,
-                       WilsonAnisotropyCoefficients(), impl_pF);
-  // Chroma-matched bounds for the rat_3strange monomial on this ensemble:
-  // <lowerMin>0.0001</lowerMin> <upperMax>32</upperMax>, force <degree>13</degree>.
-  // Was (1e-4, 200, 10) — hi=200 wasted Remez fit on a region the spectrum
-  // doesn't reach (real top is ~24-30); degree=10 was less accurate than
-  // chroma's 13.  Force eval cost grows ~30% from extra poles; trade is
-  // fewer cleanup steps + tighter bound on |dH|.
-  OneFlavourRationalParams strange_rat(1e-4, 32.0, cg_max, cg_tol, 13, 64,
-                                       100, 1e-6, 1e-4);
-  QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
-  StrangeLogDet.is_smeared = true;
-  OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>
-      StrangeSchurPF(StrangeFermOp, StrangeFermOpF, &RBGridF, strange_rat, 50);
-  StrangeSchurPF.is_smeared = true;
+  // Single Nf=3 logdet on the EE block (replaces Light Nf=2 + Strange Nf=1).
+  QCDLogDetCloverEOAction<WilsonImplR> LogDet(FermOp, 3);
+  LogDet.is_smeared = true;
+
+  // Three independent 1-flavor rational PFs at single mass.  Chroma rat
+  // params from .lime XML on this ensemble: lowerMin=0.0001, upperMax=32,
+  // degree=15.  Each instance carries its own pseudofermion field and
+  // refreshes independently — the three PFs sample detM³ stochastically.
+  OneFlavourRationalParams rat_params(1e-4, 32.0, cg_max, cg_tol, 15, 64,
+                                      100, 1e-6, 1e-4);
+  std::vector<std::unique_ptr<OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>> RatPFs;
+  for (int p = 0; p < 3; ++p) {
+    RatPFs.emplace_back(new OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>(
+        FermOp, FermOpF, &RBGridF, rat_params, 50));
+    RatPFs.back()->is_smeared = true;
+  }
 
   // Grid's SymanzikGaugeAction(β,u0) uses the RBC/Iwasaki convention
   // (c_plaq = β·(1−8c1) ≈ 1.96β, c_rect = −β/(12·u0²)) — NOT the Lüscher-
@@ -394,10 +384,8 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage << "GAUGE_INNER_MULT=" << gauge_inner_mult << std::endl;
   ActionLevel<LatticeGaugeField, Reps> L1(1);
   ActionLevel<LatticeGaugeField, Reps> L2(std::max(1, gauge_inner_mult));
-  L1.push_back(&LightLogDet);
-  L1.push_back(&LightSchurPF);
-  L1.push_back(&StrangeLogDet);
-  L1.push_back(&StrangeSchurPF);
+  L1.push_back(&LogDet);
+  for (auto &p : RatPFs) L1.push_back(p.get());
   ActionSet<LatticeGaugeField, Reps> Aset;
   if (gauge_inner_mult <= 1) {
     L1.push_back(&GaugeAction);
@@ -461,13 +449,13 @@ int main(int argc, char **argv) {
   ckpt.rng_prefix = cfg_dir + "/ckpoint_rng";
   ckpt.interval   = meas_skip;
 
-  QcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, {
-      {"LightLogDet", &LightLogDet},
-      {"LightSchurPF", &LightSchurPF},
-      {"StrangeLogDet", &StrangeLogDet},
-      {"StrangeSchurPF", &StrangeSchurPF},
-      {"Gauge", &GaugeAction}
-  }, Smear, Grid, RBGrid, pRNG);
+  std::vector<QcdDiag::ActionRef> diag_actions = {
+      {"LogDet", &LogDet}};
+  for (size_t p = 0; p < RatPFs.size(); ++p)
+    diag_actions.push_back({"RatPF" + std::to_string(p), RatPFs[p].get()});
+  diag_actions.push_back({"Gauge", &GaugeAction});
+  QcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, diag_actions,
+               Smear, Grid, RBGrid, pRNG);
 
   std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
 
@@ -742,21 +730,18 @@ int main(int argc, char **argv) {
     }
 
     std::vector<std::pair<std::string, Action<LatticeGaugeField>*>> actions = {
-        {"PlaqRect",      &GaugeAction},
-        {"LightLogDet",   &LightLogDet},
-        {"LightSchurPF",  &LightSchurPF},
-        {"StrangeLogDet", &StrangeLogDet},
-        {"StrangeSchurPF", &StrangeSchurPF}};
+        {"PlaqRect", &GaugeAction},
+        {"LogDet",   &LogDet}};
+    for (size_t p = 0; p < RatPFs.size(); ++p)
+      actions.push_back({"RatPF" + std::to_string(p), RatPFs[p].get()});
     if (fd_noneo) actions.push_back({"LightTwoFlNonEO", LightTwoFlNonEO.get()});
 
     // FD_NO_SMEAR=1 disables stout smearing on all fermion actions for the
     // test — isolates whether bug is in plain Schur+clover deriv() or in the
     // SmearedConfiguration chain-rule plumbing.
     if (const char *fns = std::getenv("FD_NO_SMEAR"); fns && std::atoi(fns)) {
-      LightLogDet.is_smeared = false;
-      LightSchurPF.is_smeared = false;
-      StrangeLogDet.is_smeared = false;
-      StrangeSchurPF.is_smeared = false;
+      LogDet.is_smeared = false;
+      for (auto &p : RatPFs) p->is_smeared = false;
       std::cout << GridLogMessage << "[FD] FD_NO_SMEAR=1 — fermion is_smeared=false" << std::endl;
     }
 
