@@ -241,12 +241,14 @@ class TXQCDCompositeImpl {
     }
   }
 
-  // Fill the aux fields (σ, π, s, p, t) of U with Gaussian fluctuations of
-  // width 1/λ, with σ and s additionally offset on the diagonal so that
-  // <σ_aa>=Σ/λ² and <s_ii>=(N_f/(√2·N_c))·Σ/λ² match the equilibrium per
-  // the txqcd_notes convention.  Assumes U.U (gauge) is already populated.
+  // Per-flavor Sigma version: Sigma_a = -<q̄_a q_a> for flavor a, used for
+  // non-degenerate Nf>2 setups (e.g. diag mass {m_l, m_l, m_s}).  σ_aa
+  // equilibrium = Σ_a/λ²; the s shift uses the flavor-summed Σ since s
+  // couples to the trace over flavors of the quark bilinear (factor N_f
+  // collapses to Σ Σ_a).
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
-                                   RealD lambda, RealD Sigma) {
+                                   RealD lambda,
+                                   const std::array<RealD, TxqcdNf> &Sigma) {
     RealD s = 1.0 / lambda;
     HermitianGaussian(pRNG, U.sigma); U.sigma = s * U.sigma;
     HermitianGaussian(pRNG, U.pi);    U.pi    = s * U.pi;
@@ -254,19 +256,21 @@ class TXQCDCompositeImpl {
     HermitianGaussian(pRNG, U.p);     U.p     = s * U.p;
     GaussianAntisymTensor(pRNG, U.t); U.t     = (s / std::sqrt(2.0)) * U.t;
 
-    if (Sigma != 0.0) {
-      const RealD sigma_mean = Sigma / (lambda * lambda);
-      const RealD s_mean =
-          static_cast<RealD>(TxqcdNf) * Sigma /
-          (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
-      // σ: shift diagonal flavor entries by sigma_mean.
+    RealD Sigma_sum = 0.0;
+    for (int a = 0; a < TxqcdNf; ++a) Sigma_sum += Sigma[a];
+    if (Sigma_sum != 0.0) {
+      // σ: per-flavor diagonal shift by Σ_a/λ².
       TxqcdSiteSigma sigma_id;
       sigma_id = Zero();
-      for (int a = 0; a < TxqcdNf; ++a) sigma_id()()(a, a) = sigma_mean;
+      for (int a = 0; a < TxqcdNf; ++a)
+        sigma_id()()(a, a) = Sigma[a] / (lambda * lambda);
       LatticeSigmaField shift_sigma(U.sigma.Grid());
       shift_sigma = sigma_id;
       U.sigma = U.sigma + shift_sigma;
-      // s: shift diagonal color entries by s_mean.
+      // s: shift diagonal color entries by (Σ_a Σ_a)/(√2·N_c·λ²).  This
+      // matches the previous N_f·Σ/(√2·N_c·λ²) for degenerate Σ_a=Σ.
+      const RealD s_mean = Sigma_sum /
+          (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
       TxqcdSiteS s_id;
       s_id = Zero();
       for (int i = 0; i < Nc; ++i) s_id()()(i, i) = s_mean;
@@ -276,10 +280,26 @@ class TXQCDCompositeImpl {
     }
   }
 
+  // Backward-compat scalar Sigma: same value for all flavors.
+  static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
+                                   RealD lambda, RealD Sigma) {
+    std::array<RealD, TxqcdNf> S;
+    S.fill(Sigma);
+    FillAuxFields(pRNG, U, lambda, S);
+  }
+
   static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
                                              RealD lambda,
                                              double wf_scale = 0.1,
                                              RealD Sigma = 0.0) {
+    GenerateWeakFieldGauge(pRNG, U, wf_scale);
+    FillAuxFields(pRNG, U, lambda, Sigma);
+  }
+
+  // Per-flavor Sigma overload (for diag mass non-degenerate setups).
+  static inline void ThermalAuxConfiguration(
+      GridParallelRNG &pRNG, Field &U, RealD lambda, double wf_scale,
+      const std::array<RealD, TxqcdNf> &Sigma) {
     GenerateWeakFieldGauge(pRNG, U, wf_scale);
     FillAuxFields(pRNG, U, lambda, Sigma);
   }

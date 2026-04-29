@@ -28,9 +28,11 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
  public:
   typedef OneFlavourRationalParams Params;
 
+  // Per-flavor mass constructor.
   TXQCDWilsonCloverRationalEOAction(GridCartesian &grid,
                               GridRedBlackCartesian &rbgrid,
-                              RealD mass, Params &p, RealD csw = 0.0)
+                              const std::array<RealD, TxqcdNf> &mass,
+                              Params &p, RealD csw = 0.0)
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
         param(p), Phi(&rbgrid) {
     AlgRemez remez(param.lo, param.hi, param.precision);
@@ -48,13 +50,22 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
     PowerNegQuarter.Init(remez, param.tolerance, true);
   }
 
+  // Backward-compat: degenerate scalar mass.
+  TXQCDWilsonCloverRationalEOAction(GridCartesian &grid,
+                              GridRedBlackCartesian &rbgrid,
+                              RealD mass, Params &p, RealD csw = 0.0)
+      : TXQCDWilsonCloverRationalEOAction(grid, rbgrid,
+            TXQCDSiteMatrixUtil::MassArray(mass), p, csw) {}
+
   std::string action_name() override {
     return "TXQCDWilsonCloverRationalEOAction";
   }
   std::string LogParameters() override {
     std::stringstream os;
-    os << GridLogMessage << "[" << action_name() << "] mass=" << mass_
-       << " lo=" << param.lo << " hi=" << param.hi
+    os << GridLogMessage << "[" << action_name() << "] mass=";
+    for (int a = 0; a < TxqcdNf; ++a)
+      os << (a ? "," : "{") << mass_[a];
+    os << "} lo=" << param.lo << " hi=" << param.hi
        << " degree=" << param.degree << " tol=" << param.tolerance
        << " MaxIter=" << param.MaxIter << std::endl;
     return os.str();
@@ -405,7 +416,7 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
 
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
-  RealD mass_;
+  std::array<RealD, TxqcdNf> mass_;
   RealD csw_;
   Params &param;
   MultiShiftFunction PowerHalf;

@@ -29,11 +29,19 @@ NAMESPACE_BEGIN(Grid);
 struct TXQCDFermionNf {
   std::array<LatticeFermion, TxqcdNf> f;
 
-  TXQCDFermionNf(GridBase *grid)
-      : f{{LatticeFermion(grid), LatticeFermion(grid)}} {
-    static_assert(TxqcdNf == 2,
-                  "TXQCDFermionNf currently hardcoded for Nf=2");
+  // Helper used both by this struct's ctor and by TXQCD code that needs a
+  // length-Nf array of grid-bound LatticeFermions (e.g. ApplyDelta's pre-
+  // rotated input fermions).  Public so the same index-sequence trick works
+  // outside of this class.
+  template <std::size_t... Is>
+  static std::array<LatticeFermion, TxqcdNf> MakeArray(
+      GridBase *grid, std::index_sequence<Is...>) {
+    return std::array<LatticeFermion, TxqcdNf>{
+        {(static_cast<void>(Is), LatticeFermion(grid))...}};
   }
+
+  TXQCDFermionNf(GridBase *grid)
+      : f(MakeArray(grid, std::make_index_sequence<TxqcdNf>{})) {}
 
   GridBase *Grid() const { return f[0].Grid(); }
 
@@ -70,21 +78,42 @@ inline void axpy(TXQCDFermionNf &y, const ComplexD &a,
 // Apply Delta_{sigma,pi}: result[a] = sum_b (sigma_{a,b} in[b] + pi_{a,b} g5 in[b])
 // where sigma and pi are Nf x Nf Hermitian flavor-matrix site lattices.
 //
-// Hardcoded Nf=2 unroll.  Runs as accelerator_for on GPU builds (and as
-// SIMD-vectorized OpenMP on CPU builds) by reading lattice views with the
-// canonical view(s) form and writing via coalescedWrite — eliminates the
-// CPU-only thread_for that previously dominated TXQCD MultiShift CG cost.
+// Two implementations:
+//   - Nf=2: SIMD-vectorized accelerator_for unroll (production hot path).
+//   - Generic Nf: per-(a,b) Lattice arithmetic via PeekIndex.  Slower but
+//     correct for arbitrary Nf (used for the Nf=3 Fierz-comparison test).
 inline void ApplyDeltaSigmaPi(const LatticeSigmaField &sigma,
                               const LatticePiField &pi,
                               const TXQCDFermionNf &in, TXQCDFermionNf &out) {
-  static_assert(TxqcdNf == 2, "ApplyDeltaSigmaPi unroll assumes Nf=2");
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
-  std::array<LatticeFermion, TxqcdNf> g5_in{{LatticeFermion(grid),
-                                             LatticeFermion(grid)}};
+  std::array<LatticeFermion, TxqcdNf> g5_in =
+      TXQCDFermionNf::MakeArray(grid, std::make_index_sequence<TxqcdNf>{});
   for (int b = 0; b < TxqcdNf; ++b) g5_in[b] = g5 * in.f[b];
-  out.f[0].Checkerboard() = in.f[0].Checkerboard();
-  out.f[1].Checkerboard() = in.f[0].Checkerboard();
+  for (int a = 0; a < TxqcdNf; ++a)
+    out.f[a].Checkerboard() = in.f[0].Checkerboard();
+
+  if constexpr (TxqcdNf != 2) {
+    // Generic Nf: extract sigma[a,b] and pi[a,b] as LatticeComplex slices.
+    // Flavor matrix is at type-tree depth 2 (iScalar<iScalar<iMatrix>>).
+    // Match the input checkerboard on accumulators before any arithmetic so
+    // CBFromExpression doesn't trip on Zero()'s undefined checkerboard.
+    int cb = in.f[0].Checkerboard();
+    for (int a = 0; a < TxqcdNf; ++a) {
+      LatticeFermion acc(in.f[0].Grid());
+      acc.Checkerboard() = cb;
+      acc = Zero();
+      acc.Checkerboard() = cb;
+      for (int b = 0; b < TxqcdNf; ++b) {
+        auto sig_ab = PeekIndex<2>(sigma, a, b);
+        auto pi_ab  = PeekIndex<2>(pi,    a, b);
+        acc = acc + sig_ab * in.f[b] + pi_ab * g5_in[b];
+      }
+      out.f[a] = acc;
+      out.f[a].Checkerboard() = cb;
+    }
+    return;
+  }
 
   autoView(sigmav, sigma, AcceleratorRead);
   autoView(piv,    pi,    AcceleratorRead);
@@ -160,12 +189,42 @@ inline void ApplyDeltaColor(const LatticeSFieldC &s,
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
 
+  if constexpr (TxqcdNf != 2) {
+    // Generic-Nf path via Lattice arithmetic (per-flavor, no SIMD unroll).
+    // Color sector is flavor-diagonal so we just loop over a.
+    const RealD inv_sqrt2 = 1.0 / std::sqrt(2.0);
+    const ComplexD ci(0.0, 1.0);
+    int cb = in.f[0].Checkerboard();
+    // Cast color-Hermitian fields to LatticeColourMatrix for direct
+    // matrix-fermion multiplication (same site-type up to typedef).
+    const LatticeColourMatrix &s_cm = reinterpret_cast<const LatticeColourMatrix&>(s);
+    const LatticeColourMatrix &p_cm = reinterpret_cast<const LatticeColourMatrix&>(p);
+    for (int a = 0; a < TxqcdNf; ++a) {
+      LatticeFermion acc(grid);
+      acc.Checkerboard() = cb;
+      acc = inv_sqrt2 * (s_cm * in.f[a]) + inv_sqrt2 * (p_cm * (g5 * in.f[a]));
+      for (int mu = 0; mu < Nd; ++mu) {
+        for (int nu = mu + 1; nu < Nd; ++nu) {
+          Gamma smn(SigmaMuNuAlgebra(mu, nu));
+          // t is iScalar<iMatrix<iMatrix<...,Nc>,Nd>>: Lorentz matrix at depth 1.
+          auto t_munu = PeekIndex<1>(t, mu, nu);
+          const LatticeColourMatrix &t_cm =
+              reinterpret_cast<const LatticeColourMatrix&>(t_munu);
+          acc = acc + ci * (t_cm * (smn * in.f[a]));
+        }
+      }
+      out.f[a] = acc;
+      out.f[a].Checkerboard() = cb;
+    }
+    return;
+  }
+
   // Pre-rotate the input fermions once per flavor for γ5 and the 6 sigma_{μν}
   // pairs.  Grid's Gamma * LatticeFermion is GPU-accelerated; doing this
   // outside the per-site loop avoids in-loop temporaries (which were one of
   // the dominant costs of MultiShift CG refresh on the production lattice).
-  std::array<LatticeFermion, TxqcdNf> g5_in{{LatticeFermion(grid),
-                                             LatticeFermion(grid)}};
+  std::array<LatticeFermion, TxqcdNf> g5_in =
+      TXQCDFermionNf::MakeArray(grid, std::make_index_sequence<TxqcdNf>{});
   // 6 (μν) pairs with μ<ν indexed by SMU::FmnIndex (XY,XZ,XT,YZ,YT,ZT).
   constexpr int Npairs = 6;
   std::vector<LatticeFermion> smn_in;

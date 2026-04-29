@@ -37,13 +37,16 @@ class TXQCDWilsonCloverOp {
     return p;
   }
 
+  // Per-flavor mass constructor.  Inner Dw is built with mass=0; M() adds
+  // mass_[a]*in.f[a] for each flavor (so non-degenerate Nf>2 setups work).
   TXQCDWilsonCloverOp(GaugeField &Umu, GridCartesian &grid,
-                GridRedBlackCartesian &rbgrid, RealD mass,
+                GridRedBlackCartesian &rbgrid,
+                const std::array<RealD, TxqcdNf> &mass,
                 const LatticeSigmaField &sigma, const LatticePiField &pi,
                 const LatticeSFieldC &s, const LatticePFieldC &p,
                 const LatticeTField &t, RealD csw = 0.0,
                 typename Impl::ImplParams impl_p = DefaultImplParams())
-      : Dw(Umu, grid, rbgrid, mass, impl_p), csw_(csw), Umu_(Umu),
+      : Dw(Umu, grid, rbgrid, 0.0, impl_p), mass_(mass), csw_(csw), Umu_(Umu),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t) {
     if (csw_ != 0.0) {
       for (int mu = 0; mu < Nd; ++mu)
@@ -54,8 +57,22 @@ class TXQCDWilsonCloverOp {
     }
   }
 
+  // Backward-compat: degenerate scalar mass.
+  TXQCDWilsonCloverOp(GaugeField &Umu, GridCartesian &grid,
+                GridRedBlackCartesian &rbgrid, RealD mass,
+                const LatticeSigmaField &sigma, const LatticePiField &pi,
+                const LatticeSFieldC &s, const LatticePFieldC &p,
+                const LatticeTField &t, RealD csw = 0.0,
+                typename Impl::ImplParams impl_p = DefaultImplParams())
+      : TXQCDWilsonCloverOp(Umu, grid, rbgrid, MakeMass(mass), sigma, pi, s, p,
+                            t, csw, impl_p) {}
+
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
-    for (int a = 0; a < TxqcdNf; ++a) Dw.M(in.f[a], out.f[a]);
+    // Dw has mass=0, so Dw.M gives 4*I + Wilson_hop per flavor; add mass_[a].
+    for (int a = 0; a < TxqcdNf; ++a) {
+      Dw.M(in.f[a], out.f[a]);
+      out.f[a] = out.f[a] + mass_[a] * in.f[a];
+    }
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
     for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
@@ -77,9 +94,17 @@ class TXQCDWilsonCloverOp {
   }
 
   WilsonOp &Wilson() { return Dw; }
+  const std::array<RealD, TxqcdNf> &Mass() const { return mass_; }
 
  private:
+  static std::array<RealD, TxqcdNf> MakeMass(RealD m) {
+    std::array<RealD, TxqcdNf> a;
+    a.fill(m);
+    return a;
+  }
+
   WilsonOp Dw;
+  std::array<RealD, TxqcdNf> mass_;
   RealD csw_;
   GaugeField &Umu_;
   const LatticeSigmaField &sigma_;

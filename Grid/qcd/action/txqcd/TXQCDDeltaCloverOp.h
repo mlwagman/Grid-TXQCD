@@ -25,6 +25,33 @@ inline void ApplyClover(RealD csw,
     return;
   }
   GridBase *grid = in.Grid();
+
+  if constexpr (TxqcdNf != 2) {
+    // Generic-Nf path via Lattice arithmetic (per-flavor, color-matrix * fermion).
+    const RealD neg_csw_half = -0.5 * csw;
+    for (int a = 0; a < TxqcdNf; ++a) {
+      LatticeFermion acc(grid);
+      acc.Checkerboard() = cb;
+      acc = Zero();
+      acc.Checkerboard() = cb;
+      for (int mu = 0; mu < Nd; ++mu) {
+        for (int nu = mu + 1; nu < Nd; ++nu) {
+          int k = (mu == 0 && nu == 1) ? 0
+                : (mu == 0 && nu == 2) ? 1
+                : (mu == 0 && nu == 3) ? 2
+                : (mu == 1 && nu == 2) ? 3
+                : (mu == 1 && nu == 3) ? 4 : 5;
+          Gamma smn(SigmaMuNuAlgebra(mu, nu));
+          // FS[k] is a LatticeColourMatrix; combine F * (sigma_{munu} v).
+          acc = acc + FS[k] * (smn * in.f[a]);
+        }
+      }
+      out.f[a] = neg_csw_half * acc;
+      out.f[a].Checkerboard() = cb;
+    }
+    return;
+  }
+
   out.f[0].Checkerboard() = cb;
   out.f[1].Checkerboard() = cb;
 

@@ -38,6 +38,25 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
   GridBase *grid = Y.Grid();
   LatticeSigmaField G(grid); G = Zero();
   G.Checkerboard() = Y.f[0].Checkerboard();
+
+  if constexpr (TxqcdNf != 2) {
+    // Generic-Nf path: assemble G via per-(a,b) localInnerProduct + per-site
+    // poke.  Slower than the Nf=2 SIMD unroll but Nf-agnostic.
+    for (int a = 0; a < TxqcdNf; ++a) {
+      for (int b = 0; b < TxqcdNf; ++b) {
+        // sum_{alpha,i} conj(Y_a)(alpha,i) * X_b(alpha,i) per site.
+        auto inner = localInnerProduct(Y.f[a], X.f[b]);
+        autoView(Gv, G, CpuWrite);
+        autoView(iv, inner, CpuRead);
+        thread_for(ss, grid->oSites(), {
+          // tensor_reduced of SpinColourVector is iScalar<iScalar<iScalar<v>>>.
+          Gv[ss]()()(a, b) = iv[ss]()()();
+        });
+      }
+    }
+    return G;
+  }
+
   // Fuse the Nf=2 outer loops into one accelerator_for over outer SIMD sites.
   autoView(Gv,  G,       AcceleratorWrite);
   autoView(Y0v, Y.f[0],  AcceleratorRead);
@@ -110,6 +129,33 @@ inline LatticeSFieldC ColorBilinearSpinOp(const TXQCDFermionNf &Y,
   for (int alpha = 0; alpha < Ns; ++alpha)
     for (int beta = 0; beta < Ns; ++beta)
       opflat[alpha * Ns + beta] = Op(alpha, beta);
+
+  if constexpr (TxqcdNf != 2) {
+    // Generic-Nf CPU thread_for: per-flavor, per-site, accumulate into G.
+    autoView(Gv, G, CpuWrite);
+    int cb = G.Checkerboard();
+    for (int a = 0; a < TxqcdNf; ++a) {
+      autoView(Yav, Y.f[a], CpuRead);
+      autoView(Xav, X.f[a], CpuRead);
+      thread_for(ss, grid->oSites(), {
+        for (int i = 0; i < Nc; ++i) {
+          for (int j = 0; j < Nc; ++j) {
+            for (int alpha = 0; alpha < Ns; ++alpha) {
+              for (int beta = 0; beta < Ns; ++beta) {
+                ComplexD op_ab = opflat[alpha * Ns + beta];
+                Gv[ss]()()(i, j) = Gv[ss]()()(i, j)
+                  + conjugate(Yav[ss]()(alpha)(i)) * op_ab
+                  * Xav[ss]()(beta)(j);
+              }
+            }
+          }
+        }
+      });
+    }
+    G.Checkerboard() = cb;
+    return G;
+  }
+
   autoView(Gv,  G,       AcceleratorWrite);
   autoView(Y0v, Y.f[0],  AcceleratorRead);
   autoView(Y1v, Y.f[1],  AcceleratorRead);

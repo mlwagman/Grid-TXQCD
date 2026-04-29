@@ -27,16 +27,25 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
   typedef TXQCDSiteMatrixUtil SMU;
   static constexpr int kDim = SMU::kDim;
 
+  // Per-flavor mass constructor (for non-degenerate Nf>2).
+  TXQCDLogDetCloverEOAction(GridCartesian &grid, GridRedBlackCartesian &rbgrid,
+                      const std::array<RealD, TxqcdNf> &mass, RealD csw = 0.0)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw) {
+    for (int a = 0; a < TxqcdNf; ++a) diag_mass_[a] = 4.0 + mass_[a];
+  }
+
+  // Backward-compat: degenerate scalar mass.
   TXQCDLogDetCloverEOAction(GridCartesian &grid, GridRedBlackCartesian &rbgrid,
                       RealD mass, RealD csw = 0.0)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
-        csw_(csw) {}
+      : TXQCDLogDetCloverEOAction(grid, rbgrid, SMU::MassArray(mass), csw) {}
 
   std::string action_name() override { return "TXQCDLogDetCloverEOAction"; }
   std::string LogParameters() override {
     std::stringstream os;
-    os << GridLogMessage << "[" << action_name() << "] mass=" << mass_
-       << std::endl;
+    os << GridLogMessage << "[" << action_name() << "] mass=";
+    for (int a = 0; a < TxqcdNf; ++a)
+      os << (a ? "," : "{") << mass_[a];
+    os << "}" << std::endl;
     return os.str();
   }
 
@@ -284,8 +293,8 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
  private:
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
-  RealD mass_;
-  RealD diag_mass_;
+  std::array<RealD, TxqcdNf> mass_;
+  std::array<RealD, TxqcdNf> diag_mass_;
   RealD csw_;
   SMU::SpinMatrices sm_;
   std::vector<LatticeColourMatrix> FS_;

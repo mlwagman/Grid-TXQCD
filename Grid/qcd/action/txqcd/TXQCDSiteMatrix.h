@@ -75,8 +75,12 @@ struct TXQCDSiteMatrixUtil {
     return -1;
   }
 
+  // Per-flavor diagonal mass: diag_mass[a] = 4 + m_a goes on the rows
+  // (a, alpha, i) for that flavor.  Required for non-degenerate Nf=3 setups
+  // (e.g. mass = diag(m_l, m_l, m_s)) where each flavor has its own mass.
   template <class SigSobj, class PiSobj, class SSobj, class PSobj, class TSobj>
-  static void BuildSiteMatrix(const SpinMatrices &sm, RealD diag_mass,
+  static void BuildSiteMatrix(const SpinMatrices &sm,
+                               const std::array<RealD, TxqcdNf> &diag_mass,
                                const SigSobj &sig_site, const PiSobj &pi_site,
                                const SSobj &s_site, const PSobj &p_site,
                                const TSobj &t_site,
@@ -84,7 +88,12 @@ struct TXQCDSiteMatrixUtil {
                                const std::array<FmnSobj, 6> *fmn_site,
                                SiteMatrix &M) {
     M = SiteMatrix::Zero();
-    for (int r = 0; r < kDim; ++r) M(r, r) = diag_mass;
+    for (int a = 0; a < TxqcdNf; ++a)
+      for (int alpha = 0; alpha < Ns; ++alpha)
+        for (int i = 0; i < Nc; ++i) {
+          int r = a * Ns * Nc + alpha * Nc + i;
+          M(r, r) = diag_mass[a];
+        }
 
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
 
@@ -175,7 +184,9 @@ struct TXQCDSiteMatrixUtil {
     return out;
   }
 
-  static void PrecomputeInverses(const SpinMatrices &sm, RealD diag_mass,
+  // Per-flavor diagonal mass (preferred entry point).
+  static void PrecomputeInverses(const SpinMatrices &sm,
+                                  const std::array<RealD, TxqcdNf> &diag_mass,
                                   const AuxSiteArrays &aux,
                                   RealD csw,
                                   const CloverSiteArrays *clover,
@@ -198,6 +209,33 @@ struct TXQCDSiteMatrixUtil {
                       aux.p[x], aux.t[x], csw, fmn_ptr, M);
       inv[x] = M.inverse();
     });
+  }
+
+  // Backward-compat scalar overloads: replicate one mass across all flavors.
+  static std::array<RealD, TxqcdNf> MassArray(RealD m) {
+    std::array<RealD, TxqcdNf> arr;
+    arr.fill(m);
+    return arr;
+  }
+
+  template <class SigSobj, class PiSobj, class SSobj, class PSobj, class TSobj>
+  static void BuildSiteMatrix(const SpinMatrices &sm, RealD diag_mass,
+                               const SigSobj &sig_site, const PiSobj &pi_site,
+                               const SSobj &s_site, const PSobj &p_site,
+                               const TSobj &t_site,
+                               RealD csw,
+                               const std::array<FmnSobj, 6> *fmn_site,
+                               SiteMatrix &M) {
+    BuildSiteMatrix(sm, MassArray(diag_mass), sig_site, pi_site, s_site,
+                    p_site, t_site, csw, fmn_site, M);
+  }
+
+  static void PrecomputeInverses(const SpinMatrices &sm, RealD diag_mass,
+                                  const AuxSiteArrays &aux,
+                                  RealD csw,
+                                  const CloverSiteArrays *clover,
+                                  std::vector<SiteMatrix> &inv) {
+    PrecomputeInverses(sm, MassArray(diag_mass), aux, csw, clover, inv);
   }
 };
 

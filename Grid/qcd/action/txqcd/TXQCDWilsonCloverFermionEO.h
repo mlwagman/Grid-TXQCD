@@ -57,15 +57,21 @@ class TXQCDWilsonCloverFermionEO {
     return p;
   }
 
+  // Per-flavor mass constructor (e.g. mass = {m_l, m_l, m_s} for Nf=3).
+  // The inner Dw_ is built with mass=0 since its diagonal piece is never
+  // called by TXQCD code paths (Mooee/M apply diag_mass_[a] separately);
+  // only Dw_.Meooe/MoeDeriv (mass-independent hopping) and Dw_.M (used in
+  // M(in,out) where we add mass_[a]*in afterwards) matter.
   TXQCDWilsonCloverFermionEO(GaugeField &Umu, GridCartesian &grid,
-                       GridRedBlackCartesian &rbgrid, RealD mass,
+                       GridRedBlackCartesian &rbgrid,
+                       const std::array<RealD, TxqcdNf> &mass,
                        LatticeSigmaField &sigma, LatticePiField &pi,
                        LatticeSFieldC &s, LatticePFieldC &p,
                        LatticeTField &t, RealD csw = 0.0,
                        typename Impl::ImplParams impl_p = DefaultImplParams())
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass),
         csw_(csw),
-        Dw_(Umu, grid, rbgrid, mass, impl_p),
+        Dw_(Umu, grid, rbgrid, 0.0, impl_p),
         Umu_(Umu),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t),
         sigma_e_(&rbgrid), sigma_o_(&rbgrid),
@@ -73,6 +79,7 @@ class TXQCDWilsonCloverFermionEO {
         s_e_(&rbgrid), s_o_(&rbgrid),
         p_e_(&rbgrid), p_o_(&rbgrid),
         t_e_(&rbgrid), t_o_(&rbgrid) {
+    for (int a = 0; a < TxqcdNf; ++a) diag_mass_[a] = 4.0 + mass_[a];
     if (csw_ != 0.0) {
       for (int k = 0; k < 6; ++k) {
         FS_.emplace_back(&grid);
@@ -82,6 +89,17 @@ class TXQCDWilsonCloverFermionEO {
     }
     ImportFields();
   }
+
+  // Backward-compat: degenerate scalar mass.
+  TXQCDWilsonCloverFermionEO(GaugeField &Umu, GridCartesian &grid,
+                       GridRedBlackCartesian &rbgrid, RealD mass,
+                       LatticeSigmaField &sigma, LatticePiField &pi,
+                       LatticeSFieldC &s, LatticePFieldC &p,
+                       LatticeTField &t, RealD csw = 0.0,
+                       typename Impl::ImplParams impl_p = DefaultImplParams())
+      : TXQCDWilsonCloverFermionEO(Umu, grid, rbgrid,
+                                   SMU::MassArray(mass),
+                                   sigma, pi, s, p, t, csw, impl_p) {}
 
   ~TXQCDWilsonCloverFermionEO() {
     PrintTimers("destructor");
@@ -123,7 +141,11 @@ class TXQCDWilsonCloverFermionEO {
 
   // ----- Full-grid operator (for testing / comparison) -----
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
-    for (int a = 0; a < TxqcdNf; ++a) Dw_.M(in.f[a], out.f[a]);
+    // Dw_ has mass=0, so Dw_.M gives 4*I + Wilson_hop; add per-flavor mass.
+    for (int a = 0; a < TxqcdNf; ++a) {
+      Dw_.M(in.f[a], out.f[a]);
+      out.f[a] = out.f[a] + mass_[a] * in.f[a];
+    }
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
     for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
@@ -142,7 +164,7 @@ class TXQCDWilsonCloverFermionEO {
   void Mooee(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     int cb = in.f[0].Checkerboard();
     for (int a = 0; a < TxqcdNf; ++a) {
-      out.f[a] = diag_mass_ * in.f[a];
+      out.f[a] = diag_mass_[a] * in.f[a];
       out.f[a].Checkerboard() = cb;
     }
     TXQCDFermionNf d(in.Grid());
@@ -205,7 +227,8 @@ class TXQCDWilsonCloverFermionEO {
   }
 
   WilsonOp &Wilson() { return Dw_; }
-  RealD DiagMass() const { return diag_mass_; }
+  const std::array<RealD, TxqcdNf> &DiagMass() const { return diag_mass_; }
+  const std::array<RealD, TxqcdNf> &Mass() const { return mass_; }
   RealD Csw() const { return csw_; }
   const GaugeField &Gauge() const { return Umu_; }
   const std::vector<LatticeColourMatrix> &FieldStrengths() const {
@@ -215,8 +238,8 @@ class TXQCDWilsonCloverFermionEO {
  private:
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
-  RealD mass_;
-  RealD diag_mass_;
+  std::array<RealD, TxqcdNf> mass_;
+  std::array<RealD, TxqcdNf> diag_mass_;
   RealD csw_;
   WilsonOp Dw_;
   GaugeField &Umu_;
@@ -349,7 +372,12 @@ class TXQCDWilsonCloverFermionEO {
       const char *e = std::getenv("TXQCD_MOOEEINV_SCALAR");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
-    if (use_scalar) {
+    // The SIMD path is hand-unrolled for Nf=2 only; force the scalar
+    // (Nf-generic) path for any other Nf so the test suite can exercise
+    // non-degenerate Nf=3 setups.
+    if constexpr (TxqcdNf != 2) {
+      ApplyMooeeInvScalar(cb, in, out);
+    } else if (use_scalar) {
       ApplyMooeeInvScalar(cb, in, out);
     } else {
       ApplyMooeeInvSimd(cb, in, out);
