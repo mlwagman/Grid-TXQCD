@@ -60,9 +60,25 @@ static RealD AutoMeasureSigma(GridCartesian &Grid, GridRedBlackCartesian &RBGrid
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
-  Coordinate latt = default_latt();
+  // LATT env var override (e.g. LATT="8.8.8.16") for production-volume smoke
+  // testing without rebuilding default_latt().  Otherwise honor --grid CLI;
+  // fall back to the test's small default if neither is given.
+  Coordinate latt;
+  if (const char *e = std::getenv("LATT"); e && *e) {
+    int Lx, Ly, Lz, Lt;
+    if (std::sscanf(e, "%d.%d.%d.%d", &Lx, &Ly, &Lz, &Lt) == 4)
+      latt = Coordinate(std::vector<int>{Lx, Ly, Lz, Lt});
+    else
+      latt = default_latt();
+  } else {
+    auto cli = GridDefaultLatt();
+    if (cli.size() == 4 && cli[0] > 0) latt = cli;
+    else                                latt = default_latt();
+  }
   Coordinate simd = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi  = GridDefaultMpi();
+  std::cout << GridLogMessage << "Lattice: " << latt[0] << "." << latt[1] << "."
+            << latt[2] << "." << latt[3] << std::endl;
   GridCartesian        Grid(latt, simd, mpi);
   GridRedBlackCartesian RBGrid(&Grid);
 
