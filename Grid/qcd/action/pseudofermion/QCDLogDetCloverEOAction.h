@@ -48,8 +48,12 @@ public:
     std::vector<typename SiteClover::scalar_object> ct_lex(lvol);
     unvectorizeToLexOrdArray(ct_lex, FermOp.CloverTermEven);
 
+    // OMP-parallel over sites.  Each thread keeps its own EigenM scratch and
+    // partial logdet sum.  Equivalent at machine precision since logdet is a
+    // sum of independent per-site terms.
     RealD logdet = 0.0;
-    for (int site = 0; site < lvol; ++site) {
+    std::vector<RealD> partial(thread_max(0), 0.0);
+    thread_for(site, lvol, {
       Eigen::MatrixXcd EigenM = Eigen::MatrixXcd::Zero(Ns * DimRep, Ns * DimRep);
       for (int j = 0; j < Ns; j++)
         for (int k = 0; k < Ns; k++)
@@ -57,8 +61,9 @@ public:
             for (int b = 0; b < DimRep; b++)
               EigenM(a + j * DimRep, b + k * DimRep) =
                   std::complex<double>(ct_lex[site]()(j, k)(a, b));
-      logdet += std::log(std::abs(EigenM.determinant()));
-    }
+      partial[thread_num(0)] += std::log(std::abs(EigenM.determinant()));
+    });
+    for (auto &p : partial) logdet += p;
 
     FermOp.GaugeGrid()->GlobalSum(logdet);
     RealD action = -RealD(Nf) * logdet;
