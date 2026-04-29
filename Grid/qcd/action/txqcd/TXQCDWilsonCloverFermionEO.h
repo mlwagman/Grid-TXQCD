@@ -458,9 +458,13 @@ class TXQCDWilsonCloverFermionEO {
     t_unvec_us_ += usecond() - t_unv0;
 
     uint64_t nsites = in_s[0].size();
-    SMU::SiteVector v, w;
 
-    for (uint64_t x = 0; x < nsites; ++x) {
+    // OMP-parallel over sites.  Per-site SiteVector is thread-local.
+    // Brings ApplyMooeeInvScalar from serial (~5s/call on 16³×48 production)
+    // to ~Ncores× faster, the difference between unusably slow and a viable
+    // Nf=3 production hot path until we generalise the SIMD kernel to Nf>2.
+    thread_for(x, nsites, {
+      SMU::SiteVector v, w;
       for (int a = 0; a < TxqcdNf; ++a)
         for (int alpha = 0; alpha < Ns; ++alpha)
           for (int i = 0; i < Nc; ++i) {
@@ -477,7 +481,7 @@ class TXQCDWilsonCloverFermionEO {
             auto &z = w(a * Ns * Nc + alpha * Nc + i);
             out_s[a][x]()(alpha)(i) = ComplexD(z.real(), z.imag());
           }
-    }
+    });
 
     auto t_rev0 = usecond();
     for (int a = 0; a < TxqcdNf; ++a) {
