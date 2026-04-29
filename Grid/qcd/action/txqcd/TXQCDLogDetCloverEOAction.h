@@ -57,9 +57,10 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     auto cl = GetEvenClover(U);
     uint64_t nsites = aux.sig.size();
 
-    SMU::SiteMatrix M;
-    RealD logdet = 0.0;
-    for (uint64_t x = 0; x < nsites; ++x) {
+    // Per-site terms are independent → thread_for over sites; M is per-thread.
+    std::vector<RealD> partial(thread_max(0), 0.0);
+    thread_for(x, nsites, {
+      SMU::SiteMatrix M;
       std::array<SMU::FmnSobj, 6> fmn_site;
       const std::array<SMU::FmnSobj, 6> *fmn_ptr = nullptr;
       if (csw_ != 0.0) {
@@ -71,8 +72,10 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
                           csw_, fmn_ptr, M);
       auto lu = M.partialPivLu();
       auto d = lu.determinant();
-      logdet += std::log(std::abs(d));
-    }
+      partial[thread_num(0)] += std::log(std::abs(d));
+    });
+    RealD logdet = 0.0;
+    for (auto &p : partial) logdet += p;
     grid_.GlobalSum(logdet);
     RealD action = -logdet;
     std::cout << GridLogMessage << "[" << action_name() << "] S = " << action
@@ -85,7 +88,6 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     auto cl = GetEvenClover(U);
     uint64_t nsites = aux.sig.size();
 
-    SMU::SiteMatrix M, Inv;
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
     const double neg_csw_half = -0.5 * csw_;
 
@@ -100,7 +102,11 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     if (csw_ != 0.0)
       for (int k = 0; k < 6; ++k) clover_sigma[k].resize(nsites);
 
-    for (uint64_t x = 0; x < nsites; ++x) {
+    // Per-site loop: each iteration reads aux/cl[x], computes M, M.inverse(),
+    // then writes per-site outputs sig_force[x], ... — independent across x,
+    // perfect for thread_for.  M, Inv, fmn_site are per-thread scratch.
+    thread_for(x, nsites, {
+      SMU::SiteMatrix M, Inv;
       std::array<SMU::FmnSobj, 6> fmn_site;
       const std::array<SMU::FmnSobj, 6> *fmn_ptr = nullptr;
       if (csw_ != 0.0) {
@@ -216,7 +222,7 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
           }
         }
       }
-    }
+    });
 
     LatticeSigmaField F_sig_e(&rbgrid_);
     vectorizeFromLexOrdArray(sig_force, F_sig_e);
