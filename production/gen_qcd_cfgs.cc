@@ -729,11 +729,18 @@ int main(int argc, char **argv) {
                 << std::endl;
     }
 
-    std::vector<std::pair<std::string, Action<LatticeGaugeField>*>> actions = {
-        {"PlaqRect", &GaugeAction},
-        {"LogDet",   &LogDet}};
-    for (size_t p = 0; p < RatPFs.size(); ++p)
+    // FD_FAST=1 only tests one of each kind — skips the redundant RatPF1/2
+    // and the cheap PlaqRect.  Two ε values only.  ~3-4 min vs ~30 min.
+    bool fd_fast = false;
+    if (const char *t = std::getenv("FD_FAST"); t && std::atoi(t)) fd_fast = true;
+
+    std::vector<std::pair<std::string, Action<LatticeGaugeField>*>> actions;
+    if (!fd_fast) actions.push_back({"PlaqRect", &GaugeAction});
+    actions.push_back({"LogDet", &LogDet});
+    for (size_t p = 0; p < RatPFs.size(); ++p) {
+      if (fd_fast && p > 0) break;  // only RatPF0 in fast mode
       actions.push_back({"RatPF" + std::to_string(p), RatPFs[p].get()});
+    }
     if (fd_noneo) actions.push_back({"LightTwoFlNonEO", LightTwoFlNonEO.get()});
 
     // FD_NO_SMEAR=1 disables stout smearing on all fermion actions for the
@@ -781,7 +788,9 @@ int main(int argc, char **argv) {
       RealD S0 = act->S(Smear);
       std::cout << GridLogMessage << "[FD][" << name << "] S(U)=" << std::setprecision(15) << S0
                 << "  dS_pred=" << dSpred << std::endl;
-      for (RealD eps : {1e-2, 1e-3, 1e-4, 1e-5}) {
+      std::vector<RealD> eps_list = fd_fast ? std::vector<RealD>{1e-3, 1e-4}
+                                            : std::vector<RealD>{1e-2, 1e-3, 1e-4, 1e-5};
+      for (RealD eps : eps_list) {
         // U_± = (1 ± ε p) U with the smear chain refreshed via set_Field.
         LatticeGaugeField Up(&Grid), Um(&Grid);
         {
