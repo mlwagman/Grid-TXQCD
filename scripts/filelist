@@ -47,6 +47,15 @@ for subdir in $dirs; do
 	   BNAME=`basename $f .cc`
 	   echo ${BNAME}_SOURCES=$f >> Make.inc
 	   echo ${BNAME}_LDADD='$(top_builddir)/Grid/libGrid.a' >> Make.inc
+	   # TXQCD per-target Nf override: any test named *_nf<N>_*.cc or
+	   # *_nf<N>.cc gets compiled with -DTXQCD_Nf=N.  Lets us keep the
+	   # default Nf=2 build and still add Nf=3 (and future Nf>2) tests
+	   # from the same source tree.
+	   case "$BNAME" in
+	     *_nf2_*|*_nf2)  echo "${BNAME}_CPPFLAGS = \$(AM_CPPFLAGS) -DTXQCD_Nf=2" >> Make.inc ;;
+	     *_nf3_*|*_nf3)  echo "${BNAME}_CPPFLAGS = \$(AM_CPPFLAGS) -DTXQCD_Nf=3" >> Make.inc ;;
+	     *_nf4_*|*_nf4)  echo "${BNAME}_CPPFLAGS = \$(AM_CPPFLAGS) -DTXQCD_Nf=4" >> Make.inc ;;
+	   esac
 	   echo >> Make.inc
     done
     if [ $subdir != '.' ]; then
