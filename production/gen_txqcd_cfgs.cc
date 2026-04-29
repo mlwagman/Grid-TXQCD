@@ -164,8 +164,16 @@ int main(int argc, char **argv) {
       latest = t;
   }
 
-  // 10 poles on the rational (chroma ref uses 10-12), MD tol 1e-6.
-  OneFlavourRationalParams rat_params(1e-4, 200.0, cg_max, cg_tol, 10, 64,
+  // Chroma-matched rational bounds for the cl3_16_48_b6p1_m0p2450 ensemble:
+  // lowerMin=1e-4, upperMax=32, degree=15.  The previous hi=200, degree=10
+  // values were vestigial from the Nf=2 light + Nf=1 strange QCD-wrap setup
+  // where the strange-wrap operator had wider effective spectrum.  With
+  // Nf=3 diag mass and mass_strange = mass_light = -0.245 the operator is
+  // the same as chroma's pure Wilson-Clover; the chroma bounds give a
+  // ~5-order-of-magnitude better Remez approximation (~1e-9 vs ~1e-4) →
+  // smaller rational dH contribution + faster multishift CG (poles closer
+  // to spectrum density).
+  OneFlavourRationalParams rat_params(1e-4, 32.0, cg_max, cg_tol, 15, 64,
                                       100, 1e-6, 1e-4);
 
   // Grid's SymanzikGaugeAction uses RBC convention — NOT chroma's.
