@@ -8,12 +8,20 @@
 #
 # All streams use:
 #   INTEGRATOR=MinimumNorm2  LAMBDA_MN2=0.1789
-#   MDSTEPS=10               TRAJL=sqrt(2)/4 = 0.353553391  (was 7 = chroma
-#                                                            phys match, but
-#                                                            MDs=7 + tepid
-#                                                            locks in
-#                                                            metastable
-#                                                            plaq~0.534 basin)
+#   MDSTEPS=7                TRAJL=sqrt(2)/4 = 0.353553391  (chroma physical
+#                                                            match.  MDs=7
+#                                                            previously locked
+#                                                            in metastable
+#                                                            plaq~0.534 basin
+#                                                            with the old
+#                                                            Nf=2+1 Schur-PF
+#                                                            action; the new
+#                                                            Nf=3 rational PF
+#                                                            structure (commit
+#                                                            76ca2a75) keeps
+#                                                            the integrator
+#                                                            stable through
+#                                                            that basin.)
 #   GAUGE_MULT=4 (TXQCD) / GAUGE_INNER_MULT=4 (QCD)
 #   AUX_MULT=2               (TXQCD only; chroma physical match)
 #   START_TYPE=thermal       WEAK_FIELD_SCALE=0.1   (cold-ish start; was
@@ -29,7 +37,7 @@ cd "$(dirname "$0")"
 
 COMMON_ENV="\
 INTEGRATOR=MinimumNorm2,LAMBDA_MN2=0.1789,\
-MDSTEPS=10,TRAJL=0.353553390593274,\
+MDSTEPS=7,TRAJL=0.353553390593274,\
 GAUGE_MULT=4,GAUGE_INNER_MULT=4,AUX_MULT=2,\
 HASEN_DM=0,\
 START_TYPE=thermal,WEAK_FIELD_SCALE=0.1,\
