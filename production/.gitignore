@@ -1,14 +1,23 @@
 gen_txqcd_cfgs
+gen_txqcd_cfgs_2plus1
 gen_qcd_cfgs
+gen_qcd_cfgs_2plus1
 meas_conn_txqcd
 meas_conn_qcd
+meas_conn_weakfield
+meas_conn_weakfield_nf2
 meas_disco_txqcd
 meas_disco_qcd
 meas_aux_txqcd
 compare
+eigspec_diag
+eigspec_diag_nf2
 cfgs/
+chroma_cfgs/
 meas_2pt/
 logs/
+quda_resources/
+XMLLOG
 
 # Compiled binaries
 compute_plaq

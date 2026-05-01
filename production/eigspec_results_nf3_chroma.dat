@@ -1,0 +1,22 @@
+# Eigenvalue spectrum: lowest 3 eigenvalues of M†M for QCD + TXQCD-Nf=3
+# at multiple λ on chroma cfg cl3_16_48_b6p1_m0p2450_a_cfg_11100.lime (plaq=0.5138).
+# Σ_auto = 1.45-1.54 (auto-measured on stout-smeared chroma cfg).
+#
+# Source runs:
+#   eigspec_v1: CHEBY_HI=80, ORD=51, NM=40, NEV=3 (QCD invalid: hi<λ_max=82)
+#   eigspec_v2: CHEBY_HI=120, ORD=51, NM=20, NEV=3
+#
+# Data captured 2026-04-29 from /tmp/eigspec_chroma{,_v2}.log (lost-node session).
+#
+# Format: action  λ_max(M†M)  λ_min  eval[1]  eval[2]  |γ5M|_min  κ
+#
+# Group A: from eigspec_v2 (CHEBY_HI=120, clean across all λ):
+QCD            57.939   1.032e-2  2.005e-2  4.321e-2  0.10158   5615
+TXQCD-Nf3-l3   96.610   1.206e-3  1.038e-2  2.920e-2  0.03472  80121
+TXQCD-Nf3-l3.5 83.419   1.187e-3  1.069e-2  2.981e-2  0.03445  70295
+#
+# Group B: from eigspec_v1 (CHEBY_HI=80, TXQCD valid since λ_max<80; QCD invalid):
+TXQCD-Nf3-l4   77.587   1.039e-3  9.600e-3  2.668e-2  0.03223  74687
+TXQCD-Nf3-l6   62.391   1.331e-3  7.969e-3  2.066e-2  0.03649  46860
+TXQCD-Nf3-l12  58.960   4.497e-3  1.021e-2  2.229e-2  0.06706  13110
+TXQCD-Nf3-l18  58.379   4.551e-3  1.160e-2  2.194e-2  0.06746  12829

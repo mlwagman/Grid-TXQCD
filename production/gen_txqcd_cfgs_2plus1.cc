@@ -16,19 +16,6 @@
 
 using namespace TXQCDProduction;
 
-// This driver is now compiled at TXQCD_Nf=3 with diag mass {m_l, m_l, m_s}.
-// The previous Nf=2 (light) + Nf=1 (strange QCD-wrap) structure had two
-// problems: (a) the kaon (light-strange) propagator only had the σ-coupling
-// on the light leg → asymmetric decay relative to chroma's Nf=3 ensemble;
-// (b) the strange leg used Schur PF whose M_pc⁻¹ amplification dominated
-// near-zero modes off-equilibrium → metastable plaq~0.534 basin trap.
-// Nf=3 with three independent rational PFs (one per flavor) at masses
-// {m_l, m_l, m_s} resolves both: all three flavors share the σ background
-// and rational PFs are bounded-force.
-static_assert(TxqcdNf == 3,
-              "production/gen_txqcd_cfgs.cc requires TXQCD_Nf=3 "
-              "(per-flavor diag mass {m_l, m_l, m_s}).");
-
 struct TxqcdDiag : public HmcObservable<TXQCDField> {
   struct ActionRef { std::string name; Action<TXQCDField> *action; };
 
@@ -166,15 +153,7 @@ int main(int argc, char **argv) {
       latest = t;
   }
 
-  // Chroma-matched rational bounds for the cl3_16_48_b6p1_m0p2450 ensemble:
-  // lowerMin=1e-4, upperMax=32, degree=15.  The previous hi=200, degree=10
-  // values were vestigial from the Nf=2 light + Nf=1 strange QCD-wrap setup
-  // where the strange-wrap operator had wider effective spectrum.  With
-  // Nf=3 diag mass and mass_strange = mass_light = -0.245 the operator is
-  // the same as chroma's pure Wilson-Clover; the chroma bounds give a
-  // ~5-order-of-magnitude better Remez approximation (~1e-9 vs ~1e-4) →
-  // smaller rational dH contribution + faster multishift CG (poles closer
-  // to spectrum density).
+  // 10 poles on the rational (chroma ref uses 10-12), MD tol 1e-6.
   OneFlavourRationalParams rat_params(1e-4, 100.0, cg_max, cg_tol, 20, 64,
                                       100, 1e-6, 1e-4);
 
@@ -189,30 +168,33 @@ int main(int argc, char **argv) {
 
   AuxiliaryFieldGaussianAction AuxAction(lambda_runtime);
 
-  // Nf=3 diag mass: {m_l, m_l, m_s}.  All three flavors share aux fields.
-  // The TXQCDWilsonCloverRationalEOAction's per-flavor-mass overload takes
-  // a std::array<RealD, TxqcdNf> directly; pass {mass_light, mass_light,
-  // mass_strange} (mass_strange = mass_light by default in params.h, but
-  // the array form allows non-degenerate setups).
-  const std::array<RealD, TxqcdNf> mass_arr = {mass_light, mass_light, mass_strange};
-  std::cout << GridLogMessage << "Nf=3 diag mass = {" << mass_arr[0] << ", "
-            << mass_arr[1] << ", " << mass_arr[2] << "}" << std::endl;
+  // Hasenbusch mass preconditioning (HASEN_DM env var).  When HASEN_DM > 0,
+  // split |det M_light| into |det M_heavy| * |det M_light / M_heavy| with
+  // mass_heavy = mass_light + HASEN_DM.  Heavy mass → better-conditioned CG,
+  // ratio force suppressed by ~Δm.  HASEN_DM=0 (default) keeps the single
+  // rational at mass_light.  Typical tuning: start with Δm ≈ 0.05-0.10 for
+  // Wilson-Clover with mass_light = -0.245.
+  double hasen_dm = 0.0;
+  if (const char *hd = std::getenv("HASEN_DM"); hd && *hd) hasen_dm = std::atof(hd);
+  const RealD mass_heavy = mass_light + hasen_dm;
+  std::cout << GridLogMessage << "HASEN_DM=" << hasen_dm
+            << "  mass_light=" << mass_light
+            << "  mass_heavy=" << mass_heavy << std::endl;
 
-  // Hasenbusch (HASEN_DM>0) is not currently per-flavor compatible — disable
-  // for Nf=3.  Rational HMC bounds the force on its own; the M_pc⁻¹
-  // amplification that motivated Hasenbusch in Schur-PF setups doesn't apply.
-  if (const char *hd = std::getenv("HASEN_DM"); hd && std::atof(hd) > 0) {
-    std::cerr << "ERROR: HASEN_DM>0 not supported in Nf=3 build.  "
-              << "Use rational HMC alone.\n";
-    std::exit(1);
-  }
-
-  // ONE rational pseudofermion per flavor (3 total) with the diag mass array.
-  // Each carries its own pseudofermion field; refresh independently.
-  TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass_arr, rat_params, csw);
+  // Full rational at mass_light (used when HASEN_DM == 0).
+  TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass_light, rat_params, csw);
   PF.is_smeared = true;
 
-  TXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass_arr, csw);
+  // Hasenbusch split pair (used when HASEN_DM > 0).
+  TXQCDWilsonCloverRationalEOAction PF_heavy(Grid, RBGrid, mass_heavy,
+                                              rat_params, csw);
+  PF_heavy.is_smeared = true;
+  TXQCDWilsonCloverHasenbuschAction PF_ratio(Grid, RBGrid,
+                                              mass_light, mass_heavy,
+                                              rat_params, csw);
+  PF_ratio.is_smeared = true;
+
+  TXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass_light, csw);
   LogDet.is_smeared = true;
 
   TXQCDField U(&Grid);
@@ -224,7 +206,8 @@ int main(int argc, char **argv) {
     start_traj = latest;
   } else if (const char *ic = std::getenv("IMPORT_CFG"); ic && *ic) {
     // Import an external thermalized gauge config (chroma LIME or NERSC).
-    // Aux fields auto-initialized via Σ measured on the imported (smeared) gauge.
+    // Aux fields auto-initialized via Σ measured on the imported (smeared)
+    // gauge, matching the AUX_INIT_AUTO path of the fresh-start branch.
     std::cout << GridLogMessage << "IMPORT_CFG=" << ic << std::endl;
     FILE *fp = std::fopen(ic, "rb"); char magic[16] = {0};
     if (fp) { std::fread(magic, 1, sizeof(magic), fp); std::fclose(fp); }
@@ -369,10 +352,51 @@ int main(int argc, char **argv) {
     }
   }
 
-  // The strange-as-separate-Nf=1-QCD-wrap section was removed when this driver
-  // was converted to Nf=3 with diag mass {m_l, m_l, m_s}: the strange flavor
-  // is now handled by the TXQCD operator's third flavor slot, sharing the
-  // same aux-field background as the light flavors.
+  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC, wrapped for TXQCD HMC.
+  // Uses the mixed-precision rational action (matches gen_qcd_cfgs.cc): MD force
+  // runs ConjugateGradientMultiShiftMixedPrec with reliable updates, refresh and
+  // S keep full-DP multishift CG.  Roughly 2× faster than full-DP on the strange
+  // force eval, which dominates the per-traj cost outside the TXQCD light deriv.
+  typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+  typedef WilsonCloverFermion<WilsonImplF, CloverHelpers<WilsonImplF>> WCF_f;
+  // Antiperiodic time BC to match chroma <boundary>1 1 1 -1</boundary>.
+  WilsonImplParams strange_impl_p;
+  strange_impl_p.boundary_phases.resize(Nd, 1.0);
+  strange_impl_p.boundary_phases[Nd - 1] = -1.0;
+  WilsonImplParams strange_impl_pF;
+  strange_impl_pF.boundary_phases.resize(Nd, 1.0);
+  strange_impl_pF.boundary_phases[Nd - 1] = -1.0;
+
+  // Single-precision sibling grids + gauge field for the MP CG.
+  GridCartesian        StrangeGridF(latt, GridDefaultSimd(Nd, vComplexF::Nsimd()), mpi);
+  GridRedBlackCartesian StrangeRBGridF(&StrangeGridF);
+  LatticeGaugeFieldF StrangeUmuF(&StrangeGridF);
+  {
+    LatticeColourMatrix  U_d(&Grid);
+    LatticeColourMatrixF U_f(&StrangeGridF);
+    for (int mu = 0; mu < Nd; ++mu) {
+      U_d = PeekIndex<LorentzIndex>(U.U, mu);
+      precisionChange(U_f, U_d);
+      PokeIndex<LorentzIndex>(StrangeUmuF, U_f, mu);
+    }
+  }
+  WCF_f StrangeFermOpF(StrangeUmuF, StrangeGridF, StrangeRBGridF, mass_strange,
+                       csw, csw, WilsonAnisotropyCoefficients(), strange_impl_pF);
+
+  WCF StrangeFermOp(U.U, Grid, RBGrid, mass_strange, csw, csw,
+                    WilsonAnisotropyCoefficients(), strange_impl_p);
+  // Chroma-matched bounds for the rat_3strange monomial: lo=1e-4, hi=32,
+  // force degree=13.  See gen_qcd_cfgs.cc note for details.
+  OneFlavourRationalParams strange_rat(1e-4, 100.0, cg_max, cg_tol, 20, 64,
+                                       100, 1e-6, 1e-4);
+  QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
+  QCDActionAdapter StrangeLogDetAdapter(StrangeLogDet);
+  StrangeLogDetAdapter.is_smeared = true;
+  // MP rational: deriv() uses ConjugateGradientMultiShiftMixedPrec.
+  OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF> StrangeSchurPF(
+      StrangeFermOp, StrangeFermOpF, &StrangeRBGridF, strange_rat, 50);
+  QCDActionAdapter StrangeSchurAdapter(StrangeSchurPF);
+  StrangeSchurAdapter.is_smeared = true;
 
   // Nested levels:
   //   L1 (outer, MDsteps):  fermion actions (expensive CG, large coarse dt).
@@ -391,8 +415,15 @@ int main(int argc, char **argv) {
             << "  AUX_MULT=" << aux_mult << std::endl;
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  L1.push_back(&PF);
+  if (hasen_dm > 0.0) {
+    L1.push_back(&PF_heavy);
+    L1.push_back(&PF_ratio);
+  } else {
+    L1.push_back(&PF);
+  }
   L1.push_back(&LogDet);
+  L1.push_back(&StrangeLogDetAdapter);
+  L1.push_back(&StrangeSchurAdapter);
   ActionLevel<TXQCDField, Reps> L2(gauge_mult);
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
@@ -446,9 +477,16 @@ int main(int argc, char **argv) {
   TXQCDCheckpointer ckpt(CPp);
 
   std::vector<TxqcdDiag::ActionRef> diag_actions;
-  diag_actions.push_back({"PseudoFermion", &PF});
+  if (hasen_dm > 0.0) {
+    diag_actions.push_back({"PseudoFermionHeavy", &PF_heavy});
+    diag_actions.push_back({"PseudoFermionRatio", &PF_ratio});
+  } else {
+    diag_actions.push_back({"PseudoFermion", &PF});
+  }
   diag_actions.push_back({"LogDet", &LogDet});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
+  diag_actions.push_back({"StrangeLogDet", &StrangeLogDetAdapter});
+  diag_actions.push_back({"StrangeSchurPF", &StrangeSchurAdapter});
   diag_actions.push_back({"Gauge", &GaugeAction});
   TxqcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, diag_actions,
                  Smear, Grid, RBGrid, pRNG);
