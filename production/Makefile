@@ -4,11 +4,21 @@ CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I../build-gpu/Grid
 LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L../build-gpu/Grid
 LIBS     = $(shell $(GRID_CONFIG) --libs)
 
+# Optional QUDA backend.  Set QUDA_PREFIX to enable.
+# (Once configure-driven build lands, GRID_HAVE_QUDA is defined automatically.)
+QUDA_PREFIX ?=
+ifneq ($(QUDA_PREFIX),)
+  CXXFLAGS += -DGRID_HAVE_QUDA -I$(QUDA_PREFIX)/include
+  LDFLAGS  += -L$(QUDA_PREFIX)/lib -Xlinker -rpath -Xlinker $(QUDA_PREFIX)/lib
+  LIBS     := -lquda -lqmp $(LIBS)
+endif
+
 PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
            meas_conn_txqcd meas_conn_qcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
            meas_aux_txqcd compare compute_plaq compute_vev \
-           eigspec_diag eigspec_diag_nf2
+           eigspec_diag eigspec_diag_nf2 \
+           test_quda_init
 
 all: $(PROGRAMS)
 

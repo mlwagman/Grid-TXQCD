@@ -121,6 +121,17 @@ AC_ARG_WITH([openssl],
             [AM_CXXFLAGS="-I$with_openssl/include $AM_CXXFLAGS"]
             [AM_LDFLAGS="-L$with_openssl/lib $AM_LDFLAGS"])
 
+############### QUDA (optional GPU clover-Wilson solver backend)
+AC_ARG_WITH([quda],
+            [AS_HELP_STRING([--with-quda=prefix],
+            [QUDA install prefix (containing include/quda.h and lib/libquda.{so,a}); enables QudaCloverInverter solver classes])],
+            [AM_CXXFLAGS="-DGRID_HAVE_QUDA -I$with_quda/include $AM_CXXFLAGS"]
+            [AM_LDFLAGS="-L$with_quda/lib $AM_LDFLAGS"]
+            [QUDA_LIBS="-lquda"]
+            [AC_DEFINE([GRID_HAVE_QUDA],[1],[Build with QUDA solver backend])],
+            [QUDA_LIBS=""])
+AC_SUBST([QUDA_LIBS])
+
 ############### lapack
 AC_ARG_ENABLE([lapack],
     [AS_HELP_STRING([--enable-lapack=yes|no|prefix],[enable LAPACK])],
