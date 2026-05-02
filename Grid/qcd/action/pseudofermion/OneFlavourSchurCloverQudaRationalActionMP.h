@@ -83,24 +83,6 @@ class OneFlavourSchurCloverQudaRationalActionMP
     // both parities).
     quda_ms_->solve_rb_odd(PhiOdd, MPhi_k);
 
-    // Diagnostic: verify QUDA's MPhi_k actually solves (M_pc^†M_pc + σ_k)·x = PhiOdd
-    // when M_pc is Grid's mass-form Schur operator.  Ratios show convention.
-    {
-      FermionField Y(fcbgrid), Z(fcbgrid), R(fcbgrid);
-      for (int k = 0; k < Npole; ++k) {
-        Mpc.Mpc(MPhi_k[k], Y);
-        Mpc.MpcDag(Y, Z);
-        R = Z + PowerNegHalf.poles[k] * MPhi_k[k] - PhiOdd;
-        RealD r2 = norm2(R);
-        RealD nf_phi = norm2(PhiOdd);
-        std::cout << GridLogMessage << "[QudaRat-verify] shift[" << k
-                  << "]=" << PowerNegHalf.poles[k]
-                  << "  norm2(MPhi_k)=" << norm2(MPhi_k[k])
-                  << "  rel-resid=" << std::sqrt(r2/nf_phi) << std::endl;
-        if (k > 2) break;  // only first few shifts
-      }
-    }
-
     // Rest of the force assembly: identical to base class deriv().
     dSdU = Zero();
     for (int k = 0; k < Npole; k++) {

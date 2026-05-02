@@ -103,17 +103,35 @@ public:
     assert((int)out_odd.size() == N);
     int V_eo = Quda::local_volume(grid_) / 2;
 
+    // 4κ² rescale: convert Grid's mass-form (b_grid, σ_grid) to QUDA's
+    // kappa-form (b_kappa, σ_kappa) for asymmetric matpc:
+    //   M_pc_asym_kappa = 2κ · M_pc_grid    →    M_pc_asym^†M_pc_asym = 4κ² · M_pc_grid^†M_pc_grid
+    // To get x_grid = (M_pc_grid^†M_pc_grid + σ_grid)^-1 · b_grid:
+    //   solve (M_pc_asym^†M_pc_asym + 4κ²·σ_grid) · x = 4κ² · b_grid
     using SiteSpinor = LatticeFermion::scalar_object;
     std::vector<SiteSpinor> scalars;
     unvectorizeToLexOrdArray(scalars, phi_odd);
     std::vector<double> src_eo(24 * V_eo);
     std::memcpy(src_eo.data(), scalars.data(), V_eo * 24 * sizeof(double));
 
+    const double four_kappa_sq = 4.0 * inv_param_.kappa * inv_param_.kappa;
+    for (auto &v : src_eo) v *= four_kappa_sq;
+
+    // Save original (Grid-mass) shifts so we can restore after.
+    std::vector<double> orig_offsets(N);
+    for (int k = 0; k < N; ++k) {
+      orig_offsets[k] = inv_param_.offset[k];
+      inv_param_.offset[k] = orig_offsets[k] * four_kappa_sq;
+    }
+
     std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V_eo, 0.0));
     std::vector<void *> sol_ptrs(N);
     for (int k = 0; k < N; ++k) sol_ptrs[k] = sol_eo[k].data();
 
     invertMultiShiftQuda(sol_ptrs.data(), src_eo.data(), &inv_param_);
+
+    // Restore offsets for next call.
+    for (int k = 0; k < N; ++k) inv_param_.offset[k] = orig_offsets[k];
 
     for (int k = 0; k < N; ++k) {
       out_odd[k].Checkerboard() = Odd;
@@ -139,19 +157,10 @@ public:
     assert((int)out.size() == N);
 
     int V = Quda::local_volume(grid_);
-    int V_eo = V / 2;
 
     // Fused pack: Grid LatticeFermion → QUDA EO buffer in one pass.
     std::vector<double> src_eo(24 * V);
     Quda::fermion_to_eo_buffer(src, src_eo.data());
-
-    // Diagnostic: norms of the EO halves of the buffer.
-    double n_even = 0.0, n_odd = 0.0;
-    for (int i = 0; i < 24 * V_eo; ++i) n_even += src_eo[i] * src_eo[i];
-    for (int i = 24 * V_eo; i < 24 * V; ++i) n_odd += src_eo[i] * src_eo[i];
-    std::cout << GridLogMessage
-              << "[QudaMS] norm2(src grid)=" << norm2(src)
-              << " buf_even=" << n_even << " buf_odd=" << n_odd << std::endl;
 
     std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V, 0.0));
     std::vector<void *> sol_ptrs(N);
@@ -228,7 +237,13 @@ private:
     inv_param_.solve_type      = QUDA_NORMOP_PC_SOLVE;
     inv_param_.matpc_type      = spec_.matpc_type;
     inv_param_.dagger          = QUDA_DAG_NO;
-    inv_param_.mass_normalization   = QUDA_MASS_NORMALIZATION;
+    // For multishift on the asymmetric Schur op: QUDA's MASS_NORMALIZATION
+    // rescales by 16κ⁴ (assumes symmetric matpc).  Asymmetric M_pc_kappa =
+    // 2κ·M_pc_grid_mass, so M_pc_asym^†·M_pc_asym differs from
+    // M_pc_grid^†·M_pc_grid by 4κ², not 16κ⁴.  Use KAPPA_NORMALIZATION so
+    // QUDA leaves source/offsets alone, and pre-multiply by 4κ² in
+    // solve_rb_odd().
+    inv_param_.mass_normalization   = QUDA_KAPPA_NORMALIZATION;
     inv_param_.solver_normalization = QUDA_DEFAULT_NORMALIZATION;
 
     inv_param_.tol      = params_.tol;
