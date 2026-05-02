@@ -84,6 +84,49 @@ public:
     gauge_loaded_ = true;
   }
 
+  // Half-volume entry point for HMC: PhiOdd on the RB grid (odd parity),
+  // outputs on the same RB grid.
+  //
+  // KEY: with solution_type = MATPCDAG_MATPC_SOLUTION, QUDA's host buffer
+  // is *half-volume* (V_eo sites total, no even/odd offset).  The parity
+  // is implied by matpc_type.  So we pack PhiOdd's V_eo scalar objects
+  // directly into the first V_eo·24 doubles of the buffer (offset 0).
+  //
+  // Grid's RB cb-site order matches QUDA's cb_site = full_lex >> 1 within
+  // a parity, so unvectorize → memcpy is a direct, contiguous copy.
+  void solve_rb_odd(const LatticeFermion &phi_odd,
+                    std::vector<LatticeFermion> &out_odd) {
+    if (!gauge_loaded_) {
+      assert(false && "QudaCloverMultiShiftInverter::solve_rb_odd: SetGauge() not called");
+    }
+    int N = (int)spec_.shifts.size();
+    assert((int)out_odd.size() == N);
+    int V_eo = Quda::local_volume(grid_) / 2;
+
+    using SiteSpinor = LatticeFermion::scalar_object;
+    std::vector<SiteSpinor> scalars;
+    unvectorizeToLexOrdArray(scalars, phi_odd);
+    std::vector<double> src_eo(24 * V_eo);
+    std::memcpy(src_eo.data(), scalars.data(), V_eo * 24 * sizeof(double));
+
+    std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V_eo, 0.0));
+    std::vector<void *> sol_ptrs(N);
+    for (int k = 0; k < N; ++k) sol_ptrs[k] = sol_eo[k].data();
+
+    invertMultiShiftQuda(sol_ptrs.data(), src_eo.data(), &inv_param_);
+
+    for (int k = 0; k < N; ++k) {
+      out_odd[k].Checkerboard() = Odd;
+      std::vector<SiteSpinor> sol_scalars(V_eo);
+      std::memcpy(sol_scalars.data(), sol_eo[k].data(), V_eo * 24 * sizeof(double));
+      vectorizeFromLexOrdArray(sol_scalars, out_odd[k]);
+    }
+    last_iter_ = inv_param_.iter;
+    last_secs_ = inv_param_.secs;
+    last_res_per_shift_.assign(N, 0.0);
+    for (int k = 0; k < N; ++k) last_res_per_shift_[k] = inv_param_.true_res_offset[k];
+  }
+
   // OperatorMultiFunction interface: solve (A + shift[k]) x_k = src for all k.
   void operator()(LinearOperatorBase<LatticeFermion> &Linop,
                   const LatticeFermion &src,
@@ -96,10 +139,19 @@ public:
     assert((int)out.size() == N);
 
     int V = Quda::local_volume(grid_);
+    int V_eo = V / 2;
 
     // Fused pack: Grid LatticeFermion → QUDA EO buffer in one pass.
     std::vector<double> src_eo(24 * V);
     Quda::fermion_to_eo_buffer(src, src_eo.data());
+
+    // Diagnostic: norms of the EO halves of the buffer.
+    double n_even = 0.0, n_odd = 0.0;
+    for (int i = 0; i < 24 * V_eo; ++i) n_even += src_eo[i] * src_eo[i];
+    for (int i = 24 * V_eo; i < 24 * V; ++i) n_odd += src_eo[i] * src_eo[i];
+    std::cout << GridLogMessage
+              << "[QudaMS] norm2(src grid)=" << norm2(src)
+              << " buf_even=" << n_even << " buf_odd=" << n_odd << std::endl;
 
     std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V, 0.0));
     std::vector<void *> sol_ptrs(N);

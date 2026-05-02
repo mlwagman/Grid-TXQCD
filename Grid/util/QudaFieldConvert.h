@@ -230,6 +230,38 @@ inline void lex_buffers_to_gauge(double *const buf_per_dir[4],
 }
 
 // ----------------------------------------------------------------------------
+// RB-half ↔ EO-buffer-half (for HMC: PhiOdd lives on Grid's odd-parity RB
+// grid, half-volume).  Within a parity, Grid's RB cb-site order matches
+// QUDA's cb_site = full_lex >> 1, so unvectorize → memcpy is a direct copy
+// into the parity-half slab of the full-volume QUDA EO buffer.
+//
+// Caller must zero the *other* parity half of buf_full before calling this
+// (or be sure QUDA doesn't read it).
+// ----------------------------------------------------------------------------
+
+template <class FermionField>
+inline void fermion_rb_to_eo_buffer_half(const FermionField &phi_rb,
+                                         int parity, double *buf_full) {
+  using SiteSpinor = typename FermionField::scalar_object;
+  int V_eo = local_volume(phi_rb.Grid());  // RB grid local vol = V/2
+  std::vector<SiteSpinor> scalars;
+  unvectorizeToLexOrdArray(scalars, phi_rb);
+  std::memcpy(&buf_full[parity * V_eo * 24], scalars.data(),
+              V_eo * 24 * sizeof(double));
+}
+
+template <class FermionField>
+inline void eo_buffer_half_to_fermion_rb(const double *buf_full, int parity,
+                                         FermionField &phi_rb) {
+  using SiteSpinor = typename FermionField::scalar_object;
+  int V_eo = local_volume(phi_rb.Grid());
+  std::vector<SiteSpinor> scalars(V_eo);
+  std::memcpy(scalars.data(), &buf_full[parity * V_eo * 24],
+              V_eo * 24 * sizeof(double));
+  vectorizeFromLexOrdArray(scalars, phi_rb);
+}
+
+// ----------------------------------------------------------------------------
 // Lex ↔ even-odd site permutation.
 //
 // QUDA's host buffers (DIRAC_ORDER spinor, QDP_GAUGE_ORDER gauge) expect

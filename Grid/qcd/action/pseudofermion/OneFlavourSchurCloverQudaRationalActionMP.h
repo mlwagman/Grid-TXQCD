@@ -38,7 +38,11 @@ class OneFlavourSchurCloverQudaRationalActionMP
     // matpc_type=ODD_ODD to match Grid's SchurDifferentiableOperator which
     // asserts U.Checkerboard()==Odd in its MpcDeriv.
     QudaCloverMultiShiftSpec spec;
-    spec.matpc_type = QUDA_MATPC_ODD_ODD;
+    // ASYMMETRIC matches Grid's SchurDiagMooee form M_pc = M_oo − M_oe·M_ee^-1·M_eo.
+    // The plain ODD_ODD ("symmetric" in QUDA) is M_oo^-1·M_pc_grid which gives a
+    // different M_pc^†M_pc spectrum and produces forces that don't FD-match
+    // Grid's deriv (verified empirically: ~46× ratio with symmetric vs ~1.0 with asym).
+    spec.matpc_type = QUDA_MATPC_ODD_ODD_ASYMMETRIC;
     auto &poles = this->PowerNegHalf.poles;
     spec.shifts.resize(poles.size());
     spec.tols.assign(poles.size(), p.tolerance);
@@ -60,7 +64,6 @@ class OneFlavourSchurCloverQudaRationalActionMP
     const int Npole = PowerNegHalf.poles.size();
 
     GridBase *fcbgrid = FermOp.FermionRedBlackGrid();
-    GridBase *fgrid   = FermOp.FermionGrid();
     GridBase *ggrid   = FermOp.GaugeGrid();
 
     std::vector<FermionField> MPhi_k(Npole, fcbgrid);
@@ -72,21 +75,30 @@ class OneFlavourSchurCloverQudaRationalActionMP
 
     SchurDifferentiableOperator<ImplD> Mpc(FermOp);
 
-    // QUDA multishift on the odd-parity preconditioned operator.
-    // Promote PhiOdd (RB odd-parity) to a full-volume field, zero the
-    // even half; pack into QUDA's EO buffer; solve; project results
-    // back to odd parity.
-    FermionField phi_full(fgrid);
-    phi_full = Zero();
-    setCheckerboard(phi_full, PhiOdd);
+    // QUDA multishift on the odd-parity Schur operator.  Direct half-volume
+    // pack: Grid's RB cb-site order matches QUDA's cb_site = full_lex >> 1
+    // within a parity, so unvectorize → memcpy into the odd-half slab of
+    // QUDA's EO buffer.  Avoids the full-volume setCheckerboard
+    // intermediate (which fails on SIMD layouts where outer blocks span
+    // both parities).
+    quda_ms_->solve_rb_odd(PhiOdd, MPhi_k);
 
-    std::vector<FermionField> MPhi_full(Npole, fgrid);
-    for (auto &f : MPhi_full) f = Zero();
-    (*quda_ms_)(Mpc, phi_full, MPhi_full);
-
-    for (int k = 0; k < Npole; ++k) {
-      MPhi_k[k].Checkerboard() = Odd;
-      pickCheckerboard(Odd, MPhi_k[k], MPhi_full[k]);
+    // Diagnostic: verify QUDA's MPhi_k actually solves (M_pc^†M_pc + σ_k)·x = PhiOdd
+    // when M_pc is Grid's mass-form Schur operator.  Ratios show convention.
+    {
+      FermionField Y(fcbgrid), Z(fcbgrid), R(fcbgrid);
+      for (int k = 0; k < Npole; ++k) {
+        Mpc.Mpc(MPhi_k[k], Y);
+        Mpc.MpcDag(Y, Z);
+        R = Z + PowerNegHalf.poles[k] * MPhi_k[k] - PhiOdd;
+        RealD r2 = norm2(R);
+        RealD nf_phi = norm2(PhiOdd);
+        std::cout << GridLogMessage << "[QudaRat-verify] shift[" << k
+                  << "]=" << PowerNegHalf.poles[k]
+                  << "  norm2(MPhi_k)=" << norm2(MPhi_k[k])
+                  << "  rel-resid=" << std::sqrt(r2/nf_phi) << std::endl;
+        if (k > 2) break;  // only first few shifts
+      }
     }
 
     // Rest of the force assembly: identical to base class deriv().
