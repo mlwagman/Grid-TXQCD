@@ -157,7 +157,13 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // QUDA_GENERAL_LINKS)`) for this call.
     QudaInvertParam &inv_param  = quda_ms_->InvertParam();
     int saved_use_resident = inv_param.use_resident_solution;
-    inv_param.use_resident_solution = 1;  // consume from GPU
+    int saved_compute_clover = inv_param.compute_clover;
+    int saved_compute_clover_inv = inv_param.compute_clover_inverse;
+    inv_param.use_resident_solution = 1;
+    // Clover is already loaded (resident) from the multishift's loadCloverQuda.
+    // computeCloverForceQuda doesn't need to (re)compute it.  Match chroma:
+    inv_param.compute_clover = 0;
+    inv_param.compute_clover_inverse = 0;
 
     QudaGaugeParam force_gauge_param = quda_ms_->GaugeParam();
     force_gauge_param.type        = QUDA_GENERAL_LINKS;
@@ -211,6 +217,8 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                            &gauge_param,
                            &inv_param);
     inv_param.use_resident_solution = saved_use_resident;
+    inv_param.compute_clover = saved_compute_clover;
+    inv_param.compute_clover_inverse = saved_compute_clover_inv;
     // Debug: dump first few values of mom_buf to confirm QUDA wrote to it.
     {
       double mom_norm = 0.0;
