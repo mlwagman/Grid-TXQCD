@@ -261,10 +261,13 @@ struct SpinTable {
 
 class TXQCDWilsonPseudoFermionAction : public Action<TXQCDField> {
  public:
+  // mu rescales Delta in the inner TXQCDWilsonOp and the aux-field forces.
+  // Default mu=1 reproduces the original action.
   TXQCDWilsonPseudoFermionAction(GridCartesian &grid,
                                  GridRedBlackCartesian &rbgrid, RealD mass,
-                                 RealD cg_tol = 1e-12, int cg_maxiter = 10000)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass),
+                                 RealD cg_tol = 1e-12, int cg_maxiter = 10000,
+                                 RealD mu = 1.0)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), mu_(mu),
         cg_tol_(cg_tol), cg_maxiter_(cg_maxiter), Phi(&grid) {}
 
   std::string action_name() override {
@@ -306,15 +309,16 @@ class TXQCDWilsonPseudoFermionAction : public Action<TXQCDField> {
     Mop.M(X, Y);
 
     // ----- aux forces -----
-    // sigma, pi via flavor bilinears.
+    // sigma, pi via flavor bilinears.  Chain-rule mu factor: dM/daux =
+    // mu * dDelta/daux, so each aux force scales by mu_.
     auto Gsig = FlavorBilinear(Y, X);
-    dSdU.sigma = HermitianFlavorForce(Gsig);
+    dSdU.sigma = mu_ * HermitianFlavorForce(Gsig);
 
     Gamma g5(Gamma::Algebra::Gamma5);
     TXQCDFermionNf g5X(&grid_);
     for (int a = 0; a < TxqcdNf; ++a) g5X.f[a] = g5 * X.f[a];
     auto Gpi = FlavorBilinear(Y, g5X);
-    dSdU.pi = HermitianFlavorForce(Gpi);
+    dSdU.pi = mu_ * HermitianFlavorForce(Gpi);
 
     // s, p via color bilinears summed over spin/flavor with (1/sqrt 2) prefactor.
     const ComplexD inv_sqrt2(1.0 / std::sqrt(2.0), 0.0);
@@ -323,10 +327,10 @@ class TXQCDWilsonPseudoFermionAction : public Action<TXQCDField> {
     auto rescale = [&](LatticeSFieldC &G) { G = inv_sqrt2 * G; };
     auto Gs = ColorBilinearSpinOp(Y, X, Id);
     rescale(Gs);
-    dSdU.s = HermitianColorForce(Gs);
+    dSdU.s = mu_ * HermitianColorForce(Gs);
     auto Gp = ColorBilinearSpinOp(Y, X, G5);
     rescale(Gp);
-    dSdU.p = HermitianColorForce(Gp);
+    dSdU.p = mu_ * HermitianColorForce(Gp);
 
     // t_{mu,nu}: per (mu<nu) piece is i*sigma_{mu,nu} on spin. Antisym in (mu,nu).
     dSdU.t = Zero();
@@ -335,14 +339,15 @@ class TXQCDWilsonPseudoFermionAction : public Action<TXQCDField> {
         SpinTable iSig{ISigmaMatrix(mu, nu)};
         auto Gt = ColorBilinearSpinOp(Y, X, iSig);
         auto Ft = HermitianColorForce(Gt);
-        // Antisymmetrize: F_t[mu][nu] = +Ft, F_t[nu][mu] = -Ft.
+        // Antisymmetrize: F_t[mu][nu] = +mu_*Ft, F_t[nu][mu] = -mu_*Ft.
         autoView(dst, dSdU.t, CpuWrite);
         autoView(src, Ft, CpuRead);
+        const RealD mu_local = mu_;
         thread_for(ss, grid_.oSites(), {
           for (int i = 0; i < Nc; ++i) {
             for (int j = 0; j < Nc; ++j) {
-              dst[ss]()(mu, nu)(i, j) =  src[ss]()()(i, j);
-              dst[ss]()(nu, mu)(i, j) = -src[ss]()()(i, j);
+              dst[ss]()(mu, nu)(i, j) =  mu_local * src[ss]()()(i, j);
+              dst[ss]()(nu, mu)(i, j) = -mu_local * src[ss]()()(i, j);
             }
           }
         });
@@ -371,7 +376,7 @@ class TXQCDWilsonPseudoFermionAction : public Action<TXQCDField> {
   TXQCDWilsonOp MakeOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
     return TXQCDWilsonOp(Unc.U, grid_, rbgrid_, mass_, Unc.sigma, Unc.pi,
-                         Unc.s, Unc.p, Unc.t);
+                         Unc.s, Unc.p, Unc.t, mu_);
   }
 
   // Hand-rolled CG for MdagM x = b on TXQCDFermionNf. Stock Grid CG would
@@ -411,6 +416,7 @@ class TXQCDWilsonPseudoFermionAction : public Action<TXQCDField> {
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
+  RealD mu_;
   RealD cg_tol_;
   int cg_maxiter_;
   TXQCDFermionNf Phi;

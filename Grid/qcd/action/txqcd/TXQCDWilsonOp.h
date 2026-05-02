@@ -32,16 +32,17 @@ class TXQCDWilsonOp {
                 GridRedBlackCartesian &rbgrid, RealD mass,
                 const LatticeSigmaField &sigma, const LatticePiField &pi,
                 const LatticeSFieldC &s, const LatticePFieldC &p,
-                const LatticeTField &t)
+                const LatticeTField &t, RealD mu = 1.0)
       : Dw(Umu, grid, rbgrid, mass),
-        sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t) {}
+        sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t), mu_(mu) {}
 
-  // Apply M = D_W + Delta. Per flavor: out.f[a] = D_W in.f[a]; then add Delta.
+  // Apply M = D_W + mu * Delta. Per flavor: out.f[a] = D_W in.f[a]; then add
+  // mu * Delta.  Default mu=1 reproduces the original operator.
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     for (int a = 0; a < TxqcdNf; ++a) Dw.M(in.f[a], out.f[a]);
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
-    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + mu_ * d.f[a];
   }
 
   // Mdag via gamma5 M gamma5 (cheaper than wiring a separate Wilson.Mdag,
@@ -55,6 +56,7 @@ class TXQCDWilsonOp {
   }
 
   WilsonOp &Wilson() { return Dw; }
+  RealD Mu() const { return mu_; }
 
  private:
   WilsonOp Dw;
@@ -63,6 +65,7 @@ class TXQCDWilsonOp {
   const LatticeSFieldC    &s_;
   const LatticePFieldC    &p_;
   const LatticeTField     &t_;
+  RealD mu_;
 };
 
 NAMESPACE_END(Grid);

@@ -80,12 +80,15 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
  public:
   typedef OneFlavourRationalParams Params;
 
+  // mu rescales Delta in the inner TXQCDWilsonCloverFermionEO operators and
+  // the aux-field forces.  Default mu=1 reproduces the original action.
   TXQCDWilsonCloverHasenbuschAction(GridCartesian &grid,
                                     GridRedBlackCartesian &rbgrid,
                                     RealD mass_light, RealD mass_heavy,
-                                    Params &p, RealD csw = 0.0)
+                                    Params &p, RealD csw = 0.0,
+                                    RealD mu = 1.0)
       : grid_(grid), rbgrid_(rbgrid),
-        mass_l_(mass_light), mass_h_(mass_heavy), csw_(csw),
+        mass_l_(mass_light), mass_h_(mass_heavy), csw_(csw), mu_(mu),
         param(p), Phi(&rbgrid) {
     AlgRemez remez(param.lo, param.hi, param.precision);
     std::cout << GridLogMessage
@@ -246,8 +249,8 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
       EOp_l.MeooeDag(Y, tmp_e);
       EOp_l.MooeeInvDag(tmp_e, Z_e);   // Z_e = Mee_l^{-1†} Moe_l† Y
 
-      AccumulateAuxForceDerivH(dSdU, ak, Y,   W,   g5, inv_sqrt2, Id, G5);
-      AccumulateAuxForceDerivH(dSdU, ak, Z_e, W_e, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForceDerivH(dSdU, ak * mu_, Y,   W,   g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForceDerivH(dSdU, ak * mu_, Z_e, W_e, g5, inv_sqrt2, Id, G5);
       AddSymmetricGaugeForce(dSdU, ak, EOp_l, Y, W, W_e, Z_e);
     }
 
@@ -290,13 +293,13 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
 
       // Aux force (odd): bilinear(Y_X, Z) from (2a)+(2b);
       //                  bilinear(Y_Z, X) from (3a)+(3b).
-      AccumulateAuxForceDerivH(dSdU, ak, Y_X, Z, g5, inv_sqrt2, Id, G5);
-      AccumulateAuxForceDerivH(dSdU, ak, Y_Z, X, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForceDerivH(dSdU, ak * mu_, Y_X, Z, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForceDerivH(dSdU, ak * mu_, Y_Z, X, g5, inv_sqrt2, Id, G5);
 
       // Aux force (even): bilinear(Ze_X, W_Z) from (2a)+(2b);
       //                   bilinear(Ze_Z, W_X) from (3a)+(3b).
-      AccumulateAuxForceDerivH(dSdU, ak, Ze_X_e, W_Z_e, g5, inv_sqrt2, Id, G5);
-      AccumulateAuxForceDerivH(dSdU, ak, Ze_Z_e, W_X_e, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForceDerivH(dSdU, ak * mu_, Ze_X_e, W_Z_e, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForceDerivH(dSdU, ak * mu_, Ze_Z_e, W_X_e, g5, inv_sqrt2, Id, G5);
 
       // Gauge force: 4 MpcDeriv-style chain-rule calls per pole.
       AddAsymmetricGaugeForce(dSdU, ak, EOp_h,
@@ -311,6 +314,7 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_l_, mass_h_, csw_;
+  RealD mu_;
   Params &param;
   TXQCDFermionNf Phi;
   MultiShiftFunction PowerHalf;       // x^{1/2}
@@ -321,9 +325,9 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
 
   TXQCDWilsonCloverFermionEO MakeEOp(const TXQCDField &U, RealD mass) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
-    return TXQCDWilsonCloverFermionEO(Unc.U, grid_, rbgrid_, mass,
-                                      Unc.sigma, Unc.pi, Unc.s, Unc.p,
-                                      Unc.t, csw_);
+    return TXQCDWilsonCloverFermionEO(
+        Unc.U, grid_, rbgrid_, mass, Unc.sigma, Unc.pi, Unc.s, Unc.p, Unc.t,
+        csw_, TXQCDWilsonCloverFermionEO::DefaultImplParams(), mu_);
   }
 
   // Apply a rational approximation  r(x) = c0 + sum_k ck / (x + pk)  to an

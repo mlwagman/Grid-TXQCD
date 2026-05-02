@@ -39,20 +39,22 @@ class TXQCDWilsonCloverOp {
 
   // Per-flavor mass constructor.  Inner Dw is built with mass=0; M() adds
   // mass_[a]*in.f[a] for each flavor (so non-degenerate Nf>2 setups work).
+  // mu rescales the Delta term: M_TXQCD = M_QCD + mu * Delta.  Default 1.
   TXQCDWilsonCloverOp(GaugeField &Umu, GridCartesian &grid,
                 GridRedBlackCartesian &rbgrid,
                 const std::array<RealD, TxqcdNf> &mass,
                 const LatticeSigmaField &sigma, const LatticePiField &pi,
                 const LatticeSFieldC &s, const LatticePFieldC &p,
                 const LatticeTField &t, RealD csw = 0.0,
-                typename Impl::ImplParams impl_p = DefaultImplParams())
+                typename Impl::ImplParams impl_p = DefaultImplParams(),
+                RealD mu = 1.0)
       : Dw(Umu, grid, rbgrid, 0.0, impl_p), mass_(mass), csw_(csw), Umu_(Umu),
-        sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t) {
+        sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t), mu_(mu) {
     if (csw_ != 0.0) {
-      for (int mu = 0; mu < Nd; ++mu)
-        for (int nu = mu + 1; nu < Nd; ++nu) {
+      for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
+        for (int nu = mu_lor + 1; nu < Nd; ++nu) {
           FS_.emplace_back(&grid);
-          WilsonLoops<Impl>::FieldStrength(FS_.back(), Umu, mu, nu);
+          WilsonLoops<Impl>::FieldStrength(FS_.back(), Umu, mu_lor, nu);
         }
     }
   }
@@ -63,9 +65,10 @@ class TXQCDWilsonCloverOp {
                 const LatticeSigmaField &sigma, const LatticePiField &pi,
                 const LatticeSFieldC &s, const LatticePFieldC &p,
                 const LatticeTField &t, RealD csw = 0.0,
-                typename Impl::ImplParams impl_p = DefaultImplParams())
+                typename Impl::ImplParams impl_p = DefaultImplParams(),
+                RealD mu = 1.0)
       : TXQCDWilsonCloverOp(Umu, grid, rbgrid, MakeMass(mass), sigma, pi, s, p,
-                            t, csw, impl_p) {}
+                            t, csw, impl_p, mu) {}
 
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     // Dw has mass=0, so Dw.M gives 4*I + Wilson_hop per flavor; add mass_[a].
@@ -75,7 +78,7 @@ class TXQCDWilsonCloverOp {
     }
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
-    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + mu_ * d.f[a];
     if (csw_ != 0.0) {
       TXQCDFermionNf cl(in.Grid());
       ApplyClover(csw_, FS_, in, cl);
@@ -95,6 +98,7 @@ class TXQCDWilsonCloverOp {
 
   WilsonOp &Wilson() { return Dw; }
   const std::array<RealD, TxqcdNf> &Mass() const { return mass_; }
+  RealD Mu() const { return mu_; }
 
  private:
   static std::array<RealD, TxqcdNf> MakeMass(RealD m) {
@@ -113,6 +117,7 @@ class TXQCDWilsonCloverOp {
   const LatticePFieldC    &p_;
   const LatticeTField     &t_;
   std::vector<LatticeColourMatrix> FS_;
+  RealD mu_;
 };
 
 NAMESPACE_END(Grid);
