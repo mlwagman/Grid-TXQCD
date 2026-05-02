@@ -150,24 +150,8 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
       x_ptrs[k] = x_bufs[k].data();
     }
     // X=0 diagnostic: if QUDA_FORCE_DBG_XZERO=1, force all X buffers to zero.
-    // Result tells us whether the 1e+274 garbage in mom_buf is X-dependent
-    // (real numerical pathology) or X-independent (uninitialized state).
     if (std::getenv("QUDA_FORCE_DBG_XZERO")) {
       for (int k = 0; k < Npole; ++k) std::fill(x_bufs[k].begin(), x_bufs[k].end(), 0.0);
-      std::cout << GridLogMessage
-                << "[QudaForce] DBG: zeroed X buffers (QUDA_FORCE_DBG_XZERO=1)" << std::endl;
-    }
-    // Always print X norm to verify host buffers are populated.
-    {
-      double x_norm0 = 0.0;
-      for (auto v : x_bufs[0]) x_norm0 += v*v;
-      std::cout << GridLogMessage
-                << "[QudaForce] X[0] host buffer norm2=" << x_norm0
-                << " V_eo=" << V_eo << " size=" << x_bufs[0].size()
-                << " first6=" << x_bufs[0][0] << " " << x_bufs[0][1] << " "
-                << x_bufs[0][2] << " " << x_bufs[0][3] << " " << x_bufs[0][4]
-                << " " << x_bufs[0][5]
-                << std::endl;
     }
 
     // Force / momentum buffer: QUDA writes ASQTAD_MOM_LINKS, reconstruct=10
@@ -186,18 +170,46 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // uses a fresh QudaGaugeParam (`newMILCGaugeParam(...,
     // QUDA_GENERAL_LINKS)`) for this call.
     QudaInvertParam &inv_param  = quda_ms_->InvertParam();
-    int saved_use_resident = inv_param.use_resident_solution;
-    int saved_compute_clover = inv_param.compute_clover;
-    int saved_compute_clover_inv = inv_param.compute_clover_inverse;
-    // Use host X transport — we have solid host MPhi_k from solve_rb_even
-    // (make_resident=0 ensures host download is performed).  use_resident
-    // path does not work in our setup (solutionResident populated by the
-    // CG appears to be in the wrong layout/parity for computeCloverForceQuda).
+    int saved_use_resident             = inv_param.use_resident_solution;
+    QudaDagType saved_dagger           = inv_param.dagger;
+    QudaTwistFlavorType saved_twist_fl = inv_param.twist_flavor;
+    double saved_mu                    = inv_param.mu;
+    double saved_epsilon               = inv_param.epsilon;
+    QudaPreserveSource saved_preserve  = inv_param.preserve_source;
     inv_param.use_resident_solution = 0;
-    // Clover is already loaded (resident) from the multishift's loadCloverQuda.
-    // computeCloverForceQuda doesn't need to (re)compute it.  Match chroma:
-    inv_param.compute_clover = 0;
-    inv_param.compute_clover_inverse = 0;
+    inv_param.dagger                = QUDA_DAG_NO;
+    inv_param.twist_flavor          = QUDA_TWIST_NO;
+    inv_param.mu                    = 0.0;
+    inv_param.epsilon               = 0.0;
+    inv_param.preserve_source       = QUDA_PRESERVE_SOURCE_NO;
+    inv_param.tm_rho                = 0.0;
+    inv_param.clover_rho            = 0.0;
+    inv_param.distance_pc_alpha0    = 0.0;
+    inv_param.distance_pc_t0        = -1;
+    inv_param.Ls                    = 1;
+    QudaPrecision saved_sl  = inv_param.cuda_prec_sloppy;
+    QudaPrecision saved_rs  = inv_param.cuda_prec_refinement_sloppy;
+    QudaPrecision saved_pc  = inv_param.cuda_prec_precondition;
+    inv_param.cuda_prec_sloppy            = QUDA_DOUBLE_PRECISION;
+    inv_param.cuda_prec_refinement_sloppy = QUDA_DOUBLE_PRECISION;
+    inv_param.cuda_prec_precondition      = QUDA_DOUBLE_PRECISION;
+    inv_param.clover_cuda_prec_sloppy            = QUDA_DOUBLE_PRECISION;
+    inv_param.clover_cuda_prec_refinement_sloppy = QUDA_DOUBLE_PRECISION;
+    inv_param.clover_cuda_prec_precondition      = QUDA_DOUBLE_PRECISION;
+    if (std::getenv("QUDA_FORCE_DBG_VERBOSE")) {
+      inv_param.verbosity = QUDA_VERBOSE;
+    }
+    std::cout << GridLogMessage
+              << "[QudaForce] inv_param state: kappa=" << inv_param.kappa
+              << " csw=" << inv_param.clover_csw
+              << " clover_coeff=" << inv_param.clover_coeff
+              << " mass=" << inv_param.mass
+              << " mu=" << inv_param.mu
+              << " epsilon=" << inv_param.epsilon
+              << " dslash_type=" << (int)inv_param.dslash_type
+              << " matpc=" << (int)inv_param.matpc_type
+              << " gamma_basis=" << (int)inv_param.gamma_basis
+              << std::endl;
 
     QudaGaugeParam force_gauge_param = quda_ms_->GaugeParam();
     force_gauge_param.type        = QUDA_GENERAL_LINKS;
@@ -238,22 +250,10 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // is unused in the symmetric clover case).  Pass a dummy.
     std::vector<void *> p_ptrs(Npole, nullptr);
 
-    // QUDA upstream (commit ~? in /home/agrebe/src/quda) has a bug in
-    // computeCloverForceQuda for nvector > 1: the host-X wrap step does
-    //   for(i=0..nvector-1) { qParam.x[0] /= 2; ... }
-    // — qParam.x[0] is mutated cumulatively, so iteration 1 wraps with
-    // x[0]/4, iteration 2 with x[0]/8, etc.  Result: only iteration 0
-    // reads valid X (and even that with reduced volume after the pre-loop
-    // `x[0] /= 2` is reapplied), all later iterations wrap garbage memory.
-    // (Chroma's QUDA fork has a different ColorSpinorParam ctor pattern
-    //  per loop iteration, no mutation, so chroma is unaffected.)
-    //
-    // Workaround: call computeCloverForceQuda Npole times with nvector=1.
-    // First call has multiplicity=1.0 (contributes the σ_μν·F_μν trace
-    // once); later calls multiplicity=0.0 (skip duplicate trace).
-    // First call has overwrite_mom=1; later calls overwrite_mom=0 to
-    // accumulate.
-    // QUDA_FORCE_DBG_NOTRACE: zero multiplicity → no σ trace, X-only force.
+    // Per-pole loop with nvector=1 — workaround for upstream QUDA bug
+    // (qParam.x[0] /= 2 inside the for-loop in computeCloverForceQuda).
+    // First call has multiplicity=1 (σ trace once); later calls multiplicity=0.
+    // First call has overwrite_mom=1; later calls overwrite_mom=0 to accumulate.
     bool dbg_notrace = std::getenv("QUDA_FORCE_DBG_NOTRACE") != nullptr;
     for (int k = 0; k < Npole; ++k) {
       gauge_param.overwrite_mom = (k == 0) ? 1 : 0;
@@ -275,14 +275,23 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                              &inv_param);
     }
     inv_param.use_resident_solution = saved_use_resident;
-    inv_param.compute_clover = saved_compute_clover;
-    inv_param.compute_clover_inverse = saved_compute_clover_inv;
-    // Debug: dump first few values of mom_buf to confirm QUDA wrote to it.
+    inv_param.dagger                = saved_dagger;
+    inv_param.twist_flavor          = saved_twist_fl;
+    inv_param.mu                    = saved_mu;
+    inv_param.epsilon               = saved_epsilon;
+    inv_param.preserve_source       = saved_preserve;
+    inv_param.cuda_prec_sloppy            = saved_sl;
+    inv_param.cuda_prec_refinement_sloppy = saved_rs;
+    inv_param.cuda_prec_precondition      = saved_pc;
     {
       double mom_norm = 0.0;
-      for (size_t i = 0; i < mom_buf.size(); ++i) mom_norm += mom_buf[i] * mom_buf[i];
+      int n_nan = 0;
+      for (size_t i = 0; i < mom_buf.size(); ++i) {
+        if (std::isnan(mom_buf[i])) ++n_nan;
+        else mom_norm += mom_buf[i] * mom_buf[i];
+      }
       std::cout << GridLogMessage << "[QudaForce] mom_buf size=" << mom_buf.size()
-                << " norm2=" << mom_norm
+                << " norm2(non-NaN)=" << mom_norm << " n_nan=" << n_nan
                 << " first10=";
       for (int i = 0; i < 10; ++i) std::cout << mom_buf[i] << " ";
       std::cout << std::endl;

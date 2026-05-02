@@ -6,11 +6,22 @@ LIBS     = $(shell $(GRID_CONFIG) --libs)
 
 # Optional QUDA backend.  Set QUDA_PREFIX to enable.
 # (Once configure-driven build lands, GRID_HAVE_QUDA is defined automatically.)
+# QMP_PREFIX defaults to QUDA_PREFIX (which is true for /home/agrebe/install/quda-5),
+# but chroma's install puts QMP in a separate directory so override as needed.
+# QUDA_STATIC=1 forces -l:libquda.a + -l:libqmp.a (chroma's archives are static).
 QUDA_PREFIX ?=
+QMP_PREFIX ?= $(QUDA_PREFIX)
+QUDA_STATIC ?=
 ifneq ($(QUDA_PREFIX),)
-  CXXFLAGS += -DGRID_HAVE_QUDA -I$(QUDA_PREFIX)/include
-  LDFLAGS  += -L$(QUDA_PREFIX)/lib -Xlinker -rpath -Xlinker $(QUDA_PREFIX)/lib
-  LIBS     := -lquda -lqmp $(LIBS)
+  CXXFLAGS += -DGRID_HAVE_QUDA -I$(QUDA_PREFIX)/include -I$(QMP_PREFIX)/include
+  LDFLAGS  += -L$(QUDA_PREFIX)/lib -L$(QMP_PREFIX)/lib -Xlinker -rpath -Xlinker $(QUDA_PREFIX)/lib -Xlinker -rpath -Xlinker $(QMP_PREFIX)/lib
+  ifneq ($(QUDA_STATIC),)
+    # nvcc treats positional .a paths as input files; use -l:libname syntax
+    # so the linker picks up the static archives from -L paths.
+    LIBS   := -l:libquda.a -l:libqmp.a $(LIBS)
+  else
+    LIBS   := -lquda -lqmp $(LIBS)
+  endif
 endif
 
 PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
