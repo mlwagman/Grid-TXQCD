@@ -43,16 +43,20 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
     auto sites = UnvectorizeEvenAux(U);
     uint64_t nsites = std::get<0>(sites).size();
 
-    Eigen::Matrix<std::complex<double>, kDim, kDim> M;
-    RealD logdet = 0.0;
-    for (uint64_t x = 0; x < nsites; ++x) {
+    // Per-site logdet contributions are independent — parallelize across
+    // CPU cores.  Each thread accumulates locally, then we reduce at the end.
+    std::vector<RealD> logdet_per_site(nsites, 0.0);
+    thread_for(x, nsites, {
+      Eigen::Matrix<std::complex<double>, kDim, kDim> M;
       BuildSiteMatrix(std::get<0>(sites)[x], std::get<1>(sites)[x],
                       std::get<2>(sites)[x], std::get<3>(sites)[x],
                       std::get<4>(sites)[x], M);
       auto lu = M.partialPivLu();
       auto d = lu.determinant();
-      logdet += std::log(std::abs(d));
-    }
+      logdet_per_site[x] = std::log(std::abs(d));
+    });
+    RealD logdet = 0.0;
+    for (uint64_t x = 0; x < nsites; ++x) logdet += logdet_per_site[x];
     grid_.GlobalSum(logdet);
     RealD action = -logdet;
     std::cout << GridLogMessage << "[" << action_name() << "] S = " << action
@@ -64,7 +68,6 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
     auto sites = UnvectorizeEvenAux(U);
     uint64_t nsites = std::get<0>(sites).size();
 
-    Eigen::Matrix<std::complex<double>, kDim, kDim> M, Inv;
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
 
     LatticeSigmaField sigma_e(&rbgrid_);
@@ -84,7 +87,8 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
     std::vector<PSobj> p_force(nsites);
     std::vector<TSobj> t_force(nsites);
 
-    for (uint64_t x = 0; x < nsites; ++x) {
+    thread_for(x, nsites, {
+      Eigen::Matrix<std::complex<double>, kDim, kDim> M, Inv;
       BuildSiteMatrix(std::get<0>(sites)[x], std::get<1>(sites)[x],
                       std::get<2>(sites)[x], std::get<3>(sites)[x],
                       std::get<4>(sites)[x], M);
@@ -186,7 +190,7 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
           }
         }
       }
-    }
+    });
 
     // Vectorize forces back to RB even fields and promote to full grid.
     LatticeSigmaField F_sig_e(&rbgrid_);

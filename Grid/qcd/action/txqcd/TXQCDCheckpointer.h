@@ -158,9 +158,10 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
     uint64_t nsites = sig_s.size();
     std::vector<double> buf(nsites * kSiteDoubles);
 
-    for (uint64_t x = 0; x < nsites; ++x)
+    thread_for(x, nsites, {
       PackSite(sig_s[x], pi_s[x], s_s[x], p_s[x], t_s[x],
                &buf[x * kSiteDoubles]);
+    });
 
     // Byte-swap to big-endian
     BinaryIO::htobe64_v((void *)buf.data(), buf.size() * sizeof(double));
@@ -250,9 +251,10 @@ class TXQCDCheckpointer : public BaseHmcCheckpointer<TXQCDCompositeImpl> {
       std::vector<PSobj>   p_s(nsites);
       std::vector<TSobj>   t_s(nsites);
 
-      for (uint64_t x = 0; x < nsites; ++x)
+      thread_for(x, nsites, {
         UnpackSite(&buf[x * kSiteDoubles],
                    sig_s[x], pi_s[x], s_s[x], p_s[x], t_s[x]);
+      });
 
       vectorizeFromLexOrdArray(sig_s, U.sigma);
       vectorizeFromLexOrdArray(pi_s,  U.pi);

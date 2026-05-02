@@ -328,11 +328,14 @@ class TXQCDWilsonFermionEO {
     uint64_t nsites = sig_s.size();
     inv.resize(nsites);
 
-    Eigen::Matrix<std::complex<double>, kDim, kDim> M;
-    for (uint64_t x = 0; x < nsites; ++x) {
+    // Per-site BuildSiteMatrix + 24x24 Eigen.inverse() is independent across
+    // sites — parallelize across CPU cores (matches the clover variant in
+    // TXQCDSiteMatrix::PrecomputeInverses).
+    thread_for(x, nsites, {
+      Eigen::Matrix<std::complex<double>, kDim, kDim> M;
       BuildSiteMatrix(sig_s[x], pi_s[x], s_s[x], p_s[x], t_s[x], M);
       inv[x] = M.inverse();
-    }
+    });
   }
 
   void ApplyMooeeInv(int cb, const TXQCDFermionNf &in,
@@ -348,9 +351,11 @@ class TXQCDWilsonFermionEO {
     }
 
     uint64_t nsites = in_s[0].size();
-    Eigen::Matrix<std::complex<double>, kDim, 1> v, w;
 
-    for (uint64_t x = 0; x < nsites; ++x) {
+    // Per-site 24x24 mat-vec is the dominant CG cost — parallelize.  v/w
+    // declared inside so each thread has its own.
+    thread_for(x, nsites, {
+      Eigen::Matrix<std::complex<double>, kDim, 1> v, w;
       // Pack site vector: v[a*Ns*Nc + alpha*Nc + i]
       for (int a = 0; a < TxqcdNf; ++a)
         for (int alpha = 0; alpha < Ns; ++alpha)
@@ -369,7 +374,7 @@ class TXQCDWilsonFermionEO {
             auto &z = w(a * Ns * Nc + alpha * Nc + i);
             out_s[a][x]()(alpha)(i) = ComplexD(z.real(), z.imag());
           }
-    }
+    });
 
     for (int a = 0; a < TxqcdNf; ++a) {
       vectorizeFromLexOrdArray(out_s[a], out.f[a]);

@@ -512,7 +512,7 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
     for (int rho = 0; rho < Nd; ++rho) {
       for (int sig = rho + 1; sig < Nd; ++sig) {
         std::vector<CMsobj> sig_odd(nsites_odd);
-        for (uint64_t x = 0; x < nsites_odd; ++x) {
+        thread_for(x, nsites_odd, {
           for (int i = 0; i < Nc; ++i)
             for (int j = 0; j < Nc; ++j) {
               std::complex<double> val(0, 0);
@@ -536,9 +536,9 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
               std::complex<double> cval = cv * val;
               sig_odd[x]()()(i, j) = ComplexD(cval.real(), cval.imag());
             }
-        }
+        });
         std::vector<CMsobj> sig_even(nsites_even);
-        for (uint64_t x = 0; x < nsites_even; ++x) {
+        thread_for(x, nsites_even, {
           for (int i = 0; i < Nc; ++i)
             for (int j = 0; j < Nc; ++j) {
               std::complex<double> val(0, 0);
@@ -562,7 +562,7 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
               std::complex<double> cval = cv * val;
               sig_even[x]()()(i, j) = ComplexD(cval.real(), cval.imag());
             }
-        }
+        });
         LatticeColourMatrix lam_odd(&rbgrid_);
         vectorizeFromLexOrdArray(sig_odd, lam_odd);
         lam_odd.Checkerboard() = Odd;
@@ -692,7 +692,7 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
     for (int rho = 0; rho < Nd; ++rho) {
       for (int sig = rho + 1; sig < Nd; ++sig) {
         std::vector<CMsobj> sig_odd(nsites_odd);
-        for (uint64_t x = 0; x < nsites_odd; ++x) {
+        thread_for(x, nsites_odd, {
           for (int i = 0; i < Nc; ++i)
             for (int j = 0; j < Nc; ++j) {
               std::complex<double> val(0, 0);
@@ -728,9 +728,9 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
               std::complex<double> cval = cv * val;
               sig_odd[x]()()(i, j) = ComplexD(cval.real(), cval.imag());
             }
-        }
+        });
         std::vector<CMsobj> sig_even(nsites_even);
-        for (uint64_t x = 0; x < nsites_even; ++x) {
+        thread_for(x, nsites_even, {
           for (int i = 0; i < Nc; ++i)
             for (int j = 0; j < Nc; ++j) {
               std::complex<double> val(0, 0);
@@ -766,7 +766,7 @@ class TXQCDWilsonCloverHasenbuschAction : public Action<TXQCDField> {
               std::complex<double> cval = cv * val;
               sig_even[x]()()(i, j) = ComplexD(cval.real(), cval.imag());
             }
-        }
+        });
         LatticeColourMatrix lam_odd(&rbgrid_);
         vectorizeFromLexOrdArray(sig_odd, lam_odd);
         lam_odd.Checkerboard() = Odd;
