@@ -136,11 +136,31 @@ inline bool qcd_configs_exist() {
   }
   return !trajs.empty();
 }
+// Override base latest_*_checkpoint to honour runtime n_therm/n_prod
+// (the base versions hard-code compile-time defaults of 100+500=600 and miss
+// any cfgs past traj 600 in extended-ensemble runs).
 inline int latest_txqcd_checkpoint() {
-  return TxqcdTest2pt::latest_txqcd_checkpoint(txqcd_cfg_dir());
+  std::string dir = txqcd_cfg_dir();
+  int latest = -1;
+  int upper = n_therm_runtime() + n_prod_runtime();
+  for (int t = meas_skip; t <= upper; t += meas_skip) {
+    if (TxqcdTest2pt::file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
+        TxqcdTest2pt::file_exists(dir + "/ckpoint_lat_aux." + std::to_string(t)) &&
+        TxqcdTest2pt::file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
+      latest = t;
+  }
+  return latest;
 }
 inline int latest_qcd_checkpoint() {
-  return TxqcdTest2pt::latest_qcd_checkpoint(qcd_cfg_dir());
+  std::string dir = qcd_cfg_dir();
+  int latest = -1;
+  int upper = n_therm_runtime() + n_prod_runtime();
+  for (int t = meas_skip; t <= upper; t += meas_skip) {
+    if (TxqcdTest2pt::file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
+        TxqcdTest2pt::file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
+      latest = t;
+  }
+  return latest;
 }
 
 inline void LoadTxqcdConfig(TXQCDField &U, GridSerialRNG &sRNG,
