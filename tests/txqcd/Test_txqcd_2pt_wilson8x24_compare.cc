@@ -206,7 +206,8 @@ int main(int argc, char **argv) {
 
   // SD: lambda^2 <Tr sigma>/V = <Re Tr M_TX^{-1}>/V
   {
-    RealD lhs = lambda * lambda * sig_m, lhs_e = lambda * lambda * sig_e;
+    RealD lam = lambda_runtime();
+    RealD lhs = lam * lam * sig_m, lhs_e = lam * lam * sig_e;
     RealD rhs = mtx_m, rhs_e = mtx_e;
     RealD diff = lhs - rhs;
     RealD de = std::sqrt(lhs_e * lhs_e + rhs_e * rhs_e);
@@ -232,7 +233,8 @@ int main(int argc, char **argv) {
 
   // Chained: lambda^2 <Tr sigma>/(V Nf_tx) vs QCD
   {
-    RealD lhs = lambda * lambda * sig_pf, lhs_e = lambda * lambda * sig_pf_e;
+    RealD lam = lambda_runtime();
+    RealD lhs = lam * lam * sig_pf, lhs_e = lam * lam * sig_pf_e;
     RealD diff = lhs - mqc_pf;
     RealD de = std::sqrt(lhs_e * lhs_e + mqc_pf_e * mqc_pf_e);
     RealD ns = (de > 0) ? std::abs(diff) / de : 0.0;
