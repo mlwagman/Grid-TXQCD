@@ -1,0 +1,228 @@
+#pragma once
+// Single-shift QUDA Wilson-clover inverter, presented as a Grid
+// OperatorFunction<LatticeFermion>.
+//
+// Drop-in replacement for ConjugateGradient<LatticeFermion> in any code path
+// that calls a Grid CG via the OperatorFunction interface.  The Linop
+// argument is ignored — QUDA always operates against the gauge/clover it
+// last loaded via loadGauge/loadCloverQuda.  Caller MUST invoke
+// SetGauge(U) after every smearing update so the GPU copy stays in sync.
+//
+// Build requires --with-quda=PATH (defines GRID_HAVE_QUDA).  Without that,
+// instantiating this class is a hard error — callers should branch on
+// Grid::Quda::available() and fall back to ConjugateGradient.
+
+#include <Grid/Grid.h>
+#include <Grid/algorithms/LinearOperator.h>
+#include <Grid/util/QudaInit.h>
+#include <Grid/util/QudaFieldConvert.h>
+
+#ifndef GRID_HAVE_QUDA
+#  error "QudaCloverInverter requires GRID_HAVE_QUDA — configure --with-quda"
+#endif
+
+#include <quda.h>
+
+NAMESPACE_BEGIN(Grid);
+
+struct QudaCloverParams {
+  double mass;          // bare quark mass (Wilson convention; m=-0.245 for our prod ensemble)
+  double csw;           // unrenormalised clover coefficient
+  bool   anti_periodic_t = true;
+  double tol = 1e-10;
+  int    max_iter = 5000;
+  // Grid uses chiral gamma basis; chroma/QUDA-IO conventionally use
+  // DEGRAND_ROSSI.  Override at construction if the empirical
+  // gamma-basis check selects something else.
+  QudaGammaBasis gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+  QudaPrecision  cuda_prec  = QUDA_DOUBLE_PRECISION;
+  QudaPrecision  cuda_prec_sloppy = QUDA_SINGLE_PRECISION;
+  QudaReconstructType recon = QUDA_RECONSTRUCT_NO;
+  QudaReconstructType recon_sloppy = QUDA_RECONSTRUCT_12;
+};
+
+class QudaCloverInverter : public OperatorFunction<LatticeFermion> {
+public:
+  QudaCloverInverter(GridBase *grid, const QudaCloverParams &p)
+    : grid_(grid), params_(p), gauge_loaded_(false) {
+    setup_params_();
+  }
+
+  ~QudaCloverInverter() {
+    // QUDA-side cleanup is handled by Grid::Quda::finalize() at program end.
+  }
+
+  // Re-upload gauge + clover to the GPU.  Call after every smearing update.
+  void SetGauge(const LatticeGaugeField &U) {
+    int V = Quda::local_volume(grid_);
+    // Pack Grid LatticeGaugeField → 4 lex per-direction host buffers
+    // → EO permute → loadGaugeQuda (QUDA_QDP_GAUGE_ORDER, EO site order).
+    std::vector<std::vector<double>> lex_bufs(4, std::vector<double>(18 * V));
+    double *lex_ptrs[4] = {lex_bufs[0].data(), lex_bufs[1].data(),
+                           lex_bufs[2].data(), lex_bufs[3].data()};
+    Quda::gauge_to_lex_buffers(U, lex_ptrs);
+
+    eo_bufs_ = std::vector<std::vector<double>>(4, std::vector<double>(18 * V));
+    Coordinate lc = grid_->LocalDimensions();
+    void *gauge_ptrs[4];
+    for (int mu = 0; mu < 4; ++mu) {
+      Quda::lex_to_eo_permute(lex_bufs[mu].data(), eo_bufs_[mu].data(),
+                              V, 18, lc);
+      gauge_ptrs[mu] = eo_bufs_[mu].data();
+    }
+    loadGaugeQuda(gauge_ptrs, &gauge_param_);
+
+    // Compute clover internally (h_clover = h_clovinv = NULL): QUDA derives
+    // F_μν · σ_μν · csw·κ on-device, sidestepping any Grid-vs-QUDA clover
+    // sign-convention mismatch.
+    loadCloverQuda(nullptr, nullptr, &inv_param_);
+
+    gauge_loaded_ = true;
+  }
+
+  // OperatorFunction<LatticeFermion> interface.  Linop is intentionally
+  // unused; QUDA inverts against its own loaded gauge/clover.
+  void operator()(LinearOperatorBase<LatticeFermion> &Linop,
+                  const LatticeFermion &src,
+                  LatticeFermion &sol) override {
+    (void)Linop;
+    if (!gauge_loaded_) {
+      assert(false && "QudaCloverInverter::operator() called before SetGauge()");
+    }
+    int V = Quda::local_volume(grid_);
+    Coordinate lc = grid_->LocalDimensions();
+
+    // Pack src: LatticeFermion → lex buf → EO permute (24 doubles/site).
+    std::vector<double> src_lex(24 * V), src_eo(24 * V);
+    Quda::fermion_to_lex_buffer(src, src_lex.data());
+    Quda::lex_to_eo_permute(src_lex.data(), src_eo.data(), V, 24, lc);
+
+    std::vector<double> sol_eo(24 * V, 0.0);
+
+    invertQuda(sol_eo.data(), src_eo.data(), &inv_param_);
+
+    std::vector<double> sol_lex(24 * V);
+    Quda::eo_to_lex_permute(sol_eo.data(), sol_lex.data(), V, 24, lc);
+    Quda::lex_buffer_to_fermion(sol_lex.data(), sol);
+
+    // Stash the last QUDA report — useful for the test harness.
+    last_iter_ = inv_param_.iter;
+    last_residual_ = inv_param_.true_res[0];
+    last_secs_ = inv_param_.secs;
+  }
+
+  int    LastIter()     const { return last_iter_; }
+  double LastResidual() const { return last_residual_; }
+  double LastSecs()     const { return last_secs_; }
+
+  QudaInvertParam &InvertParam() { return inv_param_; }
+  QudaGaugeParam  &GaugeParam()  { return gauge_param_; }
+
+private:
+  void setup_params_() {
+    Coordinate lc = grid_->LocalDimensions();
+
+    // ---- gauge_param --------------------------------------------------------
+    gauge_param_ = newQudaGaugeParam();
+    for (int d = 0; d < 4; ++d) gauge_param_.X[d] = lc[d];
+    gauge_param_.anisotropy = 1.0;
+    gauge_param_.type = QUDA_WILSON_LINKS;
+    gauge_param_.gauge_order = QUDA_QDP_GAUGE_ORDER;
+    gauge_param_.t_boundary = params_.anti_periodic_t
+                                ? QUDA_ANTI_PERIODIC_T
+                                : QUDA_PERIODIC_T;
+    gauge_param_.cpu_prec = QUDA_DOUBLE_PRECISION;
+    gauge_param_.cuda_prec = params_.cuda_prec;
+    gauge_param_.cuda_prec_sloppy = params_.cuda_prec_sloppy;
+    gauge_param_.cuda_prec_precondition = params_.cuda_prec_sloppy;
+    gauge_param_.cuda_prec_refinement_sloppy = params_.cuda_prec_sloppy;
+    gauge_param_.reconstruct = params_.recon;
+    gauge_param_.reconstruct_sloppy = params_.recon_sloppy;
+    gauge_param_.reconstruct_precondition = params_.recon_sloppy;
+    gauge_param_.reconstruct_refinement_sloppy = params_.recon_sloppy;
+    gauge_param_.gauge_fix = QUDA_GAUGE_FIXED_NO;
+    gauge_param_.ga_pad = max_face_pad_();
+    gauge_param_.struct_size = sizeof(gauge_param_);
+
+    // ---- inv_param ----------------------------------------------------------
+    inv_param_ = newQudaInvertParam();
+    inv_param_.dslash_type = QUDA_CLOVER_WILSON_DSLASH;
+    inv_param_.kappa  = 1.0 / (2.0 * (4.0 + params_.mass));
+    inv_param_.mass   = params_.mass;
+    inv_param_.Ls     = 1;
+
+    inv_param_.clover_csw    = params_.csw;
+    inv_param_.clover_coeff  = params_.csw * inv_param_.kappa;
+    inv_param_.clover_cpu_prec = QUDA_DOUBLE_PRECISION;
+    inv_param_.clover_cuda_prec = params_.cuda_prec;
+    inv_param_.clover_cuda_prec_sloppy = params_.cuda_prec_sloppy;
+    inv_param_.clover_cuda_prec_precondition = params_.cuda_prec_sloppy;
+    inv_param_.clover_cuda_prec_refinement_sloppy = params_.cuda_prec_sloppy;
+    inv_param_.clover_order = QUDA_PACKED_CLOVER_ORDER;
+    inv_param_.compute_clover = 1;
+    inv_param_.compute_clover_inverse = 1;
+    inv_param_.return_clover = 0;
+    inv_param_.return_clover_inverse = 0;
+
+    inv_param_.inv_type        = QUDA_CG_INVERTER;
+    // Full M^-1 solve: take a full-volume source, return full-volume
+    // solution; QUDA does EO preconditioning internally and reconstructs
+    // the odd half from the even solution.
+    inv_param_.solution_type   = QUDA_MAT_SOLUTION;
+    inv_param_.solve_type      = QUDA_NORMOP_PC_SOLVE;
+    inv_param_.matpc_type      = QUDA_MATPC_EVEN_EVEN;
+    inv_param_.dagger          = QUDA_DAG_NO;
+    // Grid's M is mass-form: (m+4) - 0.5·D_W - 0.5·c_sw·σF (no κ scaling).
+    // QUDA's MASS_NORMALIZATION matches that.
+    inv_param_.mass_normalization   = QUDA_MASS_NORMALIZATION;
+    inv_param_.solver_normalization = QUDA_DEFAULT_NORMALIZATION;
+
+    inv_param_.tol      = params_.tol;
+    inv_param_.maxiter  = params_.max_iter;
+    inv_param_.reliable_delta = 1e-1;
+    inv_param_.use_sloppy_partial_accumulator = 0;
+    inv_param_.solution_accumulator_pipeline = 1;
+    inv_param_.pipeline = 0;
+    inv_param_.gcrNkrylov = 10;
+    inv_param_.tol_restart = 0.0005;
+    inv_param_.residual_type = QUDA_L2_RELATIVE_RESIDUAL;
+    inv_param_.tol_hq = 0.0;
+    inv_param_.Nsteps = 2;
+
+    inv_param_.cpu_prec  = QUDA_DOUBLE_PRECISION;
+    inv_param_.cuda_prec = params_.cuda_prec;
+    inv_param_.cuda_prec_sloppy = params_.cuda_prec_sloppy;
+    inv_param_.cuda_prec_refinement_sloppy = params_.cuda_prec_sloppy;
+    inv_param_.cuda_prec_precondition = params_.cuda_prec_sloppy;
+    inv_param_.preserve_source = QUDA_PRESERVE_SOURCE_YES;
+
+    inv_param_.gamma_basis  = params_.gamma_basis;
+    inv_param_.dirac_order  = QUDA_DIRAC_ORDER;
+    inv_param_.input_location  = QUDA_CPU_FIELD_LOCATION;
+    inv_param_.output_location = QUDA_CPU_FIELD_LOCATION;
+
+    inv_param_.verbosity = QUDA_SUMMARIZE;
+    inv_param_.struct_size = sizeof(inv_param_);
+  }
+
+  int max_face_pad_() const {
+    Coordinate lc = grid_->LocalDimensions();
+    int x_face = lc[1] * lc[2] * lc[3] / 2;
+    int y_face = lc[0] * lc[2] * lc[3] / 2;
+    int z_face = lc[0] * lc[1] * lc[3] / 2;
+    int t_face = lc[0] * lc[1] * lc[2] / 2;
+    return std::max({x_face, y_face, z_face, t_face});
+  }
+
+  GridBase *grid_;
+  QudaCloverParams params_;
+  QudaGaugeParam gauge_param_{};
+  QudaInvertParam inv_param_{};
+  std::vector<std::vector<double>> eo_bufs_;  // 4 per-dir gauge buffers, kept alive
+  bool gauge_loaded_;
+  int    last_iter_     = 0;
+  double last_residual_ = 0.0;
+  double last_secs_     = 0.0;
+};
+
+NAMESPACE_END(Grid);
