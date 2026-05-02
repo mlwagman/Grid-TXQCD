@@ -50,7 +50,7 @@ public:
   SchurDifferentiableOperator (Matrix &Mat) : SchurDiagMooeeOperator<Matrix,FermionField>(Mat) {};
 
   void MpcDeriv(GaugeField &Force,const FermionField &U,const FermionField &V) {
-        
+
     GridBase *fgrid   = this->_Mat.FermionGrid();
     GridBase *fcbgrid = this->_Mat.FermionRedBlackGrid();
 
@@ -60,9 +60,8 @@ public:
     conformable(fcbgrid,U.Grid());
     conformable(fcbgrid,V.Grid());
 
-    // Assert the checkerboard?? or code for either
-    GRID_ASSERT(U.Checkerboard()==Odd);
-    GRID_ASSERT(V.Checkerboard()==U.Checkerboard());
+    GRID_ASSERT(U.Checkerboard()==V.Checkerboard());
+    const bool input_odd = (U.Checkerboard()==Odd);
 
     // NOTE Guido: WE DO NOT WANT TO USE THE ucbgrid GRID FOR THE FORCE
     // it is not conformable with the HMC force field
@@ -73,20 +72,23 @@ public:
     GaugeField ForceE(forcecb);
 
 
-    //  X^dag Der_oe MeeInv Meo Y
+    //  X^dag Der_oe MeeInv Meo Y      (input on Odd parity)
+    //  X^dag Der_eo MooInv Moe Y      (input on Even parity)
     // Use Mooee as nontrivial but gauge field indept
-    this->_Mat.Meooe   (V,tmp1);      // odd->even -- implicit -0.5 factor to be applied
-    this->_Mat.MooeeInv(tmp1,tmp2);   // even->even 
-    this->_Mat.MoeDeriv(ForceO,U,tmp2,DaggerNo);
-    //  Accumulate X^dag M_oe MeeInv Der_eo Y
-    this->_Mat.MeooeDag   (U,tmp1);    // even->odd -- implicit -0.5 factor to be applied
-    this->_Mat.MooeeInvDag(tmp1,tmp2); // even->even 
-    this->_Mat.MeoDeriv(ForceE,tmp2,V,DaggerNo);
-          
+    this->_Mat.Meooe   (V,tmp1);      // input parity → other parity
+    this->_Mat.MooeeInv(tmp1,tmp2);   // diagonal in 'other'
+    if (input_odd) this->_Mat.MoeDeriv(ForceO,U,tmp2,DaggerNo);
+    else           this->_Mat.MeoDeriv(ForceE,U,tmp2,DaggerNo);
+    //  Accumulate the conjugate term
+    this->_Mat.MeooeDag   (U,tmp1);
+    this->_Mat.MooeeInvDag(tmp1,tmp2);
+    if (input_odd) this->_Mat.MeoDeriv(ForceE,tmp2,V,DaggerNo);
+    else           this->_Mat.MoeDeriv(ForceO,tmp2,V,DaggerNo);
+
     GRID_ASSERT(ForceE.Checkerboard()==Even);
     GRID_ASSERT(ForceO.Checkerboard()==Odd);
 
-    setCheckerboard(Force,ForceE); 
+    setCheckerboard(Force,ForceE);
     setCheckerboard(Force,ForceO);
     Force=-Force;
 
@@ -95,7 +97,7 @@ public:
 
 
   void MpcDagDeriv(GaugeField &Force,const FermionField &U,const FermionField &V) {
-        
+
     GridBase *fgrid   = this->_Mat.FermionGrid();
     GridBase *fcbgrid = this->_Mat.FermionRedBlackGrid();
 
@@ -105,32 +107,27 @@ public:
     conformable(fcbgrid,U.Grid());
     conformable(fcbgrid,V.Grid());
 
-    // Assert the checkerboard?? or code for either
-    GRID_ASSERT(V.Checkerboard()==Odd);
-    GRID_ASSERT(V.Checkerboard()==V.Checkerboard());
+    GRID_ASSERT(U.Checkerboard()==V.Checkerboard());
+    const bool input_odd = (V.Checkerboard()==Odd);
 
-    // NOTE Guido: WE DO NOT WANT TO USE THE ucbgrid GRID FOR THE FORCE
-    // it is not conformable with the HMC force field
-    // INHERIT FROM THE Force field instead
     GridRedBlackCartesian* forcecb = new GridRedBlackCartesian(Force.Grid());
     GaugeField ForceO(forcecb);
     GaugeField ForceE(forcecb);
 
-    //  X^dag Der_oe MeeInv Meo Y
-    // Use Mooee as nontrivial but gauge field indept
-    this->_Mat.MeooeDag   (V,tmp1);      // odd->even -- implicit -0.5 factor to be applied
-    this->_Mat.MooeeInvDag(tmp1,tmp2);   // even->even 
-    this->_Mat.MoeDeriv(ForceO,U,tmp2,DaggerYes);
-          
-    //  Accumulate X^dag M_oe MeeInv Der_eo Y
-    this->_Mat.Meooe   (U,tmp1);    // even->odd -- implicit -0.5 factor to be applied
-    this->_Mat.MooeeInv(tmp1,tmp2); // even->even 
-    this->_Mat.MeoDeriv(ForceE,tmp2,V,DaggerYes);
+    this->_Mat.MeooeDag   (V,tmp1);
+    this->_Mat.MooeeInvDag(tmp1,tmp2);
+    if (input_odd) this->_Mat.MoeDeriv(ForceO,U,tmp2,DaggerYes);
+    else           this->_Mat.MeoDeriv(ForceE,U,tmp2,DaggerYes);
+
+    this->_Mat.Meooe   (U,tmp1);
+    this->_Mat.MooeeInv(tmp1,tmp2);
+    if (input_odd) this->_Mat.MeoDeriv(ForceE,tmp2,V,DaggerYes);
+    else           this->_Mat.MoeDeriv(ForceO,tmp2,V,DaggerYes);
 
     GRID_ASSERT(ForceE.Checkerboard()==Even);
     GRID_ASSERT(ForceO.Checkerboard()==Odd);
 
-    setCheckerboard(Force,ForceE); 
+    setCheckerboard(Force,ForceE);
     setCheckerboard(Force,ForceO);
     Force=-Force;
 

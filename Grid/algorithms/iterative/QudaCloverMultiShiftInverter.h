@@ -145,6 +145,54 @@ public:
     for (int k = 0; k < N; ++k) last_res_per_shift_[k] = inv_param_.true_res_offset[k];
   }
 
+  // EVEN-parity counterpart of solve_rb_odd.  Identical packing logic; the
+  // parity is implied by inv_param_.matpc_type (which the caller is
+  // expected to set to QUDA_MATPC_EVEN_EVEN_ASYMMETRIC at construction).
+  // Outputs have Checkerboard() == Even.
+  void solve_rb_even(const LatticeFermion &phi_even,
+                     std::vector<LatticeFermion> &out_even) {
+    if (!gauge_loaded_) {
+      assert(false && "QudaCloverMultiShiftInverter::solve_rb_even: SetGauge() not called");
+    }
+    int N = (int)spec_.shifts.size();
+    assert((int)out_even.size() == N);
+    int V_eo = Quda::local_volume(grid_) / 2;
+
+    using SiteSpinor = LatticeFermion::scalar_object;
+    std::vector<SiteSpinor> scalars;
+    unvectorizeToLexOrdArray(scalars, phi_even);
+    std::vector<double> src_eo(24 * V_eo);
+    std::memcpy(src_eo.data(), scalars.data(), V_eo * 24 * sizeof(double));
+
+    const double four_kappa_sq = 4.0 * inv_param_.kappa * inv_param_.kappa;
+    for (auto &v : src_eo) v *= four_kappa_sq;
+
+    std::vector<double> orig_offsets(N);
+    for (int k = 0; k < N; ++k) {
+      orig_offsets[k] = inv_param_.offset[k];
+      inv_param_.offset[k] = orig_offsets[k] * four_kappa_sq;
+    }
+
+    std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V_eo, 0.0));
+    std::vector<void *> sol_ptrs(N);
+    for (int k = 0; k < N; ++k) sol_ptrs[k] = sol_eo[k].data();
+
+    invertMultiShiftQuda(sol_ptrs.data(), src_eo.data(), &inv_param_);
+
+    for (int k = 0; k < N; ++k) inv_param_.offset[k] = orig_offsets[k];
+
+    for (int k = 0; k < N; ++k) {
+      out_even[k].Checkerboard() = Even;
+      std::vector<SiteSpinor> sol_scalars(V_eo);
+      std::memcpy(sol_scalars.data(), sol_eo[k].data(), V_eo * 24 * sizeof(double));
+      vectorizeFromLexOrdArray(sol_scalars, out_even[k]);
+    }
+    last_iter_ = inv_param_.iter;
+    last_secs_ = inv_param_.secs;
+    last_res_per_shift_.assign(N, 0.0);
+    for (int k = 0; k < N; ++k) last_res_per_shift_[k] = inv_param_.true_res_offset[k];
+  }
+
   // OperatorMultiFunction interface: solve (A + shift[k]) x_k = src for all k.
   void operator()(LinearOperatorBase<LatticeFermion> &Linop,
                   const LatticeFermion &src,
@@ -183,6 +231,9 @@ public:
   const std::vector<double> &LastResPerShift() const {
     return last_res_per_shift_;
   }
+
+  QudaGaugeParam &GaugeParam() { return gauge_param_; }
+  QudaInvertParam &InvertParam() { return inv_param_; }
 
 private:
   void setup_params_() {

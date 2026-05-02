@@ -93,6 +93,7 @@ class TwoFlavourSchurCloverActionMP
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
 #ifdef GRID_HAVE_QUDA
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaRationalActionMP.h>
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaForceRationalActionMP.h>
 #endif
 
 struct QcdDiag : public HmcObservable<LatticeGaugeField> {
@@ -356,8 +357,28 @@ int main(int argc, char **argv) {
   std::vector<std::unique_ptr<Action<LatticeGaugeField>>> RatPFs;
 
 #ifdef GRID_HAVE_QUDA
-  bool use_quda_hmc = std::getenv("QUDA_SOLVER") != nullptr;
-  if (use_quda_hmc) {
+  bool use_quda_hmc   = std::getenv("QUDA_SOLVER") != nullptr;
+  bool use_quda_force = std::getenv("QUDA_FORCE")  != nullptr;
+  if (use_quda_force) {
+    // Phase 6: QUDA does both the multishift CG AND the gauge-deriv chain
+    // via computeCloverForceQuda.  Requires the EVEN-parity rational
+    // action (because computeCloverForceQuda hardcodes EVEN_EVEN).
+    QudaCloverParams qp;
+    qp.mass = mass_light;
+    qp.csw  = csw;
+    qp.anti_periodic_t = true;
+    qp.tol = cg_tol;
+    qp.max_iter = cg_max;
+    qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+    for (int p = 0; p < 3; ++p) {
+      auto *act = new OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>(
+          FermOp, FermOpF, &RBGridF, rat_params, qp, 50);
+      act->is_smeared = true;
+      RatPFs.emplace_back(act);
+    }
+    std::cout << GridLogMessage
+              << "QUDA_FORCE active: QUDA owns the gauge-deriv chain too." << std::endl;
+  } else if (use_quda_hmc) {
     QudaCloverParams qp;
     qp.mass = mass_light;
     qp.csw  = csw;
