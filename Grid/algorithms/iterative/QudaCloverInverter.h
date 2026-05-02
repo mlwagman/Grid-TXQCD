@@ -146,9 +146,13 @@ private:
     gauge_param_.anisotropy = 1.0;
     gauge_param_.type = QUDA_WILSON_LINKS;
     gauge_param_.gauge_order = QUDA_QDP_GAUGE_ORDER;
-    // Always tell QUDA "periodic" — we bake the antiperiodic phase into
-    // U_t directly in SetGauge, matching Grid's WilsonImpl convention.
-    gauge_param_.t_boundary = QUDA_PERIODIC_T;
+    // Match the agrebe/chroma convention: pre-bake the antiperiodic phase
+    // into U_t in SetGauge AND tell QUDA the BC is antiperiodic (this is
+    // metadata for QUDA — the actual phase is in the gauge).  Empirically
+    // this is what chroma does and it works on production cfgs.
+    gauge_param_.t_boundary = params_.anti_periodic_t
+                                ? QUDA_ANTI_PERIODIC_T
+                                : QUDA_PERIODIC_T;
     gauge_param_.cpu_prec = QUDA_DOUBLE_PRECISION;
     gauge_param_.cuda_prec = params_.cuda_prec;
     gauge_param_.cuda_prec_sloppy = params_.cuda_prec_sloppy;
@@ -197,7 +201,10 @@ private:
 
     inv_param_.tol      = params_.tol;
     inv_param_.maxiter  = params_.max_iter;
-    inv_param_.reliable_delta = 1e-1;
+    // Tight reliable update — chroma's QUDA wrapper uses 1e-3.  1e-1 is
+    // too loose for our well-conditioned propagator inversion, especially
+    // when sloppy is single-precision.
+    inv_param_.reliable_delta = 1e-3;
     inv_param_.use_sloppy_partial_accumulator = 0;
     inv_param_.solution_accumulator_pipeline = 1;
     inv_param_.pipeline = 0;
@@ -205,7 +212,9 @@ private:
     inv_param_.tol_restart = 0.0005;
     inv_param_.residual_type = QUDA_L2_RELATIVE_RESIDUAL;
     inv_param_.tol_hq = 0.0;
-    inv_param_.Nsteps = 2;
+    // Multiple reliable-update / refinement passes if the iterated and
+    // true residual diverge.  Plenty for double-prec target tol.
+    inv_param_.Nsteps = 5;
 
     inv_param_.cpu_prec  = QUDA_DOUBLE_PRECISION;
     inv_param_.cuda_prec = params_.cuda_prec;

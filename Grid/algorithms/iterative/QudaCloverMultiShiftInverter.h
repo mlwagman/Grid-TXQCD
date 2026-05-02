@@ -134,7 +134,9 @@ private:
     gauge_param_.anisotropy = 1.0;
     gauge_param_.type = QUDA_WILSON_LINKS;
     gauge_param_.gauge_order = QUDA_QDP_GAUGE_ORDER;
-    gauge_param_.t_boundary = QUDA_PERIODIC_T;  // we bake antiperiodic in U_t
+    gauge_param_.t_boundary = params_.anti_periodic_t
+                                ? QUDA_ANTI_PERIODIC_T
+                                : QUDA_PERIODIC_T;
     gauge_param_.cpu_prec = QUDA_DOUBLE_PRECISION;
     gauge_param_.cuda_prec = params_.cuda_prec;
     gauge_param_.cuda_prec_sloppy = params_.cuda_prec_sloppy;
