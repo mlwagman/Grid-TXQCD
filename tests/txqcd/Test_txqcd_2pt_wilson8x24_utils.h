@@ -90,17 +90,31 @@ inline std::string lambda_suffix() {
   return std::string(buf);
 }
 
+// Runtime MASS override.  Cfg/meas dirs include the mass when set so
+// lighter-pion runs do not collide with the default m=0 ensemble.
+inline RealD mass_runtime() {
+  const char *v = std::getenv("MASS");
+  return (v && *v) ? std::atof(v) : mass;
+}
+inline std::string mass_suffix() {
+  RealD m = mass_runtime();
+  if (std::abs(m - mass) < 1e-6) return "";
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "_m%+.4f", m);
+  return std::string(buf);
+}
+
 inline std::string txqcd_cfg_dir() {
-  return "configs_2pt_txqcd_wilson8x24" + lambda_suffix();
+  return "configs_2pt_txqcd_wilson8x24" + mass_suffix() + lambda_suffix();
 }
 inline std::string qcd_cfg_dir() {
   // QCD has no lambda dependence — all TXQCD-lambda runs share one QCD
   // ensemble.  meas_dir() still includes lambda_suffix so QCD measurement
   // outputs land alongside their TXQCD counterparts.
-  return "configs_2pt_qcd_wilson8x24";
+  return "configs_2pt_qcd_wilson8x24" + mass_suffix();
 }
 inline std::string meas_dir() {
-  return "meas_2pt_wilson8x24" + lambda_suffix();
+  return "meas_2pt_wilson8x24" + mass_suffix() + lambda_suffix();
 }
 
 // Local versions that use the wilson8x24 meas_trajs (env-overridable),

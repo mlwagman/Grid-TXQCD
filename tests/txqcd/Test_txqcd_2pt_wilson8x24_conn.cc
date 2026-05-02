@@ -167,7 +167,7 @@ int main(int argc, char **argv) {
       LoadTxqcdConfig(U, sRNG, pRNG, traj);
       plaq_tx.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
       LatticePropagator Su(&Grid), Sd(&Grid);
-      TxqcdPointProp(Su, Sd, U, mass, src, meas_tol, cg_max);
+      TxqcdPointProp(Su, Sd, U, mass_runtime(), src, meas_tol, cg_max);
       pion_tx.push_back(PionCorrelator(Sd, Su));
       nucl_tx.push_back(NucleonCorrelator(Su, Sd));
     }
@@ -181,7 +181,7 @@ int main(int argc, char **argv) {
       LoadQcdConfig(Umu, sRNG, pRNG, traj);
       plaq_qcd.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
       LatticePropagator S(&Grid);
-      QcdPointProp(S, Umu, mass, Grid, RBGrid, src, meas_tol, cg_max);
+      QcdPointProp(S, Umu, mass_runtime(), Grid, RBGrid, src, meas_tol, cg_max);
       pion_qcd.push_back(PionCorrelator(S, S));
       nucl_qcd.push_back(NucleonCorrelator(S, S));
     }

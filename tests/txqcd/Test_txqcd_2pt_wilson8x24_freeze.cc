@@ -89,10 +89,10 @@ int main(int argc, char **argv) {
   // the LAMBDA=7.76 wilson8x24 aux VEVs (sigma_pf=0.0483, s_pc=0.0231).
   RealD dm = 0.0714;
   if (const char *v = std::getenv("FREEZE_DM")) dm = std::atof(v);
-  RealD m_eff_bare = mass + dm;
+  RealD m_eff_bare = mass_runtime() + dm;
 
   std::cout << GridLogMessage << "[freeze] LAMBDA=" << lambda_runtime()
-            << " mass=" << mass << " dm=" << dm
+            << " mass=" << mass_runtime() << " dm=" << dm
             << " m_eff_bare=" << m_eff_bare << std::endl;
 
   std::vector<std::vector<RealD>> pion_frozen;

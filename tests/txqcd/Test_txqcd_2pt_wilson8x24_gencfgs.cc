@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
   } else if (do_txqcd) {
     std::cout << GridLogMessage
               << "Generating TXQCD wilson8x24 configs (8^3x24, beta=" << beta
-              << ", m_l=" << mass << ", csw=" << csw << ", lambda=" << lam
+              << ", m_l=" << mass_runtime() << ", csw=" << csw << ", lambda=" << lam
               << ", " << total_traj << " traj)..." << std::endl;
     mkdir_p(txqcd_cfg_dir());
 
@@ -69,8 +69,8 @@ int main(int argc, char **argv) {
 
     GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
     AuxiliaryFieldGaussianAction           AuxAction(lam);
-    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass, rat_params);
-    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass);
+    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass_runtime(), rat_params);
+    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass_runtime());
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);
@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
         {"LogDet", &LogDet},
         {"AuxGaussian", &AuxAction},
         {"Gauge", &GaugeAction}
-    }, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
+    }, Grid, RBGrid, pRNG, mass_runtime(), csw, n_vev_noise);
 
     std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
@@ -163,7 +163,7 @@ int main(int argc, char **argv) {
       SU<Nc>::ColdConfiguration(Umu);
     }
 
-    WilsonFermionD FermOp(Umu, Grid, RBGrid, mass);
+    WilsonFermionD FermOp(Umu, Grid, RBGrid, mass_runtime());
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     TwoFlavourPseudoFermionAction<WilsonImplR> Nf2(FermOp, CG, CG);
     Nf2.is_smeared = false;
@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
     QcdDiagnostics diag(qcd_cfg_dir() + "/hmc_diagnostics", meas_skip, {
         {"Nf2", &Nf2},
         {"Gauge", &GaugeAction}
-    }, Grid, RBGrid, pRNG, mass, csw, n_vev_noise);
+    }, Grid, RBGrid, pRNG, mass_runtime(), csw, n_vev_noise);
 
     std::vector<HmcObservable<LatticeGaugeField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, Umu);
