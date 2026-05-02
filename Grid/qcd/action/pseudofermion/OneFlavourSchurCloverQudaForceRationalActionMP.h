@@ -274,6 +274,25 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
         computeCloverForceQuda(mom_buf.data(), 1.0, &xp, &pp, &cf, kappa2, ck,
                                1, mult, nullptr, &gauge_param, &inv_param);
       }
+    } else if (std::getenv("QUDA_FORCE_DBG_TM")) {
+      // computeTMCloverForceQuda — chroma's tested path.
+      // Coefficient convention: feed coeff[i] s.t. force_coeff[i] = coeff[i]
+      // (TM doesn't multiply by 2·dt·kappa²); ferm_epsilon = {kcsw·coeff,
+      // kcsw·coeff/κ²} with kcsw = κ·csw/8.  detratio=0, twist_flavor=NO.
+      // Pre-scale our residue by -2·κ² to mimic the non-TM force_coeff
+      // (since TM passes coeff directly).
+      std::vector<void *> x0_ptrs(Npole, nullptr);
+      std::vector<double> tm_coeff(Npole);
+      for (int k = 0; k < Npole; ++k)
+        tm_coeff[k] = -2.0 * kappa * kappa * coeff[k];
+      computeTMCloverForceQuda(mom_buf.data(),
+                               x_ptrs.data(),
+                               x0_ptrs.data(),
+                               tm_coeff.data(),
+                               Npole,
+                               &gauge_param,
+                               &inv_param,
+                               /*detratio=*/0);
     } else {
       // multiplicity=0: skip QUDA's σ_μν·F_μν trace term — that's the
       // LogDet(M_oo) derivative (hep-lat/0112051), which Grid handles
