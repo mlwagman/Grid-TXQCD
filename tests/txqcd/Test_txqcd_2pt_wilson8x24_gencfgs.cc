@@ -102,22 +102,6 @@ int main(int argc, char **argv) {
       TXQCDCompositeImpl::TepidConfiguration(pRNG, U);
     }
 
-    // AUX_INIT_RESCALE env: multiply all aux fields by this factor immediately
-    // after loading.  Used to test the field redefinition (lambda, mu) <->
-    // (lambda*M, mu*M) under aux -> aux/M: start two streams from the same
-    // physical state with appropriately rescaled aux and verify equilibrium
-    // observables match.
-    if (const char *v = std::getenv("AUX_INIT_RESCALE")) {
-      RealD f = std::atof(v);
-      std::cout << GridLogMessage << "AUX_INIT_RESCALE: scaling all aux fields"
-                << " by " << f << std::endl;
-      U.sigma = f * U.sigma;
-      U.pi    = f * U.pi;
-      U.s     = f * U.s;
-      U.p     = f * U.p;
-      U.t     = f * U.t;
-    }
-
     int no_metrop = (start_traj < n_therm_use) ? (n_therm_use - start_traj) : 0;
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
