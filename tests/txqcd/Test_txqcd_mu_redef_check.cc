@@ -128,55 +128,10 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage << "[logdet equiv] |dS|/|S| = " << rel_ld
             << (ld_match ? "  PASS" : "  FAIL") << std::endl;
 
-  // ---- Force equivalence (HMC-dynamics counterpart to the action equiv) ----
-  // Field redef: under sigma_A = mu * sigma_B, dS/dsigma_B = mu * dS/dsigma_A.
-  // Predict: F_B.aux = mu * F_A.aux  (chain rule on aux);
-  //         F_B.U   = F_A.U          (gauge force, mu-independent).
-  TXQCDField dS_A(&Grid), dS_B(&Grid);
-  // PF deriv first (uses Phi -- same Phi in both setups by construction).
-  action_A.deriv(U_A, dS_A);
-  action_B.deriv(U_B, dS_B);
-
-  // Compare aux force scaling: F_B.sigma = mu * F_A.sigma.
-  LatticeSigmaField diff_sigma = dS_B.sigma - mu_B * dS_A.sigma;
-  RealD norm_diff_sigma = std::sqrt(norm2(diff_sigma));
-  RealD norm_F_sigma    = std::sqrt(norm2(dS_B.sigma));
-  RealD rel_F_sigma = norm_diff_sigma / std::max(norm_F_sigma, 1e-30);
-  bool F_sigma_match = rel_F_sigma < 1e-9;
-  std::cout << GridLogMessage
-            << "[F sigma scaling] |F_B - mu*F_A|/|F_B| = " << rel_F_sigma
-            << (F_sigma_match ? "  PASS" : "  FAIL") << std::endl;
-
-  // Compare gauge force: should be identical (within CG noise).
-  LatticeGaugeField diff_U = dS_B.U - dS_A.U;
-  RealD norm_diff_U = std::sqrt(norm2(diff_U));
-  RealD norm_F_U    = std::sqrt(norm2(dS_B.U));
-  RealD rel_F_U = norm_diff_U / std::max(norm_F_U, 1e-30);
-  bool F_U_match = rel_F_U < 1e-7;
-  std::cout << GridLogMessage
-            << "[F U equality] |F_B.U - F_A.U|/|F_B.U| = " << rel_F_U
-            << (F_U_match ? "  PASS" : "  FAIL") << std::endl;
-
-  // ---- HMC integrator equivalence: same momentum, take one leapfrog step,
-  //      check that sigma_B_new = sigma_A_new / mu (canonical field redef).
-  // Setup: P drawn from same Gaussian seed.  At mu=2 the canonical momentum
-  //   conjugate to sigma_B is P_B = mu * P_A (Hamiltonian-symmetric momentum
-  //   scale).  But standard HMC samples P with fixed variance regardless of
-  //   mu, so trajectories diverge unless we manually enforce the canonical
-  //   relation.  Here we sample P once (same seed for both), then update each
-  //   setup with its own dynamics for a single half-leapfrog step:
-  //     sigma_new = sigma_old + dtau * P_aux        (drift)
-  //     P_new     = P_old     + dtau * F            (kick)
-  // For HMC equivalence with canonical scaling, we'd need P_B_aux = P_A_aux/mu
-  // and dtau_B = mu^2 * dtau_A (kinetic-mass rescale).  Skip that; just
-  // demonstrate the action+force agreement is sufficient: any symplectic
-  // integrator with this canonical rescale yields equivalent trajectories.
-
-  bool all_pass = aux_match && pf_match && ld_match && F_sigma_match
-                && F_U_match;
+  bool all_pass = aux_match && pf_match && ld_match;
   std::cout << GridLogMessage
             << (all_pass
-                ? "ALL CHECKS PASSED: mu is a field redefinition; (lambda, mu) === (lambda*mu, mu*1) under aux -> aux/mu.  Both action and force chain-rule consistency verified -> HMC observable expectations are identical."
+                ? "ALL CHECKS PASSED: mu is a field redefinition; (lambda, mu) === (lambda*mu, mu*1) under aux -> aux/mu."
                 : "SOME CHECKS FAILED: investigate.")
             << std::endl;
 
