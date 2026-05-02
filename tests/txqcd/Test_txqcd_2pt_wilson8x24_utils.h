@@ -94,7 +94,10 @@ inline std::string txqcd_cfg_dir() {
   return "configs_2pt_txqcd_wilson8x24" + lambda_suffix();
 }
 inline std::string qcd_cfg_dir() {
-  return "configs_2pt_qcd_wilson8x24" + lambda_suffix();
+  // QCD has no lambda dependence — all TXQCD-lambda runs share one QCD
+  // ensemble.  meas_dir() still includes lambda_suffix so QCD measurement
+  // outputs land alongside their TXQCD counterparts.
+  return "configs_2pt_qcd_wilson8x24";
 }
 inline std::string meas_dir() {
   return "meas_2pt_wilson8x24" + lambda_suffix();
