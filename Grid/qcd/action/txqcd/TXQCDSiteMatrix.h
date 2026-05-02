@@ -78,10 +78,6 @@ struct TXQCDSiteMatrixUtil {
   // Per-flavor diagonal mass: diag_mass[a] = 4 + m_a goes on the rows
   // (a, alpha, i) for that flavor.  Required for non-degenerate Nf=3 setups
   // (e.g. mass = diag(m_l, m_l, m_s)) where each flavor has its own mass.
-  //
-  // mu rescales the auxiliary-field block (Delta = sigma + i*pi*g5 + s + i*p*g5
-  // + t).  M_TXQCD = M_QCD + mu * Delta.  Default mu=1 reproduces the original
-  // operator.  Wilson+clover diagonal (4+m + clover) is NOT scaled by mu.
   template <class SigSobj, class PiSobj, class SSobj, class PSobj, class TSobj>
   static void BuildSiteMatrix(const SpinMatrices &sm,
                                const std::array<RealD, TxqcdNf> &diag_mass,
@@ -90,8 +86,7 @@ struct TXQCDSiteMatrixUtil {
                                const TSobj &t_site,
                                RealD csw,
                                const std::array<FmnSobj, 6> *fmn_site,
-                               SiteMatrix &M,
-                               RealD mu = 1.0) {
+                               SiteMatrix &M) {
     M = SiteMatrix::Zero();
     for (int a = 0; a < TxqcdNf; ++a)
       for (int alpha = 0; alpha < Ns; ++alpha)
@@ -114,8 +109,8 @@ struct TXQCDSiteMatrixUtil {
             for (int i = 0; i < Nc; ++i) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = b * Ns * Nc + beta * Nc + i;
-              if (alpha == beta) M(r, c) += mu * sig_ab;
-              M(r, c) += mu * pi_ab * g5;
+              if (alpha == beta) M(r, c) += sig_ab;
+              M(r, c) += pi_ab * g5;
             }
           }
         }
@@ -135,24 +130,23 @@ struct TXQCDSiteMatrixUtil {
             for (int beta = 0; beta < Ns; ++beta) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = a * Ns * Nc + beta * Nc + j;
-              if (alpha == beta) M(r, c) += mu * inv_sqrt2 * s_ij;
-              M(r, c) += mu * inv_sqrt2 * p_ij * sm.gamma5(alpha, beta);
-              for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
-                for (int nu = mu_lor + 1; nu < Nd; ++nu) {
-                  std::complex<double> t_ij(
-                      t_site()(mu_lor, nu)(i, j).real(),
-                      t_site()(mu_lor, nu)(i, j).imag());
-                  M(r, c) += mu * t_ij * sm.isigma[mu_lor][nu](alpha, beta);
+              if (alpha == beta) M(r, c) += inv_sqrt2 * s_ij;
+              M(r, c) += inv_sqrt2 * p_ij * sm.gamma5(alpha, beta);
+              for (int mu = 0; mu < Nd; ++mu)
+                for (int nu = mu + 1; nu < Nd; ++nu) {
+                  std::complex<double> t_ij(t_site()(mu, nu)(i, j).real(),
+                                            t_site()(mu, nu)(i, j).imag());
+                  M(r, c) += t_ij * sm.isigma[mu][nu](alpha, beta);
                 }
               if (fmn_site != nullptr) {
-                for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
-                  for (int nu = mu_lor + 1; nu < Nd; ++nu) {
-                    int k = FmnIndex(mu_lor, nu);
+                for (int mu = 0; mu < Nd; ++mu)
+                  for (int nu = mu + 1; nu < Nd; ++nu) {
+                    int k = FmnIndex(mu, nu);
                     std::complex<double> fs_ij(
                         (*fmn_site)[k]()()(i, j).real(),
                         (*fmn_site)[k]()()(i, j).imag());
                     M(r, c) += clover_coeff * fs_ij *
-                               sm.isigma[mu_lor][nu](alpha, beta);
+                               sm.isigma[mu][nu](alpha, beta);
                   }
               }
             }
@@ -190,14 +184,13 @@ struct TXQCDSiteMatrixUtil {
     return out;
   }
 
-  // Per-flavor diagonal mass (preferred entry point).  mu rescales Delta.
+  // Per-flavor diagonal mass (preferred entry point).
   static void PrecomputeInverses(const SpinMatrices &sm,
                                   const std::array<RealD, TxqcdNf> &diag_mass,
                                   const AuxSiteArrays &aux,
                                   RealD csw,
                                   const CloverSiteArrays *clover,
-                                  std::vector<SiteMatrix> &inv,
-                                  RealD mu = 1.0) {
+                                  std::vector<SiteMatrix> &inv) {
     uint64_t nsites = aux.sig.size();
     inv.resize(nsites);
     // Per-site BuildSiteMatrix + 24×24 Eigen.inverse() are completely
@@ -213,7 +206,7 @@ struct TXQCDSiteMatrixUtil {
       }
       SiteMatrix M;
       BuildSiteMatrix(sm, diag_mass, aux.sig[x], aux.pi[x], aux.s[x],
-                      aux.p[x], aux.t[x], csw, fmn_ptr, M, mu);
+                      aux.p[x], aux.t[x], csw, fmn_ptr, M);
       inv[x] = M.inverse();
     });
   }
@@ -232,19 +225,17 @@ struct TXQCDSiteMatrixUtil {
                                const TSobj &t_site,
                                RealD csw,
                                const std::array<FmnSobj, 6> *fmn_site,
-                               SiteMatrix &M,
-                               RealD mu = 1.0) {
+                               SiteMatrix &M) {
     BuildSiteMatrix(sm, MassArray(diag_mass), sig_site, pi_site, s_site,
-                    p_site, t_site, csw, fmn_site, M, mu);
+                    p_site, t_site, csw, fmn_site, M);
   }
 
   static void PrecomputeInverses(const SpinMatrices &sm, RealD diag_mass,
                                   const AuxSiteArrays &aux,
                                   RealD csw,
                                   const CloverSiteArrays *clover,
-                                  std::vector<SiteMatrix> &inv,
-                                  RealD mu = 1.0) {
-    PrecomputeInverses(sm, MassArray(diag_mass), aux, csw, clover, inv, mu);
+                                  std::vector<SiteMatrix> &inv) {
+    PrecomputeInverses(sm, MassArray(diag_mass), aux, csw, clover, inv);
   }
 };
 

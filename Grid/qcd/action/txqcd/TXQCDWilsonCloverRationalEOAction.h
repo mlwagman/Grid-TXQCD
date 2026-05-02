@@ -28,14 +28,12 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
  public:
   typedef OneFlavourRationalParams Params;
 
-  // Per-flavor mass constructor.  mu rescales Delta in the inner
-  // TXQCDWilsonCloverFermionEO operator (M_TXQCD = M_QCD + mu*Delta) and the
-  // aux-field forces.  Default mu=1 reproduces the original action.
+  // Per-flavor mass constructor.
   TXQCDWilsonCloverRationalEOAction(GridCartesian &grid,
                               GridRedBlackCartesian &rbgrid,
                               const std::array<RealD, TxqcdNf> &mass,
-                              Params &p, RealD csw = 0.0, RealD mu = 1.0)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw), mu_(mu),
+                              Params &p, RealD csw = 0.0)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
         param(p), Phi(&rbgrid) {
     AlgRemez remez(param.lo, param.hi, param.precision);
     std::cout << GridLogMessage
@@ -55,10 +53,9 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
   // Backward-compat: degenerate scalar mass.
   TXQCDWilsonCloverRationalEOAction(GridCartesian &grid,
                               GridRedBlackCartesian &rbgrid,
-                              RealD mass, Params &p, RealD csw = 0.0,
-                              RealD mu = 1.0)
+                              RealD mass, Params &p, RealD csw = 0.0)
       : TXQCDWilsonCloverRationalEOAction(grid, rbgrid,
-            TXQCDSiteMatrixUtil::MassArray(mass), p, csw, mu) {}
+            TXQCDSiteMatrixUtil::MassArray(mass), p, csw) {}
 
   std::string action_name() override {
     return "TXQCDWilsonCloverRationalEOAction";
@@ -143,15 +140,12 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
       EOp.MooeeInvDag(tmp_e, Z_e); // Mee^{-1}† Moe† Y_k
 
       // ---- Aux-field forces ----
-      // Chain-rule mu factor: dM/daux = mu * dDelta/daux, so the aux-force
-      // residue is ak*mu (one factor of mu per differentiation of Delta).
-      const RealD ak_aux = ak * mu_;
 
       // Odd-site aux force: bilinear(Y, X) on odd grid.
-      AccumulateAuxForce(dSdU, ak_aux, Y, X, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForce(dSdU, ak, Y, X, g5, inv_sqrt2, Id, G5);
 
       // Even-site aux force: bilinear(Z_e, W_e) on even grid.
-      AccumulateAuxForce(dSdU, ak_aux, Z_e, W_e, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForce(dSdU, ak, Z_e, W_e, g5, inv_sqrt2, Id, G5);
 
       // ---- Gauge force (hopping) ----
       gforce = Zero();
@@ -308,9 +302,8 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
  private:
   TXQCDWilsonCloverFermionEO MakeEOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
-    return TXQCDWilsonCloverFermionEO(
-        Unc.U, grid_, rbgrid_, mass_, Unc.sigma, Unc.pi, Unc.s, Unc.p, Unc.t,
-        csw_, TXQCDWilsonCloverFermionEO::DefaultImplParams(), mu_);
+    return TXQCDWilsonCloverFermionEO(Unc.U, grid_, rbgrid_, mass_, Unc.sigma,
+                                Unc.pi, Unc.s, Unc.p, Unc.t, csw_);
   }
 
   void ApplyRational(TXQCDCloverSchurOp &SchurOp, const MultiShiftFunction &rat,
@@ -426,7 +419,6 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
   GridRedBlackCartesian &rbgrid_;
   std::array<RealD, TxqcdNf> mass_;
   RealD csw_;
-  RealD mu_;
   Params &param;
   MultiShiftFunction PowerHalf;
   MultiShiftFunction PowerNegHalf;

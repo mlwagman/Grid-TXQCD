@@ -29,16 +29,15 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
 
   // Per-flavor mass constructor (for non-degenerate Nf>2).
   TXQCDLogDetCloverEOAction(GridCartesian &grid, GridRedBlackCartesian &rbgrid,
-                      const std::array<RealD, TxqcdNf> &mass, RealD csw = 0.0,
-                      RealD mu = 1.0)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw), mu_(mu) {
+                      const std::array<RealD, TxqcdNf> &mass, RealD csw = 0.0)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw) {
     for (int a = 0; a < TxqcdNf; ++a) diag_mass_[a] = 4.0 + mass_[a];
   }
 
   // Backward-compat: degenerate scalar mass.
   TXQCDLogDetCloverEOAction(GridCartesian &grid, GridRedBlackCartesian &rbgrid,
-                      RealD mass, RealD csw = 0.0, RealD mu = 1.0)
-      : TXQCDLogDetCloverEOAction(grid, rbgrid, SMU::MassArray(mass), csw, mu) {}
+                      RealD mass, RealD csw = 0.0)
+      : TXQCDLogDetCloverEOAction(grid, rbgrid, SMU::MassArray(mass), csw) {}
 
   std::string action_name() override { return "TXQCDLogDetCloverEOAction"; }
   std::string LogParameters() override {
@@ -46,7 +45,7 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     os << GridLogMessage << "[" << action_name() << "] mass=";
     for (int a = 0; a < TxqcdNf; ++a)
       os << (a ? "," : "{") << mass_[a];
-    os << "} mu=" << mu_ << std::endl;
+    os << "}" << std::endl;
     return os.str();
   }
 
@@ -70,7 +69,7 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       }
       SMU::BuildSiteMatrix(sm_, diag_mass_, aux.sig[x], aux.pi[x],
                           aux.s[x], aux.p[x], aux.t[x],
-                          csw_, fmn_ptr, M, mu_);
+                          csw_, fmn_ptr, M);
       auto lu = M.partialPivLu();
       auto d = lu.determinant();
       partial[thread_num(0)] += std::log(std::abs(d));
@@ -116,7 +115,7 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       }
       SMU::BuildSiteMatrix(sm_, diag_mass_, aux.sig[x], aux.pi[x],
                           aux.s[x], aux.p[x], aux.t[x],
-                          csw_, fmn_ptr, M, mu_);
+                          csw_, fmn_ptr, M);
       Inv = M.inverse();
 
       // sigma force: F_{ab} = -Σ_{α,i} Inv_{(a,α,i),(b,α,i)}
@@ -225,28 +224,6 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       }
     });
 
-    // Chain-rule mu factor on aux forces: dM/daux = mu * dDelta/daux, so
-    // dS/daux = -mu * Tr(M^-1 dDelta/daux).  Clover gauge force (computed
-    // below) is part of M_W and is NOT scaled by mu.
-    if (mu_ != 1.0) {
-      thread_for(x, nsites, {
-        for (int a = 0; a < TxqcdNf; ++a)
-          for (int b = 0; b < TxqcdNf; ++b) {
-            sig_force[x]()()(a, b) = sig_force[x]()()(a, b) * mu_;
-            pi_force[x]()()(a, b)  = pi_force[x]()()(a, b)  * mu_;
-          }
-        for (int i = 0; i < Nc; ++i)
-          for (int j = 0; j < Nc; ++j) {
-            s_force[x]()()(i, j) = s_force[x]()()(i, j) * mu_;
-            p_force[x]()()(i, j) = p_force[x]()()(i, j) * mu_;
-            for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
-              for (int nu = 0; nu < Nd; ++nu)
-                t_force[x]()(mu_lor, nu)(i, j) =
-                    t_force[x]()(mu_lor, nu)(i, j) * mu_;
-          }
-      });
-    }
-
     LatticeSigmaField F_sig_e(&rbgrid_);
     vectorizeFromLexOrdArray(sig_force, F_sig_e);
     F_sig_e.Checkerboard() = Even;
@@ -324,7 +301,6 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
   GridRedBlackCartesian &rbgrid_;
   std::array<RealD, TxqcdNf> mass_;
   std::array<RealD, TxqcdNf> diag_mass_;
-  RealD mu_;
   RealD csw_;
   SMU::SpinMatrices sm_;
   std::vector<LatticeColourMatrix> FS_;

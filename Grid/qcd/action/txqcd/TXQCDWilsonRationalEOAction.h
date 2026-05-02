@@ -27,13 +27,10 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
  public:
   typedef OneFlavourRationalParams Params;
 
-  // mu rescales Delta in the inner TXQCDWilsonFermionEO operator and the
-  // aux-field forces.  Default mu=1 reproduces the original action.
   TXQCDWilsonRationalEOAction(GridCartesian &grid,
                               GridRedBlackCartesian &rbgrid,
-                              RealD mass, Params &p, RealD mu = 1.0)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), mu_(mu),
-        param(p), Phi(&rbgrid) {
+                              RealD mass, Params &p)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), param(p), Phi(&rbgrid) {
     AlgRemez remez(param.lo, param.hi, param.precision);
     std::cout << GridLogMessage
               << "[TXQCDWilsonRationalEO] degree " << param.degree
@@ -131,14 +128,11 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
 
       // ---- Aux-field forces ----
 
-      // Chain-rule mu factor on aux forces: dM/daux = mu * dDelta/daux.
-      const RealD ak_aux = ak * mu_;
-
       // Odd-site aux force: bilinear(Y, X) on odd grid.
-      AccumulateAuxForce(dSdU, ak_aux, Y, X, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForce(dSdU, ak, Y, X, g5, inv_sqrt2, Id, G5);
 
       // Even-site aux force: bilinear(Z_e, W_e) on even grid.
-      AccumulateAuxForce(dSdU, ak_aux, Z_e, W_e, g5, inv_sqrt2, Id, G5);
+      AccumulateAuxForce(dSdU, ak, Z_e, W_e, g5, inv_sqrt2, Id, G5);
 
       // ---- Gauge force ----
       // MpcDeriv(Y, X) + MpcDagDeriv(X, Y), per flavor.
@@ -178,9 +172,8 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
  private:
   TXQCDWilsonFermionEO MakeEOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
-    return TXQCDWilsonFermionEO(
-        Unc.U, grid_, rbgrid_, mass_, Unc.sigma, Unc.pi, Unc.s, Unc.p, Unc.t,
-        TXQCDWilsonFermionEO::DefaultImplParams(), mu_);
+    return TXQCDWilsonFermionEO(Unc.U, grid_, rbgrid_, mass_, Unc.sigma,
+                                Unc.pi, Unc.s, Unc.p, Unc.t);
   }
 
   void ApplyRational(TXQCDSchurOp &SchurOp, const MultiShiftFunction &rat,
@@ -288,7 +281,6 @@ class TXQCDWilsonRationalEOAction : public Action<TXQCDField> {
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
-  RealD mu_;
   Params &param;
   MultiShiftFunction PowerHalf;
   MultiShiftFunction PowerNegHalf;

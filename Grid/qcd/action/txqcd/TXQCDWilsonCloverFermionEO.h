@@ -68,10 +68,9 @@ class TXQCDWilsonCloverFermionEO {
                        LatticeSigmaField &sigma, LatticePiField &pi,
                        LatticeSFieldC &s, LatticePFieldC &p,
                        LatticeTField &t, RealD csw = 0.0,
-                       typename Impl::ImplParams impl_p = DefaultImplParams(),
-                       RealD mu = 1.0)
+                       typename Impl::ImplParams impl_p = DefaultImplParams())
       : grid_(grid), rbgrid_(rbgrid), mass_(mass),
-        csw_(csw), mu_(mu),
+        csw_(csw),
         Dw_(Umu, grid, rbgrid, 0.0, impl_p),
         Umu_(Umu),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t),
@@ -97,11 +96,10 @@ class TXQCDWilsonCloverFermionEO {
                        LatticeSigmaField &sigma, LatticePiField &pi,
                        LatticeSFieldC &s, LatticePFieldC &p,
                        LatticeTField &t, RealD csw = 0.0,
-                       typename Impl::ImplParams impl_p = DefaultImplParams(),
-                       RealD mu = 1.0)
+                       typename Impl::ImplParams impl_p = DefaultImplParams())
       : TXQCDWilsonCloverFermionEO(Umu, grid, rbgrid,
                                    SMU::MassArray(mass),
-                                   sigma, pi, s, p, t, csw, impl_p, mu) {}
+                                   sigma, pi, s, p, t, csw, impl_p) {}
 
   ~TXQCDWilsonCloverFermionEO() {
     PrintTimers("destructor");
@@ -142,7 +140,6 @@ class TXQCDWilsonCloverFermionEO {
   }
 
   // ----- Full-grid operator (for testing / comparison) -----
-  // M = D_W + mu * Delta + Clover.  Default mu=1 reproduces the original.
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     // Dw_ has mass=0, so Dw_.M gives 4*I + Wilson_hop; add per-flavor mass.
     for (int a = 0; a < TxqcdNf; ++a) {
@@ -151,7 +148,7 @@ class TXQCDWilsonCloverFermionEO {
     }
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
-    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + mu_ * d.f[a];
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
   }
 
   void Mdag(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -172,7 +169,7 @@ class TXQCDWilsonCloverFermionEO {
     }
     TXQCDFermionNf d(in.Grid());
     ApplyDeltaCB(cb, in, d);
-    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + mu_ * d.f[a];
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
     if (csw_ != 0.0) {
       auto &fs = (cb == Even) ? FS_e_ : FS_o_;
       TXQCDFermionNf cl(in.Grid());
@@ -233,7 +230,6 @@ class TXQCDWilsonCloverFermionEO {
   const std::array<RealD, TxqcdNf> &DiagMass() const { return diag_mass_; }
   const std::array<RealD, TxqcdNf> &Mass() const { return mass_; }
   RealD Csw() const { return csw_; }
-  RealD Mu() const { return mu_; }
   const GaugeField &Gauge() const { return Umu_; }
   const std::vector<LatticeColourMatrix> &FieldStrengths() const {
     return FS_;
@@ -245,7 +241,6 @@ class TXQCDWilsonCloverFermionEO {
   std::array<RealD, TxqcdNf> mass_;
   std::array<RealD, TxqcdNf> diag_mass_;
   RealD csw_;
-  RealD mu_;
   WilsonOp Dw_;
   GaugeField &Umu_;
 
@@ -312,11 +307,11 @@ class TXQCDWilsonCloverFermionEO {
     if (csw_ != 0.0) {
       auto cl_e = SMU::UnvectorizeClover(FS_e_);
       auto cl_o = SMU::UnvectorizeClover(FS_o_);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_, mu_);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_, mu_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_);
     } else {
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_, mu_);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_, mu_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_);
     }
     PackInverseToSimd(inv_even_, inv_simd_e_, Even);
     PackInverseToSimd(inv_odd_,  inv_simd_o_, Odd);

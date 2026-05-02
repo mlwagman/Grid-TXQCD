@@ -23,9 +23,8 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
   static constexpr int kDim = TxqcdNf * Ns * Nc;  // 24
 
   TXQCDLogDetEOAction(GridCartesian &grid, GridRedBlackCartesian &rbgrid,
-                      RealD mass, RealD mu = 1.0)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
-        mu_(mu) {
+                      RealD mass)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass) {
     PrecomputeSpinMatrices();
   }
 
@@ -33,7 +32,7 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
   std::string LogParameters() override {
     std::stringstream os;
     os << GridLogMessage << "[" << action_name() << "] mass=" << mass_
-       << " mu=" << mu_ << std::endl;
+       << std::endl;
     return os.str();
   }
 
@@ -193,28 +192,6 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
       }
     });
 
-    // Chain-rule mu factor: dM/daux = mu * dDelta/daux, so dS/daux =
-    // -mu * Tr(M^-1 dDelta/daux).  The thread_for above computed
-    // -Tr(M^-1 dDelta/daux); multiply each force by mu_.
-    if (mu_ != 1.0) {
-      thread_for(x, nsites, {
-        for (int a = 0; a < TxqcdNf; ++a)
-          for (int b = 0; b < TxqcdNf; ++b) {
-            sig_force[x]()()(a, b) = sig_force[x]()()(a, b) * mu_;
-            pi_force[x]()()(a, b)  = pi_force[x]()()(a, b)  * mu_;
-          }
-        for (int i = 0; i < Nc; ++i)
-          for (int j = 0; j < Nc; ++j) {
-            s_force[x]()()(i, j) = s_force[x]()()(i, j) * mu_;
-            p_force[x]()()(i, j) = p_force[x]()()(i, j) * mu_;
-            for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
-              for (int nu = 0; nu < Nd; ++nu)
-                t_force[x]()(mu_lor, nu)(i, j) =
-                    t_force[x]()(mu_lor, nu)(i, j) * mu_;
-          }
-      });
-    }
-
     // Vectorize forces back to RB even fields and promote to full grid.
     LatticeSigmaField F_sig_e(&rbgrid_);
     vectorizeFromLexOrdArray(sig_force, F_sig_e);
@@ -255,7 +232,6 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
   RealD diag_mass_;
-  RealD mu_;
 
   Eigen::Matrix<std::complex<double>, Ns, Ns> gamma5_mat_;
   std::array<std::array<Eigen::Matrix<std::complex<double>, Ns, Ns>, Nd>, Nd>
@@ -347,8 +323,8 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
             for (int i = 0; i < Nc; ++i) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = b * Ns * Nc + beta * Nc + i;
-              if (alpha == beta) M(r, c) += mu_ * sig_ab;
-              M(r, c) += mu_ * pi_ab * g5;
+              if (alpha == beta) M(r, c) += sig_ab;
+              M(r, c) += pi_ab * g5;
             }
           }
       }
@@ -365,14 +341,14 @@ class TXQCDLogDetEOAction : public Action<TXQCDField> {
             for (int beta = 0; beta < Ns; ++beta) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = a * Ns * Nc + beta * Nc + j;
-              if (alpha == beta) M(r, c) += mu_ * inv_sqrt2 * s_ij;
-              M(r, c) += mu_ * inv_sqrt2 * p_ij * gamma5_mat_(alpha, beta);
-              for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
-                for (int nu = mu_lor + 1; nu < Nd; ++nu) {
+              if (alpha == beta) M(r, c) += inv_sqrt2 * s_ij;
+              M(r, c) += inv_sqrt2 * p_ij * gamma5_mat_(alpha, beta);
+              for (int mu = 0; mu < Nd; ++mu)
+                for (int nu = mu + 1; nu < Nd; ++nu) {
                   std::complex<double> t_ij(
-                      t_site()(mu_lor, nu)(i, j).real(),
-                      t_site()(mu_lor, nu)(i, j).imag());
-                  M(r, c) += mu_ * t_ij * isigma_mat_[mu_lor][nu](alpha, beta);
+                      t_site()(mu, nu)(i, j).real(),
+                      t_site()(mu, nu)(i, j).imag());
+                  M(r, c) += t_ij * isigma_mat_[mu][nu](alpha, beta);
                 }
             }
         }

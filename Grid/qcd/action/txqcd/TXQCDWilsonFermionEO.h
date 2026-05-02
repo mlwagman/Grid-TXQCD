@@ -42,10 +42,8 @@ class TXQCDWilsonFermionEO {
                        LatticeSigmaField &sigma, LatticePiField &pi,
                        LatticeSFieldC &s, LatticePFieldC &p,
                        LatticeTField &t,
-                       typename Impl::ImplParams impl_p = DefaultImplParams(),
-                       RealD mu = 1.0)
+                       typename Impl::ImplParams impl_p = DefaultImplParams())
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), diag_mass_(4.0 + mass),
-        mu_(mu),
         Dw_(Umu, grid, rbgrid, mass, impl_p),
         sigma_(sigma), pi_(pi), s_(s), p_(p), t_(t),
         sigma_e_(&rbgrid), sigma_o_(&rbgrid),
@@ -63,12 +61,11 @@ class TXQCDWilsonFermionEO {
   }
 
   // ----- Full-grid operator (for testing / comparison) -----
-  // M = D_W + mu * Delta.  Default mu=1 reproduces the original operator.
   void M(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     for (int a = 0; a < TxqcdNf; ++a) Dw_.M(in.f[a], out.f[a]);
     TXQCDFermionNf d(in.Grid());
     ApplyDelta(sigma_, pi_, s_, p_, t_, in, d);
-    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + mu_ * d.f[a];
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
   }
 
   void Mdag(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -81,7 +78,7 @@ class TXQCDWilsonFermionEO {
 
   // ----- Even-odd components -----
 
-  // Mooee: (4+m)*in + mu * Δ(x)*in on the input's checkerboard.
+  // Mooee: (4+m)*in + Δ(x)*in on the input's checkerboard.
   void Mooee(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     int cb = in.f[0].Checkerboard();
     for (int a = 0; a < TxqcdNf; ++a) {
@@ -90,7 +87,7 @@ class TXQCDWilsonFermionEO {
     }
     TXQCDFermionNf d(in.Grid());
     ApplyDeltaCB(cb, in, d);
-    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + mu_ * d.f[a];
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = out.f[a] + d.f[a];
   }
 
   void MooeeDag(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
@@ -143,14 +140,12 @@ class TXQCDWilsonFermionEO {
   // Expose for force computation.
   WilsonOp &Wilson() { return Dw_; }
   RealD DiagMass() const { return diag_mass_; }
-  RealD Mu() const { return mu_; }
 
  private:
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
   RealD diag_mass_;
-  RealD mu_;
   WilsonOp Dw_;
 
   // Aux field references (borrowed from TXQCDField, updated in place by HMC).
@@ -253,10 +248,10 @@ class TXQCDWilsonFermionEO {
     // col = b*Ns*Nc + beta*Nc + j
     for (int a = 0; a < TxqcdNf; ++a) {
       for (int b = 0; b < TxqcdNf; ++b) {
-        // sigma: δ(i,j) * δ(α,β) * σ(a,b)  [scaled by mu_]
+        // sigma: δ(i,j) * δ(α,β) * σ(a,b)
         std::complex<double> sig_ab(sig_site()()(a, b).real(),
                                     sig_site()()(a, b).imag());
-        // pi: δ(i,j) * γ₅(α,β) * π(a,b)  [scaled by mu_]
+        // pi: δ(i,j) * γ₅(α,β) * π(a,b)
         std::complex<double> pi_ab(pi_site()()(a, b).real(),
                                    pi_site()()(a, b).imag());
         for (int alpha = 0; alpha < Ns; ++alpha) {
@@ -265,15 +260,15 @@ class TXQCDWilsonFermionEO {
             for (int i = 0; i < Nc; ++i) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = b * Ns * Nc + beta * Nc + i;
-              if (alpha == beta) M(r, c) += mu_ * sig_ab;
-              M(r, c) += mu_ * pi_ab * g5;
+              if (alpha == beta) M(r, c) += sig_ab;
+              M(r, c) += pi_ab * g5;
             }
           }
         }
       }
     }
 
-    // Color sector: shared across flavors (δ(a,b) implicit).  All scaled by mu_.
+    // Color sector: shared across flavors (δ(a,b) implicit).
     for (int a = 0; a < TxqcdNf; ++a) {
       for (int i = 0; i < Nc; ++i) {
         for (int j = 0; j < Nc; ++j) {
@@ -286,16 +281,16 @@ class TXQCDWilsonFermionEO {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = a * Ns * Nc + beta * Nc + j;
               // s term: δ(α,β) * s(i,j)/√2
-              if (alpha == beta) M(r, c) += mu_ * inv_sqrt2 * s_ij;
+              if (alpha == beta) M(r, c) += inv_sqrt2 * s_ij;
               // p term: γ₅(α,β) * p(i,j)/√2
-              M(r, c) += mu_ * inv_sqrt2 * p_ij * gamma5_mat_(alpha, beta);
+              M(r, c) += inv_sqrt2 * p_ij * gamma5_mat_(alpha, beta);
               // tensor term: Σ_{μ<ν} t_{μν}(i,j) * (iσ_{μν})(α,β)
-              for (int mu_lor = 0; mu_lor < Nd; ++mu_lor)
-                for (int nu = mu_lor + 1; nu < Nd; ++nu) {
+              for (int mu = 0; mu < Nd; ++mu)
+                for (int nu = mu + 1; nu < Nd; ++nu) {
                   std::complex<double> t_ij(
-                      t_site()(mu_lor, nu)(i, j).real(),
-                      t_site()(mu_lor, nu)(i, j).imag());
-                  M(r, c) += mu_ * t_ij * isigma_mat_[mu_lor][nu](alpha, beta);
+                      t_site()(mu, nu)(i, j).real(),
+                      t_site()(mu, nu)(i, j).imag());
+                  M(r, c) += t_ij * isigma_mat_[mu][nu](alpha, beta);
                 }
             }
           }

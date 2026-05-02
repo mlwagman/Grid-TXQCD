@@ -47,14 +47,10 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
  public:
   typedef OneFlavourRationalParams Params;
 
-  // mu rescales Delta in the inner TXQCDWilsonOp and the aux-field forces.
-  // Default mu=1 reproduces the original action.
   TXQCDWilsonRationalPseudoFermionAction(GridCartesian &grid,
                                          GridRedBlackCartesian &rbgrid,
-                                         RealD mass, Params &p,
-                                         RealD mu = 1.0)
-      : grid_(grid), rbgrid_(rbgrid), mass_(mass), mu_(mu),
-        param(p), Phi(&grid) {
+                                         RealD mass, Params &p)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), param(p), Phi(&grid) {
     AlgRemez remez(param.lo, param.hi, param.precision);
     std::cout << GridLogMessage
               << "[TXQCDWilsonRational] generating degree " << param.degree
@@ -138,9 +134,6 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
 
     for (int k = 0; k < Npole; ++k) {
       const RealD ak = PowerNegHalf.residues[k];
-      // Chain-rule mu factor on aux forces: dM/daux = mu * dDelta/daux.
-      // Gauge force (Wilson hopping) is NOT scaled by mu.
-      const RealD ak_aux = ak * mu_;
 
       TXQCDFermionNf &X = Xk[k];
       TXQCDFermionNf Y(&grid_);
@@ -150,7 +143,7 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
       {
         auto G = FlavorBilinear(Y, X);
         LatticeSigmaField F = HermitianFlavorForce(G);
-        dSdU.sigma = dSdU.sigma + ak_aux * F;
+        dSdU.sigma = dSdU.sigma + ak * F;
       }
       // pi
       {
@@ -158,21 +151,21 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
         for (int a = 0; a < TxqcdNf; ++a) g5X.f[a] = g5 * X.f[a];
         auto G = FlavorBilinear(Y, g5X);
         LatticePiField F = HermitianFlavorForce(G);
-        dSdU.pi = dSdU.pi + ak_aux * F;
+        dSdU.pi = dSdU.pi + ak * F;
       }
       // s
       {
         auto G = ColorBilinearSpinOp(Y, X, Id);
         G = inv_sqrt2 * G;
         LatticeSFieldC F = HermitianColorForce(G);
-        dSdU.s = dSdU.s + ak_aux * F;
+        dSdU.s = dSdU.s + ak * F;
       }
       // p
       {
         auto G = ColorBilinearSpinOp(Y, X, G5);
         G = inv_sqrt2 * G;
         LatticePFieldC F = HermitianColorForce(G);
-        dSdU.p = dSdU.p + ak_aux * F;
+        dSdU.p = dSdU.p + ak * F;
       }
       // t_{mu,nu}
       for (int mu = 0; mu < Nd; ++mu) {
@@ -182,14 +175,13 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
           LatticeSFieldC Ft = HermitianColorForce(Gt);
           autoView(dst, dSdU.t, CpuWrite);
           autoView(src, Ft, CpuRead);
-          const RealD ak_aux_local = ak_aux;
           thread_for(ss, grid_.oSites(), {
             for (int i = 0; i < Nc; ++i) {
               for (int j = 0; j < Nc; ++j) {
                 dst[ss]()(mu, nu)(i, j) =
-                    dst[ss]()(mu, nu)(i, j) + ak_aux_local * src[ss]()()(i, j);
+                    dst[ss]()(mu, nu)(i, j) + ak * src[ss]()()(i, j);
                 dst[ss]()(nu, mu)(i, j) =
-                    dst[ss]()(nu, mu)(i, j) - ak_aux_local * src[ss]()()(i, j);
+                    dst[ss]()(nu, mu)(i, j) - ak * src[ss]()()(i, j);
               }
             }
           });
@@ -216,7 +208,7 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
   TXQCDWilsonOp MakeOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
     return TXQCDWilsonOp(Unc.U, grid_, rbgrid_, mass_, Unc.sigma, Unc.pi,
-                         Unc.s, Unc.p, Unc.t, mu_);
+                         Unc.s, Unc.p, Unc.t);
   }
 
   // Apply a rational function f(M^dag M) given by a MultiShiftFunction:
@@ -240,7 +232,6 @@ class TXQCDWilsonRationalPseudoFermionAction : public Action<TXQCDField> {
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
   RealD mass_;
-  RealD mu_;
   Params &param;
   MultiShiftFunction PowerHalf;
   MultiShiftFunction PowerNegHalf;
