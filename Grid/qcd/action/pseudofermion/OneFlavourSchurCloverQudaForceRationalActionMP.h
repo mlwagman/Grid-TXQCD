@@ -78,13 +78,19 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // For Path B (QUDA force kernel): keep solutions resident so
     // computeCloverForceQuda consumes them directly via
     // use_resident_solution=1 — bypasses host-side X pack/unpack.
-    quda_ms_->solve_rb_even(PhiEven, MPhi_k, /*make_resident=*/quda_force_kernel);
+    // make_resident_solution=1 in QUDA skips host download of multishift
+    // solutions — MPhi_k host buffers come back as zero.  We need them to
+    // be written either way (a) so Path A (Grid deriv) sees them and (b)
+    // so we can pack a host X buffer for computeCloverForceQuda below.
+    quda_ms_->solve_rb_even(PhiEven, MPhi_k, /*make_resident=*/false);
 
     // ------------------------------------------------------------------
-    // Path A: Grid deriv chain (no QUDA force).  Same as the EVEN action's
-    // base deriv() — validates the EVEN-parity multishift in isolation.
+    // Path A: Grid deriv chain.  Always run when QUDA_FORCE_KERNEL_COMPARE
+    // is set, so we can compare to Path B's force in the same call and
+    // empirically find the QUDA→Grid force normalization.
     // ------------------------------------------------------------------
-    if (std::getenv("QUDA_FORCE_KERNEL") == nullptr) {
+    bool path_a_compare = std::getenv("QUDA_FORCE_KERNEL_COMPARE") != nullptr;
+    if (std::getenv("QUDA_FORCE_KERNEL") == nullptr || path_a_compare) {
       SchurDifferentiableOperator<ImplD> Mpc(FermOp);
       FermionField X(fcbgrid), Y(fcbgrid);
       GaugeField tmp(ggrid);
@@ -106,8 +112,12 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
         FermOp.MooDeriv(tmp, Z_o, W_o, DaggerNo);   dSdU = dSdU + ak * tmp;
         FermOp.MooDeriv(tmp, W_o, Z_o, DaggerYes);  dSdU = dSdU + ak * tmp;
       }
-      return;
+      if (!path_a_compare) return;  // Path-A-only mode, done.
+      std::cout << GridLogMessage
+                << "[QudaForce] PathA dSdU norm2=" << norm2(dSdU) << std::endl;
     }
+    GaugeField dSdU_pathA(ggrid);
+    if (path_a_compare) dSdU_pathA = dSdU;
     // ------------------------------------------------------------------
     // Path B: QUDA's computeCloverForceQuda — fused force routine.
     // ------------------------------------------------------------------
@@ -139,6 +149,26 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                   V_eo * 24 * sizeof(double));
       x_ptrs[k] = x_bufs[k].data();
     }
+    // X=0 diagnostic: if QUDA_FORCE_DBG_XZERO=1, force all X buffers to zero.
+    // Result tells us whether the 1e+274 garbage in mom_buf is X-dependent
+    // (real numerical pathology) or X-independent (uninitialized state).
+    if (std::getenv("QUDA_FORCE_DBG_XZERO")) {
+      for (int k = 0; k < Npole; ++k) std::fill(x_bufs[k].begin(), x_bufs[k].end(), 0.0);
+      std::cout << GridLogMessage
+                << "[QudaForce] DBG: zeroed X buffers (QUDA_FORCE_DBG_XZERO=1)" << std::endl;
+    }
+    // Always print X norm to verify host buffers are populated.
+    {
+      double x_norm0 = 0.0;
+      for (auto v : x_bufs[0]) x_norm0 += v*v;
+      std::cout << GridLogMessage
+                << "[QudaForce] X[0] host buffer norm2=" << x_norm0
+                << " V_eo=" << V_eo << " size=" << x_bufs[0].size()
+                << " first6=" << x_bufs[0][0] << " " << x_bufs[0][1] << " "
+                << x_bufs[0][2] << " " << x_bufs[0][3] << " " << x_bufs[0][4]
+                << " " << x_bufs[0][5]
+                << std::endl;
+    }
 
     // Force / momentum buffer: QUDA writes ASQTAD_MOM_LINKS, reconstruct=10
     // (anti-Hermitian traceless 3×3 packed in 10 reals per site/dir).
@@ -159,7 +189,11 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     int saved_use_resident = inv_param.use_resident_solution;
     int saved_compute_clover = inv_param.compute_clover;
     int saved_compute_clover_inv = inv_param.compute_clover_inverse;
-    inv_param.use_resident_solution = 1;
+    // Use host X transport — we have solid host MPhi_k from solve_rb_even
+    // (make_resident=0 ensures host download is performed).  use_resident
+    // path does not work in our setup (solutionResident populated by the
+    // CG appears to be in the wrong layout/parity for computeCloverForceQuda).
+    inv_param.use_resident_solution = 0;
     // Clover is already loaded (resident) from the multishift's loadCloverQuda.
     // computeCloverForceQuda doesn't need to (re)compute it.  Match chroma:
     inv_param.compute_clover = 0;
@@ -204,18 +238,42 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // is unused in the symmetric clover case).  Pass a dummy.
     std::vector<void *> p_ptrs(Npole, nullptr);
 
-    computeCloverForceQuda(mom_buf.data(),
-                           /*dt=*/1.0,
-                           x_ptrs.data(),
-                           p_ptrs.data(),
-                           coeff.data(),
-                           kappa2,
-                           ck,
-                           Npole,
-                           /*multiplicity=*/1.0,
-                           /*gauge=*/nullptr,
-                           &gauge_param,
-                           &inv_param);
+    // QUDA upstream (commit ~? in /home/agrebe/src/quda) has a bug in
+    // computeCloverForceQuda for nvector > 1: the host-X wrap step does
+    //   for(i=0..nvector-1) { qParam.x[0] /= 2; ... }
+    // — qParam.x[0] is mutated cumulatively, so iteration 1 wraps with
+    // x[0]/4, iteration 2 with x[0]/8, etc.  Result: only iteration 0
+    // reads valid X (and even that with reduced volume after the pre-loop
+    // `x[0] /= 2` is reapplied), all later iterations wrap garbage memory.
+    // (Chroma's QUDA fork has a different ColorSpinorParam ctor pattern
+    //  per loop iteration, no mutation, so chroma is unaffected.)
+    //
+    // Workaround: call computeCloverForceQuda Npole times with nvector=1.
+    // First call has multiplicity=1.0 (contributes the σ_μν·F_μν trace
+    // once); later calls multiplicity=0.0 (skip duplicate trace).
+    // First call has overwrite_mom=1; later calls overwrite_mom=0 to
+    // accumulate.
+    // QUDA_FORCE_DBG_NOTRACE: zero multiplicity → no σ trace, X-only force.
+    bool dbg_notrace = std::getenv("QUDA_FORCE_DBG_NOTRACE") != nullptr;
+    for (int k = 0; k < Npole; ++k) {
+      gauge_param.overwrite_mom = (k == 0) ? 1 : 0;
+      double mult = (k == 0 && !dbg_notrace) ? 1.0 : 0.0;
+      void *xp = x_ptrs[k];
+      void *pp = p_ptrs[k];
+      double cf = coeff[k];
+      computeCloverForceQuda(mom_buf.data(),
+                             /*dt=*/1.0,
+                             &xp,
+                             &pp,
+                             &cf,
+                             kappa2,
+                             ck,
+                             /*nvector=*/1,
+                             /*multiplicity=*/mult,
+                             /*gauge=*/nullptr,
+                             &gauge_param,
+                             &inv_param);
+    }
     inv_param.use_resident_solution = saved_use_resident;
     inv_param.compute_clover = saved_compute_clover;
     inv_param.compute_clover_inverse = saved_compute_clover_inv;
@@ -273,6 +331,27 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
       lex_ptrs[mu] = dir_lex_18[mu].data();
     }
     Quda::lex_buffers_to_gauge(lex_ptrs, dSdU);
+    std::cout << GridLogMessage
+              << "[QudaForce] κ=" << kappa
+              << " norm2(PathB dSdU pre-scale)=" << norm2(dSdU)
+              << std::endl;
+    if (path_a_compare) {
+      // Compute the empirical scale factor PathA / PathB.
+      // Use both norm2 ratio and inner product to detect direction & sign.
+      double n2A = norm2(dSdU_pathA);
+      double n2B = norm2(dSdU);
+      // inner = Re Tr ∫ A^† B dx — for anti-Hermitian fields, real-valued.
+      auto inner = innerProduct(dSdU_pathA, dSdU);
+      std::cout << GridLogMessage
+                << "[QudaForce] |PathA|²=" << n2A
+                << " |PathB|²=" << n2B
+                << " ⟨A,B⟩=(" << real(inner) << "," << imag(inner) << ")"
+                << " => factor PathA/PathB ≈ ⟨A,B⟩/|B|² = " << real(inner)/n2B
+                << " (κ²=" << kappa*kappa << " 1/(8κ²)=" << 1.0/(8.0*kappa*kappa) << ")"
+                << std::endl;
+      dSdU = dSdU_pathA;  // use PathA's correct force in compare mode
+      return;
+    }
   }
 
  private:
