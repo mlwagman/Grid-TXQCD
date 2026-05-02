@@ -193,6 +193,11 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     inv_param.cuda_prec_sloppy            = QUDA_DOUBLE_PRECISION;
     inv_param.cuda_prec_refinement_sloppy = QUDA_DOUBLE_PRECISION;
     inv_param.cuda_prec_precondition      = QUDA_DOUBLE_PRECISION;
+    QudaGammaBasis saved_basis = inv_param.gamma_basis;
+    if (std::getenv("QUDA_FORCE_DBG_UKQCD"))
+      inv_param.gamma_basis = QUDA_UKQCD_GAMMA_BASIS;
+    else if (std::getenv("QUDA_FORCE_DBG_CHIRAL"))
+      inv_param.gamma_basis = QUDA_CHIRAL_GAMMA_BASIS;
     inv_param.clover_cuda_prec_sloppy            = QUDA_DOUBLE_PRECISION;
     inv_param.clover_cuda_prec_refinement_sloppy = QUDA_DOUBLE_PRECISION;
     inv_param.clover_cuda_prec_precondition      = QUDA_DOUBLE_PRECISION;
@@ -236,13 +241,13 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     for (int k = 0; k < Npole; ++k) coeff[k] = PowerNegHalf.residues[k];
 
     const double kappa = inv_param.kappa;
-    const double kappa2 = -kappa * kappa;
-    // ck = -κ·csw/8 (negative) — empirically gives cos(Ta(A),B)≈0.897 with
-    // multiplicity=0.  Positive ck (as in chroma's k_csw_ov_8 in TM force)
-    // collapses cos to -0.085.  The sign on ferm_epsilon's first component
-    // (2·ck·coeff·dt) determines σ-Oprod direction.  Empirically negative
-    // matches Grid's MeeDeriv/MooDeriv convention here.
-    const double ck = -inv_param.clover_csw * kappa / 8.0;
+    // QUDA_FORCE_DBG_K2_ZERO=1 → kappa2=0 (kills Wilson-hop force_coeff,
+    // keeps σ-Oprod-A via ferm_epsilon[0]).
+    // QUDA_FORCE_DBG_CK_ZERO=1 → ck=0 (kills σ-Oprod completely).
+    const double kappa2 = std::getenv("QUDA_FORCE_DBG_K2_ZERO") ? 0.0
+                                                                : -kappa * kappa;
+    const double ck = std::getenv("QUDA_FORCE_DBG_CK_ZERO") ? 0.0
+                                                            : -inv_param.clover_csw * kappa / 8.0;
 
     // Need a flat host gauge buffer too — pass the same one that's loaded
     // in QUDA (resident).  We don't have direct access to it; QUDA reads
@@ -298,6 +303,7 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     inv_param.cuda_prec_sloppy            = saved_sl;
     inv_param.cuda_prec_refinement_sloppy = saved_rs;
     inv_param.cuda_prec_precondition      = saved_pc;
+    inv_param.gamma_basis                 = saved_basis;
     {
       double mom_norm = 0.0;
       int n_nan = 0;
@@ -431,12 +437,12 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                   << " factor=" << iAB_o/n2B_o
                   << std::endl;
       }
-      // Dump PathA and PathB for first few sites in lex order, all dirs, as
-      // 18 reals.  Look for structural patterns (sign flips, factor differs
-      // on even vs odd sites, direction swaps, etc.).
+      // Dump Ta(PathA) and PathB for site 0 mu 0 — same projection used
+      // for the cos comparison.  Look for structural patterns (sign on
+      // particular elements, ratios that vary, etc.).
       using SiteGauge = LatticeGaugeField::vector_object::scalar_object;
       std::vector<SiteGauge> scA(V), scB(V);
-      unvectorizeToLexOrdArray(scA, dSdU_pathA);
+      unvectorizeToLexOrdArray(scA, TaA);   // Ta projection, not full A
       unvectorizeToLexOrdArray(scB, dSdU);
       const double *bA = reinterpret_cast<const double *>(scA.data());
       const double *bB = reinterpret_cast<const double *>(scB.data());
