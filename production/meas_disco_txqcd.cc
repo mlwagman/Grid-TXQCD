@@ -1,4 +1,5 @@
 #include "params.h"
+#include "quda_helper.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
@@ -72,17 +73,16 @@ static RealD StochasticTrMinv_TX(TXQCDWilsonCloverOp &Mop, GridBase *grid,
 typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
 
 static RealD StochasticTrMinv_QCD(WCF &Dw, GridBase *grid,
+                                  const LatticeGaugeField &Usm, RealD mass,
                                   GridParallelRNG &pRNG, int nn) {
   RealD V = (RealD)grid->gSites();
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
-  ConjugateGradient<LatticeFermion> CG(cg_tol, cg_max);
+  Grid::QudaPropSolver<WCF> solver(Dw, HermOp, Usm, mass, csw, cg_tol, cg_max);
   RealD acc = 0.0;
   for (int h = 0; h < nn; ++h) {
-    LatticeFermion eta(grid), b(grid), x(grid);
+    LatticeFermion eta(grid), x(grid);
     gaussian(pRNG, eta);
-    Dw.Mdag(eta, b);
-    x = Zero();
-    CG(HermOp, b, x);
+    solver.solve(eta, x);
     acc += innerProduct(eta, x).real() / (2.0 * V);
   }
   return acc / nn;
@@ -136,7 +136,8 @@ int main(int argc, char **argv) {
   // Strange quark VEV (standard QCD operator on smeared links)
   WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw,
            WilsonAnisotropyCoefficients(), impl_p);
-  RealD trminv_strange = StochasticTrMinv_QCD(Dw_s, &Grid, pRNG, n_noise_disco);
+  RealD trminv_strange = StochasticTrMinv_QCD(Dw_s, &Grid, Usmeared, mass_strange,
+                                               pRNG, n_noise_disco);
 
   // Aux field VEVs
   RealD V = (RealD)Grid.gSites();

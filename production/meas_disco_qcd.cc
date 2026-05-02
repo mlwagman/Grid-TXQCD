@@ -1,4 +1,5 @@
 #include "params.h"
+#include "quda_helper.h"
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TXQCDProduction;
@@ -6,17 +7,16 @@ using namespace TXQCDProduction;
 typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
 
 static RealD StochasticTrMinv(WCF &Dw, GridBase *grid,
+                              const LatticeGaugeField &Usm, RealD mass,
                               GridParallelRNG &pRNG, int nn) {
   RealD V = (RealD)grid->gSites();
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
-  ConjugateGradient<LatticeFermion> CG(cg_tol, cg_max);
+  Grid::QudaPropSolver<WCF> solver(Dw, HermOp, Usm, mass, csw, cg_tol, cg_max);
   RealD acc = 0.0;
   for (int h = 0; h < nn; ++h) {
-    LatticeFermion eta(grid), b(grid), x(grid);
+    LatticeFermion eta(grid), x(grid);
     gaussian(pRNG, eta);
-    Dw.Mdag(eta, b);
-    x = Zero();
-    CG(HermOp, b, x);
+    solver.solve(eta, x);
     acc += innerProduct(eta, x).real() / (2.0 * V);
   }
   return acc / nn;
@@ -67,11 +67,11 @@ int main(int argc, char **argv) {
   impl_p.boundary_phases[Nd - 1] = -1.0;
   WCF Dw(Usmeared, Grid, RBGrid, mass_light, csw, csw,
          WilsonAnisotropyCoefficients(), impl_p);
-  RealD trminv = StochasticTrMinv(Dw, &Grid, pRNG, n_noise_disco);
+  RealD trminv = StochasticTrMinv(Dw, &Grid, Usmeared, mass_light, pRNG, n_noise_disco);
 
   WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw,
            WilsonAnisotropyCoefficients(), impl_p);
-  RealD trminv_strange = StochasticTrMinv(Dw_s, &Grid, pRNG, n_noise_disco);
+  RealD trminv_strange = StochasticTrMinv(Dw_s, &Grid, Usmeared, mass_strange, pRNG, n_noise_disco);
 
   std::string outfile = qcd_data_dir() + "/disco_qcd_" + std::to_string(traj) + ".h5";
   {

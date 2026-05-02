@@ -1,13 +1,9 @@
 #include "params.h"
+#include "quda_helper.h"
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/CovariantSmearing.h>
 #include <Grid/qcd/utils/BaryonUtils.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
-#ifdef GRID_HAVE_QUDA
-#include <Grid/util/QudaInit.h>
-#include <Grid/algorithms/iterative/QudaCloverInverter.h>
-#include <memory>
-#endif
 
 using namespace TXQCDProduction;
 
@@ -114,27 +110,7 @@ int main(int argc, char **argv) {
   WCF Dw(U_inv, Grid, RBGrid, mass_light, csw, csw,
          WilsonAnisotropyCoefficients(), impl_p);
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
-  ConjugateGradient<LatticeFermion> CG(cg_tol, cg_max);
-
-#ifdef GRID_HAVE_QUDA
-  // Optional QUDA backend: env QUDA_SOLVER=1 swaps the per-source CG for a
-  // QudaCloverInverter call.  ~3× speedup on 16³×48 / single A100.
-  bool use_quda = std::getenv("QUDA_SOLVER") != nullptr;
-  std::unique_ptr<QudaCloverInverter> quda_cg;
-  if (use_quda) {
-    Quda::initialize();
-    QudaCloverParams qp;
-    qp.mass = mass_light;
-    qp.csw  = csw;
-    qp.anti_periodic_t = true;
-    qp.tol = cg_tol;
-    qp.max_iter = cg_max;
-    qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
-    quda_cg.reset(new QudaCloverInverter(&Grid, qp));
-    quda_cg->SetGauge(U_inv);
-    std::cout << GridLogMessage << "QUDA_SOLVER active for connected propagator." << std::endl;
-  }
-#endif
+  Grid::QudaPropSolver<WCF> solver(Dw, HermOp, U_inv, mass_light, csw, cg_tol, cg_max);
 
   int T = latt[Nd - 1];
   auto sources = SourceGrid(latt);
@@ -160,7 +136,7 @@ int main(int argc, char **argv) {
         kron = 1.0;
         pokeSite(kron, srcP, src);
 
-        LatticeFermion sf(&Grid), b(&Grid), x(&Grid);
+        LatticeFermion sf(&Grid), x(&Grid);
         PropToFerm<WilsonImplR>(sf, srcP, spin, col);
 
         // Gaussian smear source
@@ -168,16 +144,7 @@ int main(int argc, char **argv) {
                                                          gauss_width, gauss_niter, Nd - 1);
 
         x = Zero();
-#ifdef GRID_HAVE_QUDA
-        if (use_quda) {
-          // QUDA inverts M directly; skip the Mdag pre-multiply.
-          (*quda_cg)(HermOp, sf, x);
-        } else
-#endif
-        {
-          Dw.Mdag(sf, b);
-          CG(HermOp, b, x);
-        }
+        solver.solve(sf, x);
 
         // Gaussian smear sink
         CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, x,

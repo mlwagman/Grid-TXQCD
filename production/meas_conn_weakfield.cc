@@ -11,6 +11,7 @@
 //
 // Output: pion correlator C(t) for QCD + each λ in stdout, machine-readable.
 #include "params.h"
+#include "quda_helper.h"
 #include <cstdio>
 #include <cstring>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
@@ -36,15 +37,13 @@ static RealD AutoMeasureSigma(GridCartesian &Grid, GridRedBlackCartesian &RBGrid
   WCF Dw(const_cast<LatticeGaugeField&>(Usm), Grid, RBGrid, mass_light, csw, csw,
          WilsonAnisotropyCoefficients(), impl_p);
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
-  ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+  Grid::QudaPropSolver<WCF> solver(Dw, HermOp, Usm, mass_light, csw, 1e-8, cg_max);
   RealD V = (RealD)Grid.gSites();
   RealD acc = 0.0;
   for (int h = 0; h < n_noise; ++h) {
-    LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
+    LatticeFermion eta(&Grid), x(&Grid);
     gaussian(noisePRNG, eta);
-    Dw.Mdag(eta, b);
-    x = Zero();
-    CG(HermOp, b, x);
+    solver.solve(eta, x);
     acc += innerProduct(eta, x).real() / (2.0 * V);
   }
   RealD vev_trminv = acc / n_noise;
@@ -103,18 +102,16 @@ static LatticePropagator QcdPropagator(const LatticeGaugeField &Usm,
   WCF Dw(const_cast<LatticeGaugeField&>(Usm), Grid, RBGrid, mass_light, csw, csw,
          WilsonAnisotropyCoefficients(), impl_p);
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
-  ConjugateGradient<LatticeFermion> CG(tol, cg_max);
+  Grid::QudaPropSolver<WCF> solver(Dw, HermOp, Usm, mass_light, csw, tol, cg_max);
 
   LatticePropagator prop(&Grid); prop = Zero();
   // Solve column-by-column over (spin, color).
   for (int s = 0; s < Ns; ++s) {
     for (int c = 0; c < Nc; ++c) {
-      LatticeFermion psi(&Grid), b(&Grid), x(&Grid);
+      LatticeFermion psi(&Grid), x(&Grid);
       psi = Zero();
       PropToFerm<WilsonImplR>(psi, src, s, c);
-      Dw.Mdag(psi, b);
-      x = Zero();
-      CG(HermOp, b, x);
+      solver.solve(psi, x);
       FermToProp<WilsonImplR>(prop, x, s, c);
     }
   }
