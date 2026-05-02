@@ -93,7 +93,7 @@ static void TxqcdPointPropDiagAux(LatticePropagator &S_u, LatticePropagator &S_d
   LatticePiField    pi_diag    = U.pi;     ZeroOffDiagonal(pi_diag);
 
   // s, p, t remain shared (flavor-trivial color-Hermitian aux).
-  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, sigma_diag, pi_diag, U.s, U.p, U.t);
+  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, sigma_diag, pi_diag, U.s, U.p, U.t, mu_runtime());
 
   LatticePropagator srcP(g);
   PointSource(src, srcP);

@@ -81,7 +81,8 @@ static void TxqcdPointProp(LatticePropagator &S_u, LatticePropagator &S_d,
   GridBase *g = U.Grid();
   GridCartesian *Ug = dynamic_cast<GridCartesian *>(g);
   GridRedBlackCartesian RB(Ug);
-  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t);
+  TXQCDWilsonOp Mop(U.U, *Ug, RB, m, U.sigma, U.pi, U.s, U.p, U.t,
+                    mu_runtime());
 
   LatticePropagator srcP(g);
   PointSource(src, srcP);
