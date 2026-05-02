@@ -372,12 +372,7 @@ class TXQCDWilsonCloverFermionEO {
       const char *e = std::getenv("TXQCD_MOOEEINV_SCALAR");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
-    // The SIMD path is hand-unrolled for Nf=2 only; force the scalar
-    // (Nf-generic) path for any other Nf so the test suite can exercise
-    // non-degenerate Nf=3 setups.
-    if constexpr (TxqcdNf != 2) {
-      ApplyMooeeInvScalar(cb, in, out);
-    } else if (use_scalar) {
+    if (use_scalar) {
       ApplyMooeeInvScalar(cb, in, out);
     } else {
       ApplyMooeeInvSimd(cb, in, out);
@@ -386,36 +381,50 @@ class TXQCDWilsonCloverFermionEO {
     n_apply_inv_++;
   }
 
+  // LatticeView has no default ctor, so std::array<LatticeView,N> can't be
+  // default-constructed and then assigned.  These helpers aggregate-initialize
+  // the array from a parameter pack of indices (C++17-friendly).
+  template <std::size_t N, class FieldT, std::size_t... Is>
+  static auto MakeFermViewsRead(const FieldT &fld, std::index_sequence<Is...>)
+      -> std::array<decltype(fld.f[0].View(AcceleratorRead)), N> {
+    return {{ fld.f[Is].View(AcceleratorRead)... }};
+  }
+  template <std::size_t N, class FieldT, std::size_t... Is>
+  static auto MakeFermViewsWrite(FieldT &fld, std::index_sequence<Is...>)
+      -> std::array<decltype(fld.f[0].View(AcceleratorWrite)), N> {
+    return {{ fld.f[Is].View(AcceleratorWrite)... }};
+  }
+
+  // Nf-generic SIMD ApplyMooeeInv.  Uses std::array of LatticeView (which is
+  // trivially copyable) so the kernel can index per-flavor without
+  // hand-unrolled in0/in1 view names.  For TxqcdNf=2 the compiler still
+  // produces the same fully-unrolled inner loop as the previous Nf=2 path.
   void ApplyMooeeInvSimd(int cb, const TXQCDFermionNf &in,
                          TXQCDFermionNf &out) {
     GRID_ASSERT(inv_simd_e_ && inv_simd_o_);
     InvField &inv_simd = (cb == Even) ? *inv_simd_e_ : *inv_simd_o_;
     GridBase *fg = in.f[0].Grid();
-    out.f[0].Checkerboard() = cb;
-    out.f[1].Checkerboard() = cb;
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a].Checkerboard() = cb;
 
     autoView(inv_v, inv_simd, AcceleratorRead);
-    autoView(in0_v, in.f[0], AcceleratorRead);
-    autoView(in1_v, in.f[1], AcceleratorRead);
-    autoView(out0_v, out.f[0], AcceleratorWrite);
-    autoView(out1_v, out.f[1], AcceleratorWrite);
+    typedef decltype(in.f[0].View(AcceleratorRead))  FermViewIn;
+    typedef decltype(out.f[0].View(AcceleratorWrite)) FermViewOut;
+    // LatticeView has no default ctor — aggregate-initialize the std::array
+    // through an index_sequence helper (C++17-compatible).
+    auto in_v  = MakeFermViewsRead<TxqcdNf>(in,  std::make_index_sequence<TxqcdNf>{});
+    auto out_v = MakeFermViewsWrite<TxqcdNf>(out, std::make_index_sequence<TxqcdNf>{});
 
-    typedef decltype(coalescedRead(in0_v[0])) FermSitePerLane;
+    typedef decltype(coalescedRead(in_v[0][0])) FermSitePerLane;
     const int Nsimd = LatticeFermion::vector_object::Nsimd();
 
     accelerator_for(s, fg->oSites(), Nsimd, {
-      // Per-lane reads: view(s) returns the scalar object for the current
-      // SIMD lane (each GPU thread handles one lane).  view[s] is the
-      // raw vobj and is only used for coalescedWrite.
       auto Mlane = inv_v(s);
-      auto in0   = in0_v(s);
-      auto in1   = in1_v(s);
-      FermSitePerLane out0_acc;
-      FermSitePerLane out1_acc;
-      // Use the actual element type returned by these reads to declare the
-      // accumulator (Coalesced types differ between CPU/GPU builds).
+      // Per-flavor lane reads collected into a small stack array.
+      FermSitePerLane in_lanes[TxqcdNf];
+      for (int a = 0; a < TxqcdNf; ++a) in_lanes[a] = in_v[a](s);
+      FermSitePerLane out_acc[TxqcdNf];
       typedef typename std::remove_reference<decltype(Mlane()()(0, 0))>::type MEl;
-      // r = a*Ns*Nc + alpha*Nc + i  ; flavor a in {0,1}.
+      // r = a*Ns*Nc + alpha*Nc + i ; M_site is (TxqcdNf*Ns*Nc) square.
       for (int a_out = 0; a_out < TxqcdNf; ++a_out) {
         for (int alpha_out = 0; alpha_out < Ns; ++alpha_out) {
           for (int i_out = 0; i_out < Nc; ++i_out) {
@@ -427,21 +436,22 @@ class TXQCDWilsonCloverFermionEO {
                 for (int i_in = 0; i_in < Nc; ++i_in) {
                   int c = a_in * Ns * Nc + alpha_in * Nc + i_in;
                   auto Mrc = Mlane()()(r, c);
-                  auto v_in = (a_in == 0)
-                       ? in0()(alpha_in)(i_in)
-                       : in1()(alpha_in)(i_in);
-                  sum = sum + Mrc * v_in;
+                  sum = sum + Mrc * in_lanes[a_in]()(alpha_in)(i_in);
                 }
               }
             }
-            if (a_out == 0) out0_acc()(alpha_out)(i_out) = sum;
-            else            out1_acc()(alpha_out)(i_out) = sum;
+            out_acc[a_out]()(alpha_out)(i_out) = sum;
           }
         }
       }
-      coalescedWrite(out0_v[s], out0_acc);
-      coalescedWrite(out1_v[s], out1_acc);
+      for (int a = 0; a < TxqcdNf; ++a)
+        coalescedWrite(out_v[a][s], out_acc[a]);
     });
+
+    for (int a = 0; a < TxqcdNf; ++a) {
+      in_v[a].ViewClose();
+      out_v[a].ViewClose();
+    }
   }
 
   void ApplyMooeeInvScalar(int cb, const TXQCDFermionNf &in,
