@@ -237,6 +237,11 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
 
     const double kappa = inv_param.kappa;
     const double kappa2 = -kappa * kappa;
+    // ck = -κ·csw/8 (negative) — empirically gives cos(Ta(A),B)≈0.897 with
+    // multiplicity=0.  Positive ck (as in chroma's k_csw_ov_8 in TM force)
+    // collapses cos to -0.085.  The sign on ferm_epsilon's first component
+    // (2·ck·coeff·dt) determines σ-Oprod direction.  Empirically negative
+    // matches Grid's MeeDeriv/MooDeriv convention here.
     const double ck = -inv_param.clover_csw * kappa / 8.0;
 
     // Need a flat host gauge buffer too — pass the same one that's loaded
