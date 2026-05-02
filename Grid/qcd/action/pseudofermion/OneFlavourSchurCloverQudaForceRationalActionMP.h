@@ -219,8 +219,7 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     QudaGaugeParam force_gauge_param = quda_ms_->GaugeParam();
     force_gauge_param.type        = QUDA_GENERAL_LINKS;
     force_gauge_param.reconstruct = QUDA_RECONSTRUCT_NO;
-    // MILC gauge_order — single contiguous mom buffer in MILC packed order
-    // [site_eo][dir][matrix].  Matches what MILC's qudaCloverForce uses.
+    // MILC gauge_order — matches what MILC's qudaCloverForce uses.
     force_gauge_param.gauge_order = QUDA_MILC_GAUGE_ORDER;
     // PRIMARY mom flags.  Without overwrite_mom=1, QUDA's cudaMom is created
     // with QUDA_COPY_FIELD_CREATE from cpuMom (i.e. our zero-initialized
