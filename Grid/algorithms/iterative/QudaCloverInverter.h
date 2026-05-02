@@ -55,6 +55,7 @@ public:
   // Re-upload gauge + clover to the GPU.  Call after every smearing update.
   void SetGauge(const LatticeGaugeField &U) {
     int V = Quda::local_volume(grid_);
+    Coordinate lc = grid_->LocalDimensions();
     // Pack Grid LatticeGaugeField → 4 lex per-direction host buffers
     // → EO permute → loadGaugeQuda (QUDA_QDP_GAUGE_ORDER, EO site order).
     std::vector<std::vector<double>> lex_bufs(4, std::vector<double>(18 * V));
@@ -62,8 +63,25 @@ public:
                            lex_bufs[2].data(), lex_bufs[3].data()};
     Quda::gauge_to_lex_buffers(U, lex_ptrs);
 
+    // Antiperiodic time BC: bake the −1 phase into U_t at t = Lt-1 BEFORE
+    // sending to QUDA, and tell QUDA the gauge is periodic.  Going through
+    // QUDA's own t_boundary does *not* match Grid's WilsonImpl phase
+    // application (empirically: 0.37 residual at MASS_NORMALIZATION + DR
+    // basis).  Pre-baking is robust and self-consistent.
+    if (params_.anti_periodic_t) {
+      const int Lt = lc[3];
+      int V_per_t = lc[0] * lc[1] * lc[2];   // sites per timeslice
+      // Last-timeslice sites are the contiguous block at lex_site ∈
+      // [(Lt-1)·V_per_t, Lt·V_per_t).  Flip 18 doubles/site for mu=3 only.
+      int site_lo = (Lt - 1) * V_per_t;
+      int site_hi = Lt * V_per_t;
+      for (int site = site_lo; site < site_hi; ++site) {
+        double *u_t = &lex_bufs[3][18 * site];
+        for (int k = 0; k < 18; ++k) u_t[k] = -u_t[k];
+      }
+    }
+
     eo_bufs_ = std::vector<std::vector<double>>(4, std::vector<double>(18 * V));
-    Coordinate lc = grid_->LocalDimensions();
     void *gauge_ptrs[4];
     for (int mu = 0; mu < 4; ++mu) {
       Quda::lex_to_eo_permute(lex_bufs[mu].data(), eo_bufs_[mu].data(),
@@ -128,9 +146,9 @@ private:
     gauge_param_.anisotropy = 1.0;
     gauge_param_.type = QUDA_WILSON_LINKS;
     gauge_param_.gauge_order = QUDA_QDP_GAUGE_ORDER;
-    gauge_param_.t_boundary = params_.anti_periodic_t
-                                ? QUDA_ANTI_PERIODIC_T
-                                : QUDA_PERIODIC_T;
+    // Always tell QUDA "periodic" — we bake the antiperiodic phase into
+    // U_t directly in SetGauge, matching Grid's WilsonImpl convention.
+    gauge_param_.t_boundary = QUDA_PERIODIC_T;
     gauge_param_.cpu_prec = QUDA_DOUBLE_PRECISION;
     gauge_param_.cuda_prec = params_.cuda_prec;
     gauge_param_.cuda_prec_sloppy = params_.cuda_prec_sloppy;

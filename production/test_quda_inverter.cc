@@ -52,9 +52,7 @@ int main(int argc, char **argv) {
   LatticeGaugeField U(&Grid4);
   SU<Nc>::HotConfiguration(pRNG, U);
 
-  // Grid's WilsonCloverFermion construction.  Boundary phases are explicit:
-  // 4-vector of complex phases applied at face crossings.  Antiperiodic t
-  // = (1, 1, 1, -1).  csw_r = csw_t = csw (no anisotropy).
+  // Antiperiodic time BC matches our production ensemble.
   WilsonImplParams impl_p;
   impl_p.boundary_phases.resize(Nd, 1.0);
   impl_p.boundary_phases[Nd - 1] = -1.0;
