@@ -74,7 +74,11 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     quda_ms_->SetGauge(U);
 
     std::vector<FermionField> MPhi_k(Npole, fcbgrid);
-    quda_ms_->solve_rb_even(PhiEven, MPhi_k);
+    bool quda_force_kernel = (std::getenv("QUDA_FORCE_KERNEL") != nullptr);
+    // For Path B (QUDA force kernel): keep solutions resident so
+    // computeCloverForceQuda consumes them directly via
+    // use_resident_solution=1 — bypasses host-side X pack/unpack.
+    quda_ms_->solve_rb_even(PhiEven, MPhi_k, /*make_resident=*/quda_force_kernel);
 
     // ------------------------------------------------------------------
     // Path A: Grid deriv chain (no QUDA force).  Same as the EVEN action's
@@ -152,6 +156,8 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // uses a fresh QudaGaugeParam (`newMILCGaugeParam(...,
     // QUDA_GENERAL_LINKS)`) for this call.
     QudaInvertParam &inv_param  = quda_ms_->InvertParam();
+    int saved_use_resident = inv_param.use_resident_solution;
+    inv_param.use_resident_solution = 1;  // consume from GPU
 
     QudaGaugeParam force_gauge_param = quda_ms_->GaugeParam();
     force_gauge_param.type        = QUDA_GENERAL_LINKS;
@@ -195,6 +201,7 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                            /*gauge=*/nullptr,
                            &gauge_param,
                            &inv_param);
+    inv_param.use_resident_solution = saved_use_resident;
     // Debug: dump first few values of mom_buf to confirm QUDA wrote to it.
     {
       double mom_norm = 0.0;

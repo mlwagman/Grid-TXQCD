@@ -157,8 +157,14 @@ public:
   // parity is implied by inv_param_.matpc_type (which the caller is
   // expected to set to QUDA_MATPC_EVEN_EVEN_ASYMMETRIC at construction).
   // Outputs have Checkerboard() == Even.
+  //
+  // make_resident=true keeps QUDA's solution_resident on the GPU after
+  // the multishift completes.  Used by Phase 6 / computeCloverForceQuda
+  // which can then consume them directly via use_resident_solution=1
+  // (avoiding the host pack/unpack of X_k).
   void solve_rb_even(const LatticeFermion &phi_even,
-                     std::vector<LatticeFermion> &out_even) {
+                     std::vector<LatticeFermion> &out_even,
+                     bool make_resident = false) {
     if (!gauge_loaded_) {
       assert(false && "QudaCloverMultiShiftInverter::solve_rb_even: SetGauge() not called");
     }
@@ -185,8 +191,12 @@ public:
     std::vector<void *> sol_ptrs(N);
     for (int k = 0; k < N; ++k) sol_ptrs[k] = sol_eo[k].data();
 
+    int saved_make_resident = inv_param_.make_resident_solution;
+    inv_param_.make_resident_solution = make_resident ? 1 : 0;
+
     invertMultiShiftQuda(sol_ptrs.data(), src_eo.data(), &inv_param_);
 
+    inv_param_.make_resident_solution = saved_make_resident;
     for (int k = 0; k < N; ++k) inv_param_.offset[k] = orig_offsets[k];
 
     for (int k = 0; k < N; ++k) {
