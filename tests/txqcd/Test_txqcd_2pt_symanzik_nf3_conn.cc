@@ -20,6 +20,7 @@ static_assert(TXQCD_Nf == 3, "expects TXQCD_Nf=3");
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
+#include <Grid/qcd/utils/BaryonUtils.h>
 #include <dirent.h>
 #include <algorithm>
 
@@ -68,6 +69,24 @@ static std::vector<RealD> MesonCorrelator(const LatticePropagator &S_a,
   return out;
 }
 
+// Proton (uud) correlator using BaryonUtils, matching the Nf=2 symanzik_conn
+// Wick contractions (G_A = identity, G_B = sigma_xz).
+static std::vector<ComplexD> NucleonCorrelator(const LatticePropagator &S_u,
+                                               const LatticePropagator &S_d) {
+  Gamma G_A(Gamma::Algebra::Identity);
+  Gamma G_B(Gamma::Algebra::SigmaXZ);
+  int wick = 0;
+  BaryonUtils<WilsonImplR>::WickContractions("uud", "uud", wick);
+  LatticeComplex Cn(S_u.Grid());
+  BaryonUtils<WilsonImplR>::ContractBaryons(S_u, S_u, S_d, G_A, G_B, G_A, G_B,
+                                            wick, +1, Cn);
+  std::vector<TComplex> sl;
+  sliceSum(Cn, sl, Nd - 1);
+  std::vector<ComplexD> out(sl.size());
+  for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
+  return out;
+}
+
 static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
                      TXQCDFermionNf &x, RealD tol, int maxit) {
   GridBase *g = b.Grid();
@@ -96,11 +115,12 @@ static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
             << " rsq/bsq=" << rsq / bsq << std::endl;
 }
 
-// Compute three propagators S_l (flavor 0), S_l' (flavor 1) [should equal S_l
-// up to noise from off-diagonal aux], and S_s (flavor 2) on a Nf=3 TXQCD cfg.
-// Source flavor selects which row of TXQCDFermionNf is non-zero; we extract
-// the same flavor at the sink (flavor-diagonal block of full propagator).
-static void TxqcdPointPropNf3(LatticePropagator &S_l, LatticePropagator &S_s,
+// Compute three propagators on a Nf=3 TXQCD cfg: S_u (source on flavor 0,
+// extract flavor 0), S_d (source on flavor 1, extract flavor 1) -- distinct
+// random instantiations of the degenerate-light propagator, needed for the
+// proton (uud) Wick contractions -- and S_s (source on flavor 2).
+static void TxqcdPointPropNf3(LatticePropagator &S_u, LatticePropagator &S_d,
+                              LatticePropagator &S_s,
                               LatticeGaugeField &Ulinks, TXQCDField &U,
                               const std::array<RealD, 3> &m,
                               const Coordinate &src, RealD tol, int maxit) {
@@ -112,13 +132,13 @@ static void TxqcdPointPropNf3(LatticePropagator &S_l, LatticePropagator &S_s,
 
   LatticePropagator srcP(g);
   PointSource(src, srcP);
-  S_l = Zero();
+  S_u = Zero();
+  S_d = Zero();
   S_s = Zero();
 
-  // For each source flavor a in {0, 2} (light, strange), invert and read off
-  // the flavor-a sink component (light/strange propagator respectively).
-  for (int flavor : {0, 2}) {
-    LatticePropagator &Sout = (flavor == 0) ? S_l : S_s;
+  for (int flavor = 0; flavor < TxqcdNf; ++flavor) {
+    LatticePropagator &Sout = (flavor == 0) ? S_u
+                            : (flavor == 1) ? S_d : S_s;
     for (int spin = 0; spin < Ns; ++spin) {
       for (int col = 0; col < Nc; ++col) {
         LatticeFermion sf(g);
@@ -139,7 +159,15 @@ static void QcdPointProp(LatticePropagator &S, LatticeGaugeField &Umu,
                          GridRedBlackCartesian &RBGrid,
                          const Coordinate &src, RealD tol, int maxit) {
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-  WCF Dw(Umu, Grid, RBGrid, m, csw, csw);
+  // Antiperiodic time BC to match the TXQCD operator (which uses
+  // DefaultImplParams setting boundary_phases[Nd-1] = -1).  Without this,
+  // the nucleon wraparound piece (t=T-1, T-2) flips sign and the Fierz
+  // comparison at boundary timeslices fails.
+  WilsonImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;
+  WCF Dw(Umu, Grid, RBGrid, m, csw, csw, WilsonAnisotropyCoefficients(),
+         impl_p);
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(tol, maxit);
 
@@ -184,6 +212,7 @@ int main(int argc, char **argv) {
   mkdir_p(meas_dir());
 
   std::vector<std::vector<RealD>> pion_tx, kaon_tx, pion_qcd, kaon_qcd;
+  std::vector<std::vector<ComplexD>> nucl_tx, nucl_qcd;
   std::vector<RealD> plaq_tx, plaq_qcd;
 
   Smear_Stout<PeriodicGimplR> Stout(stout_rho);
@@ -201,10 +230,11 @@ int main(int argc, char **argv) {
       plaq_tx.push_back(WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
       SmearPolicy.set_Field(U.U);
       LatticeGaugeField Usmeared = SmearPolicy.get_SmearedU();
-      LatticePropagator Sl(&Grid), Ss(&Grid);
-      TxqcdPointPropNf3(Sl, Ss, Usmeared, U, mass_diag, src, meas_tol, cg_max);
-      pion_tx.push_back(MesonCorrelator(Sl, Sl));
-      kaon_tx.push_back(MesonCorrelator(Sl, Ss));
+      LatticePropagator Su(&Grid), Sd(&Grid), Ss(&Grid);
+      TxqcdPointPropNf3(Su, Sd, Ss, Usmeared, U, mass_diag, src, meas_tol, cg_max);
+      pion_tx.push_back(MesonCorrelator(Sd, Su));
+      kaon_tx.push_back(MesonCorrelator(Su, Ss));
+      nucl_tx.push_back(NucleonCorrelator(Su, Sd));
     }
   }
 
@@ -223,20 +253,24 @@ int main(int argc, char **argv) {
       QcdPointProp(Ss, Usmeared, mass_s, Grid, RBGrid, src, meas_tol, cg_max);
       pion_qcd.push_back(MesonCorrelator(Sl, Sl));
       kaon_qcd.push_back(MesonCorrelator(Sl, Ss));
+      // For QCD nucleon, m_u = m_d so S_u = S_d (statistically identical).
+      nucl_qcd.push_back(NucleonCorrelator(Sl, Sl));
     }
   }
 
   {
     Hdf5Writer wr(meas_dir() + "/meas_txqcd_nf3_conn.h5");
-    write(wr, "pion", pion_tx);
-    write(wr, "kaon", kaon_tx);
-    write(wr, "plaq", plaq_tx);
+    write(wr, "pion",     pion_tx);
+    write(wr, "kaon",     kaon_tx);
+    write(wr, "nucleon",  nucl_tx);
+    write(wr, "plaq",     plaq_tx);
   }
   {
     Hdf5Writer wr(meas_dir() + "/meas_qcd_conn.h5");
-    write(wr, "pion", pion_qcd);
-    write(wr, "kaon", kaon_qcd);
-    write(wr, "plaq", plaq_qcd);
+    write(wr, "pion",     pion_qcd);
+    write(wr, "kaon",     kaon_qcd);
+    write(wr, "nucleon",  nucl_qcd);
+    write(wr, "plaq",     plaq_qcd);
   }
 
   std::cout << GridLogMessage

@@ -87,6 +87,44 @@ static RealD StochasticTrMinv_TXQCDNf3(TXQCDWilsonCloverOp &Mop, GridBase *grid,
   return acc / nn;
 }
 
+// Stochastic estimator for sum_x Tr_{spin,color}[gamma5 (M^-1)_{a_sink,b_src}](x,t)
+// per time slice, used as the "disconnected" piece subtraction in the TXQCD
+// flavor-non-singlet meson Fierz comparison: the off-diagonal flavor block of
+// M^-1 (induced by sigma/pi aux fields mixing flavors) contributes a Wick
+// pairing that vanishes in QCD (M^-1 flavor-diagonal there).
+//
+// Noise on src flavor only; solve M^-1; pull the sink-flavor component;
+// localInnerProduct at the source flavor gives the Hutchinson estimator.
+// /2.0 normalization matches Nf=2 StochasticLoop_ud (absorbs det(M^dag M)
+// pseudofermion doubling).
+static std::vector<ComplexD>
+StochasticOffDiagFlavorLoop_Nf3(TXQCDWilsonCloverOp &Mop, GridBase *grid,
+                                GridParallelRNG &pRNG,
+                                int sink_flav, int src_flav,
+                                int nn, RealD tol, int maxit) {
+  int T = grid->GlobalDimensions()[Nd - 1];
+  Gamma g5(Gamma::Algebra::Gamma5);
+  std::vector<ComplexD> L(T, 0.0);
+
+  for (int h = 0; h < nn; ++h) {
+    TXQCDFermionNf src(grid), b(grid), x(grid);
+    for (int a = 0; a < TxqcdNf; ++a) src.f[a] = Zero();
+    gaussian(pRNG, src.f[src_flav]);
+    Mop.Mdag(src, b);
+    TxqcdCG(Mop, b, x, tol, maxit);
+
+    LatticeFermion g5x(grid);
+    g5x = g5 * x.f[sink_flav];
+    LatticeComplex lf(grid);
+    lf = localInnerProduct(src.f[src_flav], g5x);
+    std::vector<TComplex> sl;
+    sliceSum(lf, sl, Nd - 1);
+    for (int t = 0; t < T; ++t)
+      L[t] += TensorRemove(sl[t]) / (2.0 * nn);
+  }
+  return L;
+}
+
 typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
 static RealD StochasticTrMinv_QCD(WCF &Dw, GridBase *grid,
                                   GridParallelRNG &pRNG, int nn, RealD tol,
@@ -131,6 +169,9 @@ int main(int argc, char **argv) {
   std::vector<RealD> vev_sigma_tx, vev_s_tx;
   std::vector<RealD> trminv_l_tx, trminv_s_tx;
   std::vector<RealD> trminv_l_qc, trminv_s_qc;
+  // Off-diagonal flavor blocks: pion-disc uses (sink=0, src=1); kaon-disc
+  // uses (sink=0, src=2).  TXQCD-only -- vanishes identically in QCD.
+  std::vector<std::vector<ComplexD>> loop_pion_tx, loop_kaon_tx;
 
   Smear_Stout<PeriodicGimplR> Stout(stout_rho);
   SmearedConfiguration<PeriodicGimplR> SmearPolicy(&Grid, stout_nsmear, Stout);
@@ -166,6 +207,14 @@ int main(int argc, char **argv) {
       trminv_l_tx.push_back(0.5 * (tr_l0 + tr_l1));
       trminv_s_tx.push_back(StochasticTrMinv_TXQCDNf3(
           Mop, &Grid, pRNG, 2, n_noise, meas_tol, cg_max));
+
+      // Off-diagonal flavor M^-1 loops for the meson Fierz disc subtraction.
+      // pion: between flavors 0 and 1 (both light).
+      // kaon: between flavor 0 (light) and flavor 2 (strange).
+      loop_pion_tx.push_back(StochasticOffDiagFlavorLoop_Nf3(
+          Mop, &Grid, pRNG, /*sink=*/0, /*src=*/1, n_noise, meas_tol, cg_max));
+      loop_kaon_tx.push_back(StochasticOffDiagFlavorLoop_Nf3(
+          Mop, &Grid, pRNG, /*sink=*/0, /*src=*/2, n_noise, meas_tol, cg_max));
     }
   }
 
@@ -191,10 +240,12 @@ int main(int argc, char **argv) {
 
   {
     Hdf5Writer wr(meas_dir() + "/meas_txqcd_nf3_disc.h5");
-    write(wr, "vev_sigma", vev_sigma_tx);
-    write(wr, "vev_s",     vev_s_tx);
-    write(wr, "trminv_l",  trminv_l_tx);
-    write(wr, "trminv_s",  trminv_s_tx);
+    write(wr, "vev_sigma",  vev_sigma_tx);
+    write(wr, "vev_s",      vev_s_tx);
+    write(wr, "trminv_l",   trminv_l_tx);
+    write(wr, "trminv_s",   trminv_s_tx);
+    write(wr, "loop_pion",  loop_pion_tx);
+    write(wr, "loop_kaon",  loop_kaon_tx);
   }
   {
     Hdf5Writer wr(meas_dir() + "/meas_qcd_disc.h5");

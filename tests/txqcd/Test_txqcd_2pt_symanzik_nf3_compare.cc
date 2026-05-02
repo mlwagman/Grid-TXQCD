@@ -28,19 +28,25 @@ int main(int argc, char **argv) {
   std::string dir = meas_dir();
 
   std::vector<std::vector<RealD>> pion_tx, kaon_tx, pion_qcd, kaon_qcd;
+  std::vector<std::vector<ComplexD>> nucl_tx, nucl_qcd;
   std::vector<RealD> trminv_l_tx, trminv_s_tx, trminv_l_qcd, trminv_s_qcd;
   std::vector<RealD> vev_sigma, vev_s;
   std::vector<std::vector<ComplexD>> aux_pi, aux_sigma, aux_s;
+  // Off-diagonal flavor M^-1 loops (TXQCD only) used to build the
+  // disconnected-piece subtraction for the I=1 pion and the K+ correlator.
+  std::vector<std::vector<ComplexD>> loop_pion, loop_kaon;
 
   {
     Hdf5Reader rd(dir + "/meas_txqcd_nf3_conn.h5");
-    read(rd, "pion", pion_tx);
-    read(rd, "kaon", kaon_tx);
+    read(rd, "pion",    pion_tx);
+    read(rd, "kaon",    kaon_tx);
+    read(rd, "nucleon", nucl_tx);
   }
   {
     Hdf5Reader rd(dir + "/meas_qcd_conn.h5");
-    read(rd, "pion", pion_qcd);
-    read(rd, "kaon", kaon_qcd);
+    read(rd, "pion",    pion_qcd);
+    read(rd, "kaon",    kaon_qcd);
+    read(rd, "nucleon", nucl_qcd);
   }
   {
     Hdf5Reader rd(dir + "/meas_txqcd_nf3_disc.h5");
@@ -48,6 +54,8 @@ int main(int argc, char **argv) {
     read(rd, "vev_s",     vev_s);
     read(rd, "trminv_l",  trminv_l_tx);
     read(rd, "trminv_s",  trminv_s_tx);
+    read(rd, "loop_pion", loop_pion);
+    read(rd, "loop_kaon", loop_kaon);
   }
   {
     Hdf5Reader rd(dir + "/meas_qcd_disc.h5");
@@ -67,6 +75,36 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage
             << "TXQCD-Nf=3 cfgs: " << N << "   QCD-Nf=2+1 cfgs: " << M
             << std::endl;
+
+  // Build per-cfg disconnected subtractions from the off-diagonal flavor
+  // M^-1 loops.  In TXQCD, the I=1 pion and K+ correlators get a Wick
+  // contribution -tr[g5 (M^-1)_{ba}](t,t) * tr[g5 (M^-1)_{ab}](0,0) from the
+  // off-diagonal flavor block; this vanishes in QCD where M^-1 is flavor-
+  // diagonal.  Subtract it from the TXQCD connected correlator to compare
+  // apples-to-apples with QCD.
+  Coordinate latt = default_latt();
+  RealD V4 = 1.0;
+  for (int mu = 0; mu < Nd; ++mu) V4 *= latt[mu];
+  std::vector<std::vector<RealD>> pion_disc_tx(N, std::vector<RealD>(T, 0.0));
+  std::vector<std::vector<RealD>> kaon_disc_tx(N, std::vector<RealD>(T, 0.0));
+  if ((int)loop_pion.size() == N) {
+    for (int c = 0; c < N; ++c) {
+      auto Cpi = CorrelatorFromSlice(loop_pion[c], V4);
+      auto CK  = CorrelatorFromSlice(loop_kaon[c], V4);
+      for (int t = 0; t < T; ++t) {
+        pion_disc_tx[c][t] = Cpi[t].real();
+        kaon_disc_tx[c][t] = CK[t].real();
+      }
+    }
+  }
+  std::vector<std::vector<RealD>> pion_full_tx(N, std::vector<RealD>(T, 0.0));
+  std::vector<std::vector<RealD>> kaon_full_tx(N, std::vector<RealD>(T, 0.0));
+  for (int c = 0; c < N; ++c) {
+    for (int t = 0; t < T; ++t) {
+      pion_full_tx[c][t] = pion_tx[c][t] - pion_disc_tx[c][t];
+      kaon_full_tx[c][t] = kaon_tx[c][t] - kaon_disc_tx[c][t];
+    }
+  }
 
   auto sm = [](const std::vector<RealD> &v) {
     return std::make_pair(vmean(v), vstderr(v));
@@ -98,20 +136,39 @@ int main(int argc, char **argv) {
     if (!pass) exitcode = 1;
   };
 
-  std::cout << GridLogMessage
-            << "----- Pion correlator (Fierz: TXQCD-Nf=3 vs QCD-Nf=2+1) -----\n";
+  std::cout << GridLogMessage << "----- Pion connected only (diagnostic) -----\n";
   for (int t = 0; t < T; ++t) {
     auto [tm, te] = per_t_real(pion_tx, t);
     auto [qm, qe] = per_t_real(pion_qcd, t);
-    check("pion t=" + std::to_string(t), tm, te, qm, qe);
+    auto [dm, de] = per_t_real(pion_disc_tx, t);
+    std::cout << GridLogMessage
+              << "  t=" << t << "  TXQCDconn=" << tm << "+/-" << te
+              << "  pion_disc=" << dm << "+/-" << de
+              << "  QCD=" << qm << "+/-" << qe << std::endl;
   }
 
   std::cout << GridLogMessage
-            << "----- Kaon correlator (Fierz: TXQCD-Nf=3 vs QCD-Nf=2+1) -----\n";
+            << "----- Pion (Fierz: TXQCD_full = conn - disc vs QCD) -----\n";
   for (int t = 0; t < T; ++t) {
-    auto [tm, te] = per_t_real(kaon_tx, t);
+    auto [tm, te] = per_t_real(pion_full_tx, t);
+    auto [qm, qe] = per_t_real(pion_qcd, t);
+    check("pion_full t=" + std::to_string(t), tm, te, qm, qe);
+  }
+
+  std::cout << GridLogMessage
+            << "----- Kaon (Fierz: TXQCD_full = conn - disc vs QCD) -----\n";
+  for (int t = 0; t < T; ++t) {
+    auto [tm, te] = per_t_real(kaon_full_tx, t);
     auto [qm, qe] = per_t_real(kaon_qcd, t);
-    check("kaon t=" + std::to_string(t), tm, te, qm, qe);
+    check("kaon_full t=" + std::to_string(t), tm, te, qm, qe);
+  }
+
+  std::cout << GridLogMessage
+            << "----- Proton (uud) correlator (connected, Fierz check) -----\n";
+  for (int t = 0; t < T; ++t) {
+    auto [tm, te] = per_t_complex(nucl_tx, t);
+    auto [qm, qe] = per_t_complex(nucl_qcd, t);
+    check("nucleon t=" + std::to_string(t), tm, te, qm, qe, 5.0);
   }
 
   std::cout << GridLogMessage << "----- VEVs -----\n";
