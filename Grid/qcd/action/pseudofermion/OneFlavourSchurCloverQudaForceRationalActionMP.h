@@ -265,6 +265,12 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                                1, mult, nullptr, &gauge_param, &inv_param);
       }
     } else {
+      // multiplicity=0: skip QUDA's σ_μν·F_μν trace term — that's the
+      // LogDet(M_oo) derivative (hep-lat/0112051), which Grid handles
+      // SEPARATELY via OneFlavourSchurCloverDeterminantEven action class.
+      // Including it here would double-count.  QUDA_FORCE_DBG_TRACE=1
+      // re-enables for diagnostic tests.
+      double mult = std::getenv("QUDA_FORCE_DBG_TRACE") ? 1.0 : 0.0;
       computeCloverForceQuda(mom_buf.data(),
                              /*dt=*/1.0,
                              x_ptrs.data(),
@@ -273,7 +279,7 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                              kappa2,
                              ck,
                              Npole,
-                             /*multiplicity=*/1.0,
+                             mult,
                              /*gauge=*/nullptr,
                              &gauge_param,
                              &inv_param);
@@ -344,12 +350,12 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
       lex_ptrs[mu] = dir_lex_18[mu].data();
     }
     Quda::lex_buffers_to_gauge(lex_ptrs, dSdU);
-    // QUDA convention: mom_buf = -force (after updateMomentum(mom, -1, force)),
-    // and the QUDA→Grid empirical factor on a 4⁴ FD test is ≈4.36 (close to,
-    // but not exactly, sqrt(|Ta(A)|²/|B|²) = 5.76 because cos≈0.757).  Until
-    // we close the structural gap, apply the empirical magnitude scale +
-    // sign-flip so HMC at least has the right sign on the dominant component.
-    const double quda_to_grid_factor = -4.36;
+    // QUDA convention: mom_buf = -force.  Need sign flip + magnitude scale.
+    // With multiplicity=0 (no LogDet contribution from QUDA),
+    // 4⁴ FD test gives cos(Ta(A),B)≈0.897, |Ta(A)|²/|B|²≈2.57 → sqrt≈1.60.
+    // Empirical projection factor ⟨Ta(A),B⟩/|B|² ≈ 1.44 with sign included.
+    // Apply 1/(8κ²·something)... instrument and compute below.
+    const double quda_to_grid_factor = -1.0 / (8.0 * kappa * kappa);
     dSdU = quda_to_grid_factor * dSdU;
     std::cout << GridLogMessage
               << "[QudaForce] κ=" << kappa
@@ -380,6 +386,46 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                 << " factor Ta(A)/B = " << real(inner_Ta)/n2B
                 << " cos(Ta(A),B)=" << real(inner_Ta)/std::sqrt(n2A_Ta*n2B)
                 << std::endl;
+      // Per-parity decomposition: compute |·|² and ⟨A,B⟩ on even-only and
+      // odd-only site subsets.  If the misalignment is concentrated on one
+      // parity, that's a smoking gun for missing-odd-contribution etc.
+      {
+        using SG = LatticeGaugeField::vector_object::scalar_object;
+        Coordinate lcc = ggrid->LocalDimensions();
+        double n2A_e=0, n2A_o=0, n2B_e=0, n2B_o=0;
+        double iAB_e=0, iAB_o=0;
+        std::vector<SG> scTa(V), scBp(V);
+        unvectorizeToLexOrdArray(scTa, TaA);
+        unvectorizeToLexOrdArray(scBp, dSdU);
+        const double *bTa = reinterpret_cast<const double *>(scTa.data());
+        const double *bBp = reinterpret_cast<const double *>(scBp.data());
+        for (int site = 0; site < V; ++site) {
+          int q = site, par = 0;
+          for (int d = 0; d < (int)lcc.size(); ++d) { par += q % lcc[d]; q /= lcc[d]; }
+          par &= 1;
+          double dA = 0, dB = 0, dAB = 0;
+          for (int r = 0; r < 72; ++r) { // 4 dirs * 18 reals
+            double a = bTa[72*site + r], b = bBp[72*site + r];
+            dA += a*a; dB += b*b; dAB += a*b;
+          }
+          if (par == 0) { n2A_e += dA; n2B_e += dB; iAB_e += dAB; }
+          else          { n2A_o += dA; n2B_o += dB; iAB_o += dAB; }
+        }
+        std::cout << GridLogMessage
+                  << "[QudaForce] EVEN: |Ta(A)|²=" << n2A_e
+                  << " |B|²=" << n2B_e
+                  << " ⟨Ta(A),B⟩=" << iAB_e
+                  << " cos=" << iAB_e/std::sqrt(n2A_e*n2B_e)
+                  << " factor=" << iAB_e/n2B_e
+                  << std::endl;
+        std::cout << GridLogMessage
+                  << "[QudaForce] ODD:  |Ta(A)|²=" << n2A_o
+                  << " |B|²=" << n2B_o
+                  << " ⟨Ta(A),B⟩=" << iAB_o
+                  << " cos=" << iAB_o/std::sqrt(n2A_o*n2B_o)
+                  << " factor=" << iAB_o/n2B_o
+                  << std::endl;
+      }
       // Dump PathA and PathB for first few sites in lex order, all dirs, as
       // 18 reals.  Look for structural patterns (sign flips, factor differs
       // on even vs odd sites, direction swaps, etc.).
