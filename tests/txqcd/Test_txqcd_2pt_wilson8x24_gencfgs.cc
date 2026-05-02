@@ -69,10 +69,8 @@ int main(int argc, char **argv) {
 
     GaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
     AuxiliaryFieldGaussianAction           AuxAction(lam);
-    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass_runtime(), rat_params,
-                                   mu_runtime());
-    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass_runtime(),
-                                       mu_runtime());
+    TXQCDWilsonRationalEOAction PF(Grid, RBGrid, mass_runtime(), rat_params);
+    TXQCDLogDetEOAction         LogDet(Grid, RBGrid, mass_runtime());
 
     typedef Representations<EmptyRep<TXQCDField>> Reps;
     ActionLevel<TXQCDField, Reps> L1(1);

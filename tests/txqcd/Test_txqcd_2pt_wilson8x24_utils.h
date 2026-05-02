@@ -104,34 +104,17 @@ inline std::string mass_suffix() {
   return std::string(buf);
 }
 
-// Runtime MU override.  M_TXQCD = M_QCD + mu * Delta; default 1.0 reproduces
-// the original operator.  Cfg/meas dirs include mu when not equal to 1 so
-// scans (lambda, mu) with the same mean-field bias don't collide.
-inline RealD mu_runtime() {
-  const char *v = std::getenv("MU");
-  return (v && *v) ? std::atof(v) : 1.0;
-}
-inline std::string mu_suffix() {
-  RealD m = mu_runtime();
-  if (std::abs(m - 1.0) < 1e-6) return "";
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "_mu%.4f", m);
-  return std::string(buf);
-}
-
 inline std::string txqcd_cfg_dir() {
-  return "configs_2pt_txqcd_wilson8x24" + mass_suffix() + lambda_suffix() +
-         mu_suffix();
+  return "configs_2pt_txqcd_wilson8x24" + mass_suffix() + lambda_suffix();
 }
 inline std::string qcd_cfg_dir() {
-  // QCD has no lambda or mu dependence — all TXQCD-(lambda,mu) runs share
-  // one QCD ensemble.  meas_dir() still includes the suffixes so TXQCD
-  // measurement outputs at different (lambda, mu) don't collide.
+  // QCD has no lambda dependence — all TXQCD-lambda runs share one QCD
+  // ensemble.  meas_dir() still includes lambda_suffix so QCD measurement
+  // outputs land alongside their TXQCD counterparts.
   return "configs_2pt_qcd_wilson8x24" + mass_suffix();
 }
 inline std::string meas_dir() {
-  return "meas_2pt_wilson8x24" + mass_suffix() + lambda_suffix() +
-         mu_suffix();
+  return "meas_2pt_wilson8x24" + mass_suffix() + lambda_suffix();
 }
 
 // Local versions that use the wilson8x24 meas_trajs (env-overridable),

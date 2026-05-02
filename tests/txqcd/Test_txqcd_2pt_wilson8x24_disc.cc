@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
 
       GridCartesian *Ug = dynamic_cast<GridCartesian *>(U.Grid());
       GridRedBlackCartesian RB(Ug);
-      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass_runtime(), U.sigma, U.pi, U.s, U.p, U.t, mu_runtime());
+      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass_runtime(), U.sigma, U.pi, U.s, U.p, U.t);
 
       loop_ud.push_back(StochasticLoop_ud(Mop, &Grid, pRNG, n_noise,
                                            meas_tol, cg_max));
