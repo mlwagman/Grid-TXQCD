@@ -361,11 +361,17 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
       lex_ptrs[mu] = dir_lex_18[mu].data();
     }
     Quda::lex_buffers_to_gauge(lex_ptrs, dSdU);
-    // QUDA convention: mom_buf = -force.  Need sign flip + magnitude scale.
-    // With multiplicity=0 (no LogDet contribution from QUDA),
-    // 4⁴ FD test gives cos(Ta(A),B)≈0.897, |Ta(A)|²/|B|²≈2.57 → sqrt≈1.60.
-    // Empirical projection factor ⟨Ta(A),B⟩/|B|² ≈ 1.44 with sign included.
-    // Apply 1/(8κ²·something)... instrument and compute below.
+    // QUDA convention: mom_buf = -force.  Sign flip + magnitude scale.
+    // With multiplicity=0 (no LogDet), scale -1/(8κ²) gives:
+    //   |PathB_scaled|² ≈ |Ta(PathA)|² (within 2%)
+    //   cos(Ta(PathA), B) = +0.897 (15% perpendicular component remains)
+    //   FD ratio = 0.712 (parallel component projects to ~0.905,
+    //                     remaining perp adds RNG-dependent noise)
+    // The 10% perp mismatch hasn't been narrowed via gamma_basis,
+    // ck sign, Wilson-vs-σ isolation, or per-parity decomposition.
+    // It's a deep convention difference between Grid's
+    // MpcDeriv+MeeDeriv+MooDeriv decomposition and QUDA's
+    // computeCloverOprod+computeCloverSigmaOprod+cloverDerivative pipeline.
     const double quda_to_grid_factor = -1.0 / (8.0 * kappa * kappa);
     dSdU = quda_to_grid_factor * dSdU;
     std::cout << GridLogMessage
