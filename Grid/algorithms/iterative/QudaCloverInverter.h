@@ -69,15 +69,23 @@ public:
     // application (empirically: 0.37 residual at MASS_NORMALIZATION + DR
     // basis).  Pre-baking is robust and self-consistent.
     if (params_.anti_periodic_t) {
-      const int Lt = lc[3];
-      int V_per_t = lc[0] * lc[1] * lc[2];   // sites per timeslice
-      // Last-timeslice sites are the contiguous block at lex_site ∈
-      // [(Lt-1)·V_per_t, Lt·V_per_t).  Flip 18 doubles/site for mu=3 only.
-      int site_lo = (Lt - 1) * V_per_t;
-      int site_hi = Lt * V_per_t;
-      for (int site = site_lo; site < site_hi; ++site) {
-        double *u_t = &lex_bufs[3][18 * site];
-        for (int k = 0; k < 18; ++k) u_t[k] = -u_t[k];
+      // Only the rank holding the GLOBAL last-t timeslice flips its
+      // last-LOCAL t.  In a single-rank run this is trivially true; with
+      // mpi=1.1.1.N, only rank N-1 (in t) does the flip.  Otherwise the
+      // flip is double-applied at intra-rank t boundaries and produces
+      // wrong forces (~30% off in 1-traj FD).
+      Coordinate proc_coor = grid_->ThisProcessorCoor();
+      Coordinate procs = grid_->ProcessorGrid();
+      bool last_t_rank = (proc_coor[3] == procs[3] - 1);
+      if (last_t_rank) {
+        const int Lt = lc[3];
+        int V_per_t = lc[0] * lc[1] * lc[2];
+        int site_lo = (Lt - 1) * V_per_t;
+        int site_hi = Lt * V_per_t;
+        for (int site = site_lo; site < site_hi; ++site) {
+          double *u_t = &lex_bufs[3][18 * site];
+          for (int k = 0; k < 18; ++k) u_t[k] = -u_t[k];
+        }
       }
     }
 

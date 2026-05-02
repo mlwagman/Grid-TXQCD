@@ -62,13 +62,21 @@ public:
     // WilsonImpl convention; see QudaCloverInverter::SetGauge for full
     // commentary).
     if (params_.anti_periodic_t) {
-      const int Lt = lc[3];
-      int V_per_t = lc[0] * lc[1] * lc[2];
-      int site_lo = (Lt - 1) * V_per_t;
-      int site_hi = Lt * V_per_t;
-      for (int site = site_lo; site < site_hi; ++site) {
-        double *u_t = &lex_bufs[3][18 * site];
-        for (int k = 0; k < 18; ++k) u_t[k] = -u_t[k];
+      // Only the rank holding the GLOBAL last-t timeslice flips its
+      // last-LOCAL t (see QudaCloverInverter::SetGauge for the fuller
+      // commentary).
+      Coordinate proc_coor = grid_->ThisProcessorCoor();
+      Coordinate procs = grid_->ProcessorGrid();
+      bool last_t_rank = (proc_coor[3] == procs[3] - 1);
+      if (last_t_rank) {
+        const int Lt = lc[3];
+        int V_per_t = lc[0] * lc[1] * lc[2];
+        int site_lo = (Lt - 1) * V_per_t;
+        int site_hi = Lt * V_per_t;
+        for (int site = site_lo; site < site_hi; ++site) {
+          double *u_t = &lex_bufs[3][18 * site];
+          for (int k = 0; k < 18; ++k) u_t[k] = -u_t[k];
+        }
       }
     }
 

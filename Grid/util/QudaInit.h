@@ -30,9 +30,14 @@ inline void initialize(int device = -1, const int *mpi_dims = nullptr) {
 #ifdef GRID_HAVE_QUDA
   static bool initialized = false;
   if (initialized) return;
-  // Default to single-rank 1.1.1.1 if caller didn't tell us the layout.
-  static const int default_dims[4] = {1, 1, 1, 1};
-  const int *dims = mpi_dims ? mpi_dims : default_dims;
+  // If caller didn't tell us the layout, read it from Grid (Grid_init must
+  // have run already; GridDefaultMpi() returns the --mpi=Lx.Ly.Lz.Lt grid).
+  int detected_dims[4] = {1, 1, 1, 1};
+  if (!mpi_dims) {
+    Coordinate g = GridDefaultMpi();
+    for (int d = 0; d < 4 && d < (int)g.size(); ++d) detected_dims[d] = g[d];
+  }
+  const int *dims = mpi_dims ? mpi_dims : detected_dims;
 
   // QMP init — must precede initCommsGridQuda when QUDA is built with
   // QMP_COMMS (libquda links libqmp).  Coexists with Grid's MPI_Init.
