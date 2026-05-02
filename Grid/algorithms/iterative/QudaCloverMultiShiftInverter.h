@@ -93,13 +93,11 @@ public:
     assert((int)out.size() == N);
 
     int V = Quda::local_volume(grid_);
-    Coordinate lc = grid_->LocalDimensions();
 
-    std::vector<double> src_lex(24 * V), src_eo(24 * V);
-    Quda::fermion_to_lex_buffer(src, src_lex.data());
-    Quda::lex_to_eo_permute(src_lex.data(), src_eo.data(), V, 24, lc);
+    // Fused pack: Grid LatticeFermion → QUDA EO buffer in one pass.
+    std::vector<double> src_eo(24 * V);
+    Quda::fermion_to_eo_buffer(src, src_eo.data());
 
-    // QUDA needs an array of solution pointers.
     std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V, 0.0));
     std::vector<void *> sol_ptrs(N);
     for (int k = 0; k < N; ++k) sol_ptrs[k] = sol_eo[k].data();
@@ -107,9 +105,7 @@ public:
     invertMultiShiftQuda(sol_ptrs.data(), src_eo.data(), &inv_param_);
 
     for (int k = 0; k < N; ++k) {
-      std::vector<double> sol_lex(24 * V);
-      Quda::eo_to_lex_permute(sol_eo[k].data(), sol_lex.data(), V, 24, lc);
-      Quda::lex_buffer_to_fermion(sol_lex.data(), out[k]);
+      Quda::eo_buffer_to_fermion(sol_eo[k].data(), out[k]);
     }
 
     last_iter_ = inv_param_.iter;

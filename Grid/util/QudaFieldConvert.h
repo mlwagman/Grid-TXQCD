@@ -90,6 +90,101 @@ inline void lex_buffer_to_fermion(const double *buf, FermionField &grid_field) {
 }
 
 // ----------------------------------------------------------------------------
+// Fused fermion → EO buffer (and inverse).
+//
+// Combines unvectorize, memcpy, and lex→EO permute into a single pass over
+// the SIMD outer sites: for each outer index we compute the EO destination
+// per SIMD lane and use Grid's `extract` to write the per-lane scalar
+// objects directly into the final QUDA EO buffer slots.  No intermediate
+// std::vector<SiteSpinor>, no separate permute pass.
+//
+// Requires Lx even (true for all production lattices) so that lex→EO maps
+// cleanly via cb_site = lex_site >> 1 within each parity.
+// ----------------------------------------------------------------------------
+
+template <class FermionField>
+inline void fermion_to_eo_buffer(const FermionField &grid_field, double *buf_eo) {
+  using SiteSpinor = typename FermionField::scalar_object;
+  using vobj = typename FermionField::vector_object;
+  static_assert(sizeof(SiteSpinor) == 24 * sizeof(double),
+                "expected Ns·Nc·2 = 24 doubles per fermion site");
+
+  GridBase *grid = grid_field.Grid();
+  Coordinate lc = grid->LocalDimensions();
+  assert((lc[0] & 1) == 0);
+  int V = local_volume(grid);
+  int V_eo = V / 2;
+  const int Nsimd = vobj::vector_type::Nsimd();
+  const int ndim = grid->Nd();
+
+  // Per-lane Cartesian-shift table (constant across all outer sites).
+  std::vector<Coordinate> icoor_table(Nsimd);
+  for (int lane = 0; lane < Nsimd; ++lane) {
+    icoor_table[lane].resize(ndim);
+    grid->iCoorFromIindex(icoor_table[lane], lane);
+  }
+
+  autoView(in_v, grid_field, CpuRead);
+  thread_for(oidx, grid->oSites(), {
+    ExtractPointerArray<SiteSpinor> ptrs(Nsimd);
+    Coordinate ocoor(ndim);
+    grid->oCoorFromOindex(ocoor, oidx);
+    for (int lane = 0; lane < Nsimd; ++lane) {
+      int x = ocoor[0] + grid->_rdimensions[0] * icoor_table[lane][0];
+      int y = ocoor[1] + grid->_rdimensions[1] * icoor_table[lane][1];
+      int z = ocoor[2] + grid->_rdimensions[2] * icoor_table[lane][2];
+      int t = ocoor[3] + grid->_rdimensions[3] * icoor_table[lane][3];
+      int lex = x + lc[0] * (y + lc[1] * (z + lc[2] * t));
+      int parity = (x + y + z + t) & 1;
+      int eo_idx = parity * V_eo + (lex >> 1);
+      ptrs[lane] = reinterpret_cast<SiteSpinor *>(&buf_eo[eo_idx * 24]);
+    }
+    extract(in_v[oidx], ptrs, 0);
+  });
+}
+
+template <class FermionField>
+inline void eo_buffer_to_fermion(const double *buf_eo, FermionField &grid_field) {
+  using SiteSpinor = typename FermionField::scalar_object;
+  using vobj = typename FermionField::vector_object;
+
+  GridBase *grid = grid_field.Grid();
+  Coordinate lc = grid->LocalDimensions();
+  assert((lc[0] & 1) == 0);
+  int V = local_volume(grid);
+  int V_eo = V / 2;
+  const int Nsimd = vobj::vector_type::Nsimd();
+  const int ndim = grid->Nd();
+
+  std::vector<Coordinate> icoor_table(Nsimd);
+  for (int lane = 0; lane < Nsimd; ++lane) {
+    icoor_table[lane].resize(ndim);
+    grid->iCoorFromIindex(icoor_table[lane], lane);
+  }
+
+  autoView(out_v, grid_field, CpuWrite);
+  thread_for(oidx, grid->oSites(), {
+    ExtractPointerArray<SiteSpinor> ptrs(Nsimd);
+    Coordinate ocoor(ndim);
+    grid->oCoorFromOindex(ocoor, oidx);
+    for (int lane = 0; lane < Nsimd; ++lane) {
+      int x = ocoor[0] + grid->_rdimensions[0] * icoor_table[lane][0];
+      int y = ocoor[1] + grid->_rdimensions[1] * icoor_table[lane][1];
+      int z = ocoor[2] + grid->_rdimensions[2] * icoor_table[lane][2];
+      int t = ocoor[3] + grid->_rdimensions[3] * icoor_table[lane][3];
+      int lex = x + lc[0] * (y + lc[1] * (z + lc[2] * t));
+      int parity = (x + y + z + t) & 1;
+      int eo_idx = parity * V_eo + (lex >> 1);
+      ptrs[lane] = const_cast<SiteSpinor *>(
+          reinterpret_cast<const SiteSpinor *>(&buf_eo[eo_idx * 24]));
+    }
+    vobj vobj_out;
+    merge(vobj_out, ptrs, 0);
+    out_v[oidx] = vobj_out;
+  });
+}
+
+// ----------------------------------------------------------------------------
 // Gauge: LatticeGaugeField ↔ 4 per-direction host buffers (lex sites).
 //
 // scalar_object is iVector<iScalar<iMatrix<C,Nc>>,Nd> — 4 dirs × 18 doubles

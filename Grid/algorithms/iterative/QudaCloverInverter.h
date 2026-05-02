@@ -108,22 +108,15 @@ public:
       assert(false && "QudaCloverInverter::operator() called before SetGauge()");
     }
     int V = Quda::local_volume(grid_);
-    Coordinate lc = grid_->LocalDimensions();
 
-    // Pack src: LatticeFermion → lex buf → EO permute (24 doubles/site).
-    std::vector<double> src_lex(24 * V), src_eo(24 * V);
-    Quda::fermion_to_lex_buffer(src, src_lex.data());
-    Quda::lex_to_eo_permute(src_lex.data(), src_eo.data(), V, 24, lc);
-
-    std::vector<double> sol_eo(24 * V, 0.0);
+    // Fused unvectorize + EO permute directly into the QUDA EO buffer.
+    std::vector<double> src_eo(24 * V), sol_eo(24 * V, 0.0);
+    Quda::fermion_to_eo_buffer(src, src_eo.data());
 
     invertQuda(sol_eo.data(), src_eo.data(), &inv_param_);
 
-    std::vector<double> sol_lex(24 * V);
-    Quda::eo_to_lex_permute(sol_eo.data(), sol_lex.data(), V, 24, lc);
-    Quda::lex_buffer_to_fermion(sol_lex.data(), sol);
+    Quda::eo_buffer_to_fermion(sol_eo.data(), sol);
 
-    // Stash the last QUDA report — useful for the test harness.
     last_iter_ = inv_param_.iter;
     last_residual_ = inv_param_.true_res[0];
     last_secs_ = inv_param_.secs;
