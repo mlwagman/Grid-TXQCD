@@ -127,16 +127,28 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
 
     // Force / momentum buffer: QUDA writes ASQTAD_MOM_LINKS, reconstruct=10
     // (anti-Hermitian traceless 3×3 packed in 10 reals per site/dir).
-    // With gauge_order = QUDA_QDP_GAUGE_ORDER, the host buffer is 4 per-dir
-    // blocks of V × 10 doubles each.
+    // With gauge_order = QUDA_MILC_GAUGE_ORDER, the buffer is a single
+    // contiguous block, layout [site_eo][dir][10 reals].
     int V = Quda::local_volume(ggrid);
     constexpr int MOM_RECON = 10;
-    std::vector<double> mom_buf(4 * V * MOM_RECON, 0.0);
+    std::vector<double> mom_buf(V * 4 * MOM_RECON, 0.0);
 
-    // QUDA's gauge_param/inv_param come from the multishift inverter — same
-    // gauge upload, same κ/csw, same EVEN_EVEN_ASYMMETRIC matpc.
-    QudaGaugeParam &gauge_param = quda_ms_->GaugeParam();
+    // QUDA's inv_param comes from the multishift inverter (same κ/csw,
+    // EVEN_EVEN_ASYMMETRIC matpc).  But the gauge_param for
+    // computeCloverForceQuda is the param for the *momentum output*, not
+    // the resident gauge — it must be QUDA_GENERAL_LINKS (so QUDA's
+    // gauge_field machinery sets up extended ghosts correctly).  MILC
+    // uses a fresh QudaGaugeParam (`newMILCGaugeParam(...,
+    // QUDA_GENERAL_LINKS)`) for this call.
     QudaInvertParam &inv_param  = quda_ms_->InvertParam();
+
+    QudaGaugeParam force_gauge_param = quda_ms_->GaugeParam();
+    force_gauge_param.type        = QUDA_GENERAL_LINKS;
+    force_gauge_param.reconstruct = QUDA_RECONSTRUCT_NO;
+    // MILC gauge_order — single contiguous mom buffer in MILC packed order
+    // [site_eo][dir][matrix].  Matches what MILC's qudaCloverForce uses.
+    force_gauge_param.gauge_order = QUDA_MILC_GAUGE_ORDER;
+    QudaGaugeParam &gauge_param = force_gauge_param;
 
     // Coefficients: PowerNegHalf.residues[k] are the rational coefficients.
     // computeCloverForceQuda multiplies internally by 2·dt·coeff·kappa²
@@ -190,10 +202,10 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     Coordinate lc = ggrid->LocalDimensions();
     std::vector<std::vector<double>> dir_eo_18(4, std::vector<double>(18 * V));
     for (int mu = 0; mu < 4; ++mu) {
-      const double *src = &mom_buf[mu * V * MOM_RECON];
+      // MILC order: mom_buf[site_eo*4*10 + mu*10 + i]
       double *dst = dir_eo_18[mu].data();
       for (int site = 0; site < V; ++site) {
-        const double *m = &src[site * MOM_RECON];
+        const double *m = &mom_buf[(site * 4 + mu) * MOM_RECON];
         // Anti-hermitian traceless reconstruction.
         // Diagonal:  iM[0][0] = m[0],  iM[1][1] = m[1],  iM[2][2] = -m[0]-m[1]
         // (i.e. M[k][k] is purely imaginary, real parts zero.)
