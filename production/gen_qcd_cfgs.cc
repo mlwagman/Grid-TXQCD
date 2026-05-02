@@ -91,6 +91,9 @@ class TwoFlavourSchurCloverActionMP
 // OneFlavourSchurCloverRationalActionMP — mixed-precision rational action
 // shared with gen_txqcd_cfgs.cc.
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaRationalActionMP.h>
+#endif
 
 struct QcdDiag : public HmcObservable<LatticeGaugeField> {
   struct ActionRef { std::string name; Action<LatticeGaugeField> *action; };
@@ -350,11 +353,35 @@ int main(int argc, char **argv) {
   // refreshes independently — the three PFs sample detM³ stochastically.
   OneFlavourRationalParams rat_params(1e-4, 100.0, cg_max, cg_tol, 20, 64,
                                       100, 1e-6, 1e-4);
-  std::vector<std::unique_ptr<OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>> RatPFs;
-  for (int p = 0; p < 3; ++p) {
-    RatPFs.emplace_back(new OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>(
-        FermOp, FermOpF, &RBGridF, rat_params, 50));
-    RatPFs.back()->is_smeared = true;
+  std::vector<std::unique_ptr<Action<LatticeGaugeField>>> RatPFs;
+
+#ifdef GRID_HAVE_QUDA
+  bool use_quda_hmc = std::getenv("QUDA_SOLVER") != nullptr;
+  if (use_quda_hmc) {
+    QudaCloverParams qp;
+    qp.mass = mass_light;
+    qp.csw  = csw;
+    qp.anti_periodic_t = true;
+    qp.tol = cg_tol;
+    qp.max_iter = cg_max;
+    qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+    for (int p = 0; p < 3; ++p) {
+      auto *act = new OneFlavourSchurCloverQudaRationalActionMP<WilsonImplR, WilsonImplF>(
+          FermOp, FermOpF, &RBGridF, rat_params, qp, 50);
+      act->is_smeared = true;
+      RatPFs.emplace_back(act);
+    }
+    std::cout << GridLogMessage << "QUDA_SOLVER active for HMC rational PFs."
+              << std::endl;
+  } else
+#endif
+  {
+    for (int p = 0; p < 3; ++p) {
+      auto *act = new OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>(
+          FermOp, FermOpF, &RBGridF, rat_params, 50);
+      act->is_smeared = true;
+      RatPFs.emplace_back(act);
+    }
   }
 
   // Grid's SymanzikGaugeAction(β,u0) uses the RBC/Iwasaki convention

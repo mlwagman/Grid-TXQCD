@@ -31,6 +31,9 @@ NAMESPACE_BEGIN(Grid);
 struct QudaCloverMultiShiftSpec {
   std::vector<RealD> shifts;
   std::vector<RealD> tols;     // per-shift; if empty, all use overall tol
+  // EE for measurement-style use; OO matches Grid's SchurDifferentiableOperator
+  // which asserts Checkerboard()==Odd in its MpcDeriv.
+  QudaMatPCType matpc_type = QUDA_MATPC_ODD_ODD;
 };
 
 class QudaCloverMultiShiftInverter
@@ -171,7 +174,7 @@ private:
     inv_param_.inv_type        = QUDA_CG_INVERTER;
     inv_param_.solution_type   = QUDA_MATPCDAG_MATPC_SOLUTION;  // multishift on M_pc^† M_pc
     inv_param_.solve_type      = QUDA_NORMOP_PC_SOLVE;
-    inv_param_.matpc_type      = QUDA_MATPC_EVEN_EVEN;
+    inv_param_.matpc_type      = spec_.matpc_type;
     inv_param_.dagger          = QUDA_DAG_NO;
     inv_param_.mass_normalization   = QUDA_MASS_NORMALIZATION;
     inv_param_.solver_normalization = QUDA_DEFAULT_NORMALIZATION;
