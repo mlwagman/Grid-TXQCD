@@ -109,14 +109,25 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // ------------------------------------------------------------------
 
     // Pack each MPhi_k (Even RB grid) into a flat half-volume host buffer
-    // for QUDA.  The packing reuses the same Grid-RB-cb-site → flat-V/2
-    // mapping that QudaCloverMultiShiftInverter::solve_rb_even uses.
+    // for QUDA.  Grid's RB cb-site order matches QUDA's cb_site within a
+    // parity, so unvectorize → memcpy is a direct contiguous copy.
+    //
+    // KAPPA RESCALE: solve_rb_even returns X_grid = (M_pc_grid†·M_pc_grid +
+    // σ_grid)⁻¹·b in mass form (M_pc_grid mass-form Schur).  But
+    // computeCloverForceQuda interprets X as QUDA's kappa-form solution
+    // X_kappa = (M_pc_kappa†·M_pc_kappa + σ_kappa)⁻¹·b.  Since
+    // M_pc_kappa = 2κ·M_pc_grid → X_kappa = X_grid / (4κ²).  Scale here
+    // so QUDA gets the convention it expects.
     int V_eo = Quda::local_volume(ggrid) / 2;
     using SiteSpinor = typename FermionField::scalar_object;
     static_assert(sizeof(SiteSpinor) == 24 * sizeof(double),
                   "expected 24 doubles/site for fermion");
     std::vector<std::vector<double>> x_bufs(Npole, std::vector<double>(24 * V_eo));
     std::vector<void *> x_ptrs(Npole);
+    // X_grid (what solve_rb_even returns) equals X_kappa_form numerically:
+    // QUDA's internal kappa-form solve, after the 4κ² rescale on src and
+    // offsets, returns the SAME vector as Grid's mass-form X.  So no extra
+    // rescale needed when feeding to computeCloverForceQuda.
     for (int k = 0; k < Npole; ++k) {
       std::vector<SiteSpinor> scalars;
       unvectorizeToLexOrdArray(scalars, MPhi_k[k]);
@@ -184,52 +195,49 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
                            /*gauge=*/nullptr,
                            &gauge_param,
                            &inv_param);
+    // Debug: dump first few values of mom_buf to confirm QUDA wrote to it.
+    {
+      double mom_norm = 0.0;
+      for (size_t i = 0; i < mom_buf.size(); ++i) mom_norm += mom_buf[i] * mom_buf[i];
+      std::cout << GridLogMessage << "[QudaForce] mom_buf size=" << mom_buf.size()
+                << " norm2=" << mom_norm
+                << " first10=";
+      for (int i = 0; i < 10; ++i) std::cout << mom_buf[i] << " ";
+      std::cout << std::endl;
+    }
 
-    // Unpack QUDA's 10-real anti-Hermitian-traceless momentum format into
-    // Grid's GaugeField (3×3 complex matrix per site/dir).
-    //
-    // QUDA's mom layout (per-direction QDP order, EO site order, 10
-    // doubles/site/dir).  The 10 reals encode the anti-Hermitian traceless
-    // SU(3) algebra element packed as:
-    //     [Im(M_00 - M_11)/2,   Im(M_11 - M_22)/2,        // 2 diag (3rd is fixed by traceless)
-    //      Re(M_01), Im(M_01),
-    //      Re(M_02), Im(M_02),
-    //      Re(M_12), Im(M_12),
-    //      <2 padding reals>]
-    // (See QUDA gauge_field_order.h Reconstructor<10>.)  The Lie-algebra
-    // element T satisfies T = -T†, tr T = 0.  We expand back to the full
-    // 3×3 antihermitian matrix.
+    // Unpack QUDA's 10-real anti-Hermitian momentum format → 3×3 complex.
+    // The on-host MILC mom buffer is in EO site order; per-link layout
+    // (derived from QUDA's Reconstruct<11>::Pack at gauge_field_order.h:1149,
+    // copied flat through MILCOrder<*,10> in copy_gauge_inc.cu):
+    //     m[0,1] = Re/Im(M_01)
+    //     m[2,3] = Re/Im(M_02)
+    //     m[4,5] = Re/Im(M_12)
+    //     m[6]   = Im(M_00)
+    //     m[7]   = Im(M_11)
+    //     m[8]   = Im(M_22)              ← stored explicitly, NOT traceless-derived
+    //     m[9]   = 0 (pad)
+    // M is anti-Hermitian: M_ji = −conj(M_ij), Re(diag)=0.
     Coordinate lc = ggrid->LocalDimensions();
     std::vector<std::vector<double>> dir_eo_18(4, std::vector<double>(18 * V));
     for (int mu = 0; mu < 4; ++mu) {
-      // MILC order: mom_buf[site_eo*4*10 + mu*10 + i]
       double *dst = dir_eo_18[mu].data();
       for (int site = 0; site < V; ++site) {
         const double *m = &mom_buf[(site * 4 + mu) * MOM_RECON];
-        // Anti-hermitian traceless reconstruction.
-        // Diagonal:  iM[0][0] = m[0],  iM[1][1] = m[1],  iM[2][2] = -m[0]-m[1]
-        // (i.e. M[k][k] is purely imaginary, real parts zero.)
-        // Off-diag:  M[0][1] = m[2] + i*m[3], M[1][0] = -conj(M[0][1])
-        //           M[0][2] = m[4] + i*m[5], M[2][0] = -conj(M[0][2])
-        //           M[1][2] = m[6] + i*m[7], M[2][1] = -conj(M[1][2])
-        double a0 = m[0], a1 = m[1];           // imag diag entries [0][0], [1][1]
-        double a2 = -(a0 + a1);                // imag diag [2][2] (traceless)
-        double r01 = m[2], i01 = m[3];
-        double r02 = m[4], i02 = m[5];
-        double r12 = m[6], i12 = m[7];
+        double r01 = m[0], i01 = m[1];
+        double r02 = m[2], i02 = m[3];
+        double r12 = m[4], i12 = m[5];
+        double a0  = m[6], a1  = m[7], a2 = m[8];
         double *d = &dst[site * 18];
-        // Row 0
-        d[ 0] = 0.0;       d[ 1] = a0;
-        d[ 2] = r01;       d[ 3] = i01;
-        d[ 4] = r02;       d[ 5] = i02;
-        // Row 1
-        d[ 6] = -r01;      d[ 7] =  i01;
-        d[ 8] = 0.0;       d[ 9] = a1;
-        d[10] = r12;       d[11] = i12;
-        // Row 2
-        d[12] = -r02;      d[13] =  i02;
-        d[14] = -r12;      d[15] =  i12;
-        d[16] = 0.0;       d[17] = a2;
+        d[ 0] = 0.0;   d[ 1] = a0;
+        d[ 2] = r01;   d[ 3] = i01;
+        d[ 4] = r02;   d[ 5] = i02;
+        d[ 6] = -r01;  d[ 7] = i01;
+        d[ 8] = 0.0;   d[ 9] = a1;
+        d[10] = r12;   d[11] = i12;
+        d[12] = -r02;  d[13] = i02;
+        d[14] = -r12;  d[15] = i12;
+        d[16] = 0.0;   d[17] = a2;
       }
     }
 
