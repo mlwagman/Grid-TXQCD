@@ -160,7 +160,9 @@ int main(int argc, char **argv) {
     } else {
       sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
       pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
-      SU<Nc>::ColdConfiguration(Umu);
+      // Tepid (weak-field) start matches the TXQCD-side init and avoids
+      // the wasted thermalization cycles a unit-link cold start needs.
+      SU<Nc>::TepidConfiguration(pRNG, Umu);
     }
 
     WilsonFermionD FermOp(Umu, Grid, RBGrid, mass_runtime());
