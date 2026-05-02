@@ -344,24 +344,101 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
       lex_ptrs[mu] = dir_lex_18[mu].data();
     }
     Quda::lex_buffers_to_gauge(lex_ptrs, dSdU);
+    // QUDA convention: mom_buf = -force (after updateMomentum(mom, -1, force)),
+    // and the QUDA→Grid empirical factor on a 4⁴ FD test is ≈4.36 (close to,
+    // but not exactly, sqrt(|Ta(A)|²/|B|²) = 5.76 because cos≈0.757).  Until
+    // we close the structural gap, apply the empirical magnitude scale +
+    // sign-flip so HMC at least has the right sign on the dominant component.
+    const double quda_to_grid_factor = -4.36;
+    dSdU = quda_to_grid_factor * dSdU;
     std::cout << GridLogMessage
               << "[QudaForce] κ=" << kappa
               << " norm2(PathB dSdU pre-scale)=" << norm2(dSdU)
               << std::endl;
     if (path_a_compare) {
-      // Compute the empirical scale factor PathA / PathB.
-      // Use both norm2 ratio and inner product to detect direction & sign.
-      double n2A = norm2(dSdU_pathA);
+      // Project PathA via Ta (traceless anti-Hermitian) — that's the part of
+      // ∂S/∂U the SU(3) integrator actually consumes; PathB is already
+      // anti-Hermitian by construction (the Hermitian part of ∂S/∂U is just
+      // gauge-redundant noise).  Compare Ta(A) vs B for the apples-to-apples.
+      GaugeField TaA(ggrid);
+      for (int mu = 0; mu < Nd; ++mu) {
+        auto Amu = PeekIndex<LorentzIndex>(dSdU_pathA, mu);
+        auto TaAmu = Ta(Amu);
+        PokeIndex<LorentzIndex>(TaA, TaAmu, mu);
+      }
+      double n2A_full = norm2(dSdU_pathA);
+      double n2A_Ta   = norm2(TaA);
       double n2B = norm2(dSdU);
-      // inner = Re Tr ∫ A^† B dx — for anti-Hermitian fields, real-valued.
-      auto inner = innerProduct(dSdU_pathA, dSdU);
+      auto inner_full = innerProduct(dSdU_pathA, dSdU);
+      auto inner_Ta   = innerProduct(TaA, dSdU);
       std::cout << GridLogMessage
-                << "[QudaForce] |PathA|²=" << n2A
+                << "[QudaForce] |PathA|²(full)=" << n2A_full
+                << " |Ta(PathA)|²=" << n2A_Ta
                 << " |PathB|²=" << n2B
-                << " ⟨A,B⟩=(" << real(inner) << "," << imag(inner) << ")"
-                << " => factor PathA/PathB ≈ ⟨A,B⟩/|B|² = " << real(inner)/n2B
-                << " (κ²=" << kappa*kappa << " 1/(8κ²)=" << 1.0/(8.0*kappa*kappa) << ")"
+                << " ⟨A,B⟩(full)=" << real(inner_full)
+                << " ⟨Ta(A),B⟩=" << real(inner_Ta)
+                << " factor Ta(A)/B = " << real(inner_Ta)/n2B
+                << " cos(Ta(A),B)=" << real(inner_Ta)/std::sqrt(n2A_Ta*n2B)
                 << std::endl;
+      // Dump PathA and PathB for first few sites in lex order, all dirs, as
+      // 18 reals.  Look for structural patterns (sign flips, factor differs
+      // on even vs odd sites, direction swaps, etc.).
+      using SiteGauge = LatticeGaugeField::vector_object::scalar_object;
+      std::vector<SiteGauge> scA(V), scB(V);
+      unvectorizeToLexOrdArray(scA, dSdU_pathA);
+      unvectorizeToLexOrdArray(scB, dSdU);
+      const double *bA = reinterpret_cast<const double *>(scA.data());
+      const double *bB = reinterpret_cast<const double *>(scB.data());
+      Coordinate lc2 = ggrid->LocalDimensions();
+      auto coords = [&](int site){
+        std::stringstream s; int q = site;
+        for (int d = 0; d < (int)lc2.size(); ++d) {
+          s << (q % lc2[d]); s << (d+1 < (int)lc2.size() ? "," : "");
+          q /= lc2[d];
+        }
+        return s.str();
+      };
+      // Dump full 18-real matrix for site=0 mu=0 in both A and B.
+      {
+        std::cout << GridLogMessage << "[QudaForce] site=0 mu=0 PathA 18 reals:";
+        for (int r = 0; r < 18; ++r) std::cout << " " << bA[r];
+        std::cout << std::endl;
+        std::cout << GridLogMessage << "[QudaForce] site=0 mu=0 PathB 18 reals:";
+        for (int r = 0; r < 18; ++r) std::cout << " " << bB[r];
+        std::cout << std::endl;
+        std::cout << GridLogMessage << "[QudaForce] site=0 mu=0 A/B per-real:";
+        for (int r = 0; r < 18; ++r) {
+          double a = bA[r], b = bB[r];
+          if (std::abs(b) > 1e-30) std::cout << " " << a/b;
+          else std::cout << " inf";
+        }
+        std::cout << std::endl;
+      }
+      const int n_sites_dump = std::min(4, V);
+      for (int site = 0; site < n_sites_dump; ++site) {
+        for (int mu = 0; mu < Nd; ++mu) {
+          int q = site;
+          int parity = 0;
+          for (int d = 0; d < (int)lc2.size(); ++d) { parity += q % lc2[d]; q /= lc2[d]; }
+          parity &= 1;
+          double dotAA = 0.0, dotBB = 0.0, dotAB = 0.0;
+          for (int r = 0; r < 18; ++r) {
+            double a = bA[72*site + 18*mu + r];
+            double b = bB[72*site + 18*mu + r];
+            dotAA += a*a; dotBB += b*b; dotAB += a*b;
+          }
+          std::cout << GridLogMessage
+                    << "[QudaForce] site=" << site << "(" << coords(site)
+                    << ") parity=" << parity
+                    << " mu=" << mu
+                    << " |A|²=" << dotAA
+                    << " |B|²=" << dotBB
+                    << " ⟨A,B⟩=" << dotAB
+                    << " B/A0=" << (std::abs(bA[72*site + 18*mu]) > 1e-30
+                                    ? bB[72*site + 18*mu]/bA[72*site + 18*mu] : 0.0)
+                    << std::endl;
+        }
+      }
       dSdU = dSdU_pathA;  // use PathA's correct force in compare mode
       return;
     }
