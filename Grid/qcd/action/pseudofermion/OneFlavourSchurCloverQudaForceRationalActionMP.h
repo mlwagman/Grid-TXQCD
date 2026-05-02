@@ -250,26 +250,30 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     // is unused in the symmetric clover case).  Pass a dummy.
     std::vector<void *> p_ptrs(Npole, nullptr);
 
-    // Per-pole loop with nvector=1 — workaround for upstream QUDA bug
-    // (qParam.x[0] /= 2 inside the for-loop in computeCloverForceQuda).
-    // First call has multiplicity=1 (σ trace once); later calls multiplicity=0.
-    // First call has overwrite_mom=1; later calls overwrite_mom=0 to accumulate.
-    bool dbg_notrace = std::getenv("QUDA_FORCE_DBG_NOTRACE") != nullptr;
-    for (int k = 0; k < Npole; ++k) {
-      gauge_param.overwrite_mom = (k == 0) ? 1 : 0;
-      double mult = (k == 0 && !dbg_notrace) ? 1.0 : 0.0;
-      void *xp = x_ptrs[k];
-      void *pp = p_ptrs[k];
-      double cf = coeff[k];
+    // QUDA_FORCE_DBG_NVEC1 — fall back to per-pole nvector=1 loop (workaround
+    // for the upstream nvector>1 bug in older QUDA, e.g. agrebe Dec 2023).
+    // Default: single fused call, requires QUDA >= chroma's 2025-07 snapshot.
+    if (std::getenv("QUDA_FORCE_DBG_NVEC1")) {
+      bool dbg_notrace = std::getenv("QUDA_FORCE_DBG_NOTRACE") != nullptr;
+      for (int k = 0; k < Npole; ++k) {
+        gauge_param.overwrite_mom = (k == 0) ? 1 : 0;
+        double mult = (k == 0 && !dbg_notrace) ? 1.0 : 0.0;
+        void *xp = x_ptrs[k];
+        void *pp = p_ptrs[k];
+        double cf = coeff[k];
+        computeCloverForceQuda(mom_buf.data(), 1.0, &xp, &pp, &cf, kappa2, ck,
+                               1, mult, nullptr, &gauge_param, &inv_param);
+      }
+    } else {
       computeCloverForceQuda(mom_buf.data(),
                              /*dt=*/1.0,
-                             &xp,
-                             &pp,
-                             &cf,
+                             x_ptrs.data(),
+                             p_ptrs.data(),
+                             coeff.data(),
                              kappa2,
                              ck,
-                             /*nvector=*/1,
-                             /*multiplicity=*/mult,
+                             Npole,
+                             /*multiplicity=*/1.0,
                              /*gauge=*/nullptr,
                              &gauge_param,
                              &inv_param);

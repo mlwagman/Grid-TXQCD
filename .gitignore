@@ -128,3 +128,9 @@ external/quda-install/
 external/quda-build*.log
 external/eigen/
 
+
+# QUDA source clone (use external/README.md to re-clone)
+external/quda-src/
+# CCCL — fetched by QUDA's CPM
+external/cccl/
+
