@@ -185,14 +185,19 @@ struct TXQCDSiteMatrixUtil {
   }
 
   // Per-flavor diagonal mass (preferred entry point).
+  // If `fwd` is non-null, also populate it with the pre-inversion matrix M
+  // (used by the cuBLAS forward Mooee path).  Backwards compatible — existing
+  // callers passing 6 args get the original behaviour.
   static void PrecomputeInverses(const SpinMatrices &sm,
                                   const std::array<RealD, TxqcdNf> &diag_mass,
                                   const AuxSiteArrays &aux,
                                   RealD csw,
                                   const CloverSiteArrays *clover,
-                                  std::vector<SiteMatrix> &inv) {
+                                  std::vector<SiteMatrix> &inv,
+                                  std::vector<SiteMatrix> *fwd = nullptr) {
     uint64_t nsites = aux.sig.size();
     inv.resize(nsites);
+    if (fwd) fwd->resize(nsites);
     // Per-site BuildSiteMatrix + 24×24 Eigen.inverse() are completely
     // independent across sites; parallelize across CPU cores.  On 16 OMP
     // threads this is ~16× faster than the previous serial loop on the
@@ -207,6 +212,7 @@ struct TXQCDSiteMatrixUtil {
       SiteMatrix M;
       BuildSiteMatrix(sm, diag_mass, aux.sig[x], aux.pi[x], aux.s[x],
                       aux.p[x], aux.t[x], csw, fmn_ptr, M);
+      if (fwd) (*fwd)[x] = M;
       inv[x] = M.inverse();
     });
   }

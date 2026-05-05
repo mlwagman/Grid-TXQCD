@@ -138,6 +138,13 @@ class TXQCDWilsonCloverFermionEO {
     std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
               << "] -- of which un/revectorize: "
               << fmt(t_unvec_us_ + t_revec_us_) << " s" << std::endl;
+    if (n_mooee_fwd_) {
+      std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
+                << "] Mooee (forward):  " << n_mooee_fwd_
+                << " calls, " << fmt(t_mooee_fwd_us_) << " s ("
+                << fmt(t_mooee_fwd_us_) / n_mooee_fwd_ * 1e3
+                << " ms/call)" << std::endl;
+    }
   }
 
   void ImportGauge(const GaugeField &U) {
@@ -168,6 +175,18 @@ class TXQCDWilsonCloverFermionEO {
   // ----- Even-odd components -----
 
   void Mooee(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+    auto t0 = usecond();
+    static int use_cublas = []() {
+      const char *e = std::getenv("TXQCD_MOOEE_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (use_cublas) {
+      int cb = in.f[0].Checkerboard();
+      ApplyMooeeFwdCublas(cb, in, out);
+      t_mooee_fwd_us_ += usecond() - t0;
+      n_mooee_fwd_++;
+      return;
+    }
     int cb = in.f[0].Checkerboard();
     for (int a = 0; a < TxqcdNf; ++a) {
       out.f[a] = diag_mass_[a] * in.f[a];
@@ -184,6 +203,110 @@ class TXQCDWilsonCloverFermionEO {
         out.f[a] = out.f[a] + cl.f[a];
         out.f[a].Checkerboard() = cb;
       }
+    }
+    t_mooee_fwd_us_ += usecond() - t0;
+    n_mooee_fwd_++;
+  }
+
+  // cuBLAS gemmBatched-based 24×24 forward Mooee.  Mirror of ApplyMooeeInvCublas
+  // but using the pre-inversion matrix M (=Mee or Moo) populated by ImportFields
+  // when TXQCD_MOOEE_CUBLAS=1.  Requires TXQCD_PRECOMPUTE_GPU=1 (lex table) and
+  // TXQCD_MOOEE_CUBLAS=1 (Mfwd_dev_ buffers populated).
+  void ApplyMooeeFwdCublas(int cb, const TXQCDFermionNf &in,
+                           TXQCDFermionNf &out) {
+    GridBase *grid = in.f[0].Grid();
+    uint64_t lSites = grid->lSites();
+    uint64_t oSites = grid->oSites();
+    using vobj = typename LatticeFermion::vector_object;
+    constexpr int Nsimd = vobj::Nsimd();
+    constexpr int N = SMU::kDim;       // 24
+    constexpr int Ncomp = N;
+
+    auto &fin_flat  = (cb == Even) ? fermion_in_flat_e_  : fermion_in_flat_o_;
+    auto &fout_flat = (cb == Even) ? fermion_out_flat_e_ : fermion_out_flat_o_;
+    auto &lex_dev   = (cb == Even) ? lex_table_dev_e_    : lex_table_dev_o_;
+    auto &lex_built = (cb == Even) ? lex_table_built_e_  : lex_table_built_o_;
+    GRID_ASSERT(lex_built && "TXQCD_MOOEE_CUBLAS requires TXQCD_PRECOMPUTE_GPU=1");
+
+    if (fin_flat.size() < lSites * Ncomp) {
+      fin_flat.resize(lSites * Ncomp);
+      fout_flat.resize(lSites * Ncomp);
+    }
+
+    // (1) SIMD fermion → flat per-site (lex-ordered).
+    {
+      ComplexD *fin_ptr = &fin_flat[0];
+      int *lex_dev_ptr = &lex_dev[0];
+      autoView(in_v0, in.f[0], AcceleratorRead);
+      autoView(in_v1, in.f[1], AcceleratorRead);
+      accelerator_for(s, oSites, Nsimd, {
+        int simt_lane = static_cast<int>(lane);
+        int lex = lex_dev_ptr[s * Nsimd + simt_lane];
+        ComplexD *dst = &fin_ptr[lex * Ncomp];
+        auto v0 = in_v0[s];
+        auto v1 = in_v1[s];
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int i = 0; i < Nc; ++i) {
+            dst[0 * 12 + alpha * 3 + i] = getlane(v0()(alpha)(i), simt_lane);
+            dst[1 * 12 + alpha * 3 + i] = getlane(v1()(alpha)(i), simt_lane);
+          }
+        }
+      });
+    }
+
+    // (2) Set up forward-matrix pointer arrays once per parity.
+    auto &Amk_fwd = (cb == Even) ? Amk_fwd_e_ : Amk_fwd_o_;
+    auto &Bkn = (cb == Even) ? Bkn_e_ : Bkn_o_;
+    auto &Cmn = (cb == Even) ? Cmn_e_ : Cmn_o_;
+    auto &fwd_built = (cb == Even) ? cublas_fwd_built_e_ : cublas_fwd_built_o_;
+    auto &built_inv = (cb == Even) ? cublas_ptrs_built_e_ : cublas_ptrs_built_o_;
+    auto &Mfwd_dev = (cb == Even) ? Mfwd_dev_e_ : Mfwd_dev_o_;
+    if (!fwd_built) {
+      Amk_fwd.resize(lSites);
+      Bkn.resize(lSites);
+      Cmn.resize(lSites);
+      ComplexD *Mfwd_ptr = &Mfwd_dev[0];
+      ComplexD *Bin_ptr  = &fin_flat[0];
+      ComplexD *Cout_ptr = &fout_flat[0];
+      ComplexD **Amk_ptr = &Amk_fwd[0];
+      ComplexD **Bkn_ptr = &Bkn[0];
+      ComplexD **Cmn_ptr = &Cmn[0];
+      accelerator_for(i, lSites, 1, {
+        Amk_ptr[i] = &Mfwd_ptr[i * 576];
+        Bkn_ptr[i] = &Bin_ptr[i * 24];
+        Cmn_ptr[i] = &Cout_ptr[i * 24];
+      });
+      fwd_built = true;
+      built_inv = true;  // Bkn/Cmn are now valid for the inverse path too
+    }
+
+    // (3) Batched 24×24 × 24×1 matvec via cuBLAS.
+    GridBLAS blas;
+    blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
+                     N, 1, N,
+                     ComplexD(1.0, 0.0),
+                     Amk_fwd, Bkn,
+                     ComplexD(0.0, 0.0),
+                     Cmn);
+
+    // (4) Flat → SIMD fermion.
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a].Checkerboard() = cb;
+    {
+      ComplexD *fout_ptr = &fout_flat[0];
+      int *lex_dev_ptr = &lex_dev[0];
+      autoView(out_v0, out.f[0], AcceleratorWrite);
+      autoView(out_v1, out.f[1], AcceleratorWrite);
+      accelerator_for(s, oSites, Nsimd, {
+        int simt_lane = static_cast<int>(lane);
+        int lex = lex_dev_ptr[s * Nsimd + simt_lane];
+        const ComplexD *src = &fout_ptr[lex * Ncomp];
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int i = 0; i < Nc; ++i) {
+            putlane(out_v0[s]()(alpha)(i), src[0 * 12 + alpha * 3 + i], simt_lane);
+            putlane(out_v1[s]()(alpha)(i), src[1 * 12 + alpha * 3 + i], simt_lane);
+          }
+        }
+      });
     }
   }
 
@@ -289,6 +412,14 @@ class TXQCDWilsonCloverFermionEO {
   deviceVector<ComplexD *> Bkn_e_, Bkn_o_;
   deviceVector<ComplexD *> Cmn_e_, Cmn_o_;
   bool cublas_ptrs_built_e_{false}, cublas_ptrs_built_o_{false};
+  // Forward Mooee cuBLAS (TXQCD_MOOEE_CUBLAS=1) scratch: pre-inversion
+  // matrix M (=Mee or Moo) on CPU and GPU, plus a separate Amk pointer
+  // array indexing the forward matrix buffer.  The fermion in/out flat
+  // buffers and Bkn/Cmn pointer arrays are reused with the inverse path.
+  std::vector<SMU::SiteMatrix> fwd_even_, fwd_odd_;
+  deviceVector<ComplexD> Mfwd_dev_e_, Mfwd_dev_o_;
+  deviceVector<ComplexD *> Amk_fwd_e_, Amk_fwd_o_;
+  bool cublas_fwd_built_e_{false}, cublas_fwd_built_o_{false};
 
   SMU::SpinMatrices sm_;
 
@@ -304,6 +435,10 @@ class TXQCDWilsonCloverFermionEO {
   mutable uint64_t t_pre_unvec_us_{0};
   mutable uint64_t t_pre_inv_us_{0};
   mutable uint64_t t_pre_pack_us_{0};
+  // Forward Mooee timer (the 24×24 forward apply, currently composed of
+  // ApplyDelta + ApplyClover + diag-mass).
+  mutable uint64_t t_mooee_fwd_us_{0};
+  mutable uint64_t n_mooee_fwd_{0};
 
   void ImportFields() {
     pickCheckerboard(Even, sigma_e_, sigma_);
@@ -334,19 +469,25 @@ class TXQCDWilsonCloverFermionEO {
     t_pre_unvec_us_ += usecond() - t_unv0;
 
     auto t0 = usecond();
+    static int use_mooee_cublas = []() {
+      const char *e = std::getenv("TXQCD_MOOEE_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    std::vector<SMU::SiteMatrix> *fwd_e_ptr = use_mooee_cublas ? &fwd_even_ : nullptr;
+    std::vector<SMU::SiteMatrix> *fwd_o_ptr = use_mooee_cublas ? &fwd_odd_  : nullptr;
     if (csw_ != 0.0) {
       auto t_cl0 = usecond();
       auto cl_e = SMU::UnvectorizeClover(FS_e_);
       auto cl_o = SMU::UnvectorizeClover(FS_o_);
       t_pre_unvec_us_ += usecond() - t_cl0;
       auto t_inv0 = usecond();
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_, fwd_e_ptr);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_,  fwd_o_ptr);
       t_pre_inv_us_ += usecond() - t_inv0;
     } else {
       auto t_inv0 = usecond();
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_, fwd_e_ptr);
+      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_,  fwd_o_ptr);
       t_pre_inv_us_ += usecond() - t_inv0;
     }
     auto t_pack0 = usecond();
@@ -360,6 +501,24 @@ class TXQCDWilsonCloverFermionEO {
     } else {
       PackInverseToSimd(inv_even_, inv_simd_e_, Even);
       PackInverseToSimd(inv_odd_,  inv_simd_o_, Odd);
+    }
+    if (use_mooee_cublas) {
+      // Memcpy forward matrices CPU → GPU (Eigen std::vector is contiguous
+      // column-major).
+      uint64_t nsites_e = fwd_even_.size();
+      uint64_t nsites_o = fwd_odd_.size();
+      if (Mfwd_dev_e_.size() < nsites_e * 576) Mfwd_dev_e_.resize(nsites_e * 576);
+      if (Mfwd_dev_o_.size() < nsites_o * 576) Mfwd_dev_o_.resize(nsites_o * 576);
+      acceleratorCopyToDevice(
+          reinterpret_cast<void *>(const_cast<std::complex<double> *>(
+              fwd_even_.data()->data())),
+          &Mfwd_dev_e_[0],
+          nsites_e * 576 * sizeof(ComplexD));
+      acceleratorCopyToDevice(
+          reinterpret_cast<void *>(const_cast<std::complex<double> *>(
+              fwd_odd_.data()->data())),
+          &Mfwd_dev_o_[0],
+          nsites_o * 576 * sizeof(ComplexD));
     }
     t_pre_pack_us_ += usecond() - t_pack0;
     t_precompute_us_ += usecond() - t0;
