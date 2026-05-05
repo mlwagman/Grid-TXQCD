@@ -22,6 +22,8 @@
 #include <Grid/qcd/action/txqcd/TXQCDDeltaCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDSiteMatrix.h>
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
+#include <Grid/util/Lexicographic.h>
+#include <Grid/algorithms/blas/BatchedBlas.h>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -124,6 +126,10 @@ class TXQCDWilsonCloverFermionEO {
               << " calls, " << fmt(t_precompute_us_) << " s ("
               << (n_precompute_ ? fmt(t_precompute_us_) / n_precompute_ * 1e3 : 0)
               << " ms/call)" << std::endl;
+    std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
+              << "]   precompute breakdown: unvec=" << fmt(t_pre_unvec_us_)
+              << " s  inv=" << fmt(t_pre_inv_us_)
+              << " s  pack=" << fmt(t_pre_pack_us_) << " s" << std::endl;
     std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
               << "] ApplyMooeeInv:    " << n_apply_inv_
               << " calls, " << fmt(t_apply_inv_us_) << " s ("
@@ -266,6 +272,23 @@ class TXQCDWilsonCloverFermionEO {
   // the per-CG ApplyMooeeInvSIMD kernel.
   std::unique_ptr<InvField> inv_simd_e_;
   std::unique_ptr<InvField> inv_simd_o_;
+  // GPU pack scratch (TXQCD_PRECOMPUTE_GPU=1 path): contiguous device buffer
+  // of inverses (24×24 ComplexD per site, lex-ordered) and the (oSite, lane)
+  // → lex-index table.  Both grow monotonically; the lex table is grid-only
+  // and is computed once per parity.
+  deviceVector<ComplexD> M_dev_e_, M_dev_o_;
+  deviceVector<int> lex_table_dev_e_, lex_table_dev_o_;
+  bool lex_table_built_e_{false}, lex_table_built_o_{false};
+  // cuBLAS gemmBatched scratch (TXQCD_MOOEEINV_CUBLAS=1 path): per-parity flat
+  // fermion in/out buffers (lex-ordered, lSites × 24 ComplexD) and pointer
+  // arrays for batched 24×24 × 24×1 gemm.  Amk pointers are static once
+  // M_dev is populated; Bkn/Cmn point into the reusable flat buffers.
+  deviceVector<ComplexD> fermion_in_flat_e_, fermion_in_flat_o_;
+  deviceVector<ComplexD> fermion_out_flat_e_, fermion_out_flat_o_;
+  deviceVector<ComplexD *> Amk_e_, Amk_o_;
+  deviceVector<ComplexD *> Bkn_e_, Bkn_o_;
+  deviceVector<ComplexD *> Cmn_e_, Cmn_o_;
+  bool cublas_ptrs_built_e_{false}, cublas_ptrs_built_o_{false};
 
   SMU::SpinMatrices sm_;
 
@@ -276,6 +299,11 @@ class TXQCDWilsonCloverFermionEO {
   mutable uint64_t t_revec_us_{0};
   mutable uint64_t n_precompute_{0};
   mutable uint64_t n_apply_inv_{0};
+  // Sub-timers inside the precompute pipeline (CPU): aux unvectorize, the
+  // 24×24 Eigen LU inversion itself, and the SIMD repack into InvField.
+  mutable uint64_t t_pre_unvec_us_{0};
+  mutable uint64_t t_pre_inv_us_{0};
+  mutable uint64_t t_pre_pack_us_{0};
 
   void ImportFields() {
     pickCheckerboard(Even, sigma_e_, sigma_);
@@ -300,23 +328,137 @@ class TXQCDWilsonCloverFermionEO {
         }
     }
 
+    auto t_unv0 = usecond();
     auto aux_e = SMU::UnvectorizeAux(sigma_e_, pi_e_, s_e_, p_e_, t_e_);
     auto aux_o = SMU::UnvectorizeAux(sigma_o_, pi_o_, s_o_, p_o_, t_o_);
+    t_pre_unvec_us_ += usecond() - t_unv0;
 
     auto t0 = usecond();
     if (csw_ != 0.0) {
+      auto t_cl0 = usecond();
       auto cl_e = SMU::UnvectorizeClover(FS_e_);
       auto cl_o = SMU::UnvectorizeClover(FS_o_);
+      t_pre_unvec_us_ += usecond() - t_cl0;
+      auto t_inv0 = usecond();
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_);
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_);
+      t_pre_inv_us_ += usecond() - t_inv0;
     } else {
+      auto t_inv0 = usecond();
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_);
       SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_);
+      t_pre_inv_us_ += usecond() - t_inv0;
     }
-    PackInverseToSimd(inv_even_, inv_simd_e_, Even);
-    PackInverseToSimd(inv_odd_,  inv_simd_o_, Odd);
+    auto t_pack0 = usecond();
+    static int use_gpu_pack = []() {
+      const char *e = std::getenv("TXQCD_PRECOMPUTE_GPU");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (use_gpu_pack) {
+      PackInverseToSimdGPU(inv_even_, inv_simd_e_, Even);
+      PackInverseToSimdGPU(inv_odd_,  inv_simd_o_, Odd);
+    } else {
+      PackInverseToSimd(inv_even_, inv_simd_e_, Even);
+      PackInverseToSimd(inv_odd_,  inv_simd_o_, Odd);
+    }
+    t_pre_pack_us_ += usecond() - t_pack0;
     t_precompute_us_ += usecond() - t0;
     n_precompute_++;
+  }
+
+ public:  // Public so CUDA extended lambdas inside accelerator_for compile.
+  // GPU pack: writes the scalar Eigen 24×24 inverse into a SIMD-vectorized
+  // lattice field via a single accelerator_for, replacing the CPU path
+  // (vectorizeFromLexOrdArray + thread_for, ~1.5 s on 16³×48) with a kernel
+  // that runs in ~10–50 ms.  The bottleneck previously was pure data shuffling
+  // (≈900 MB CPU memory move per parity), not math.
+  //
+  // Pipeline:
+  //   (a) flatten scalar_inv (CPU std::vector<Eigen 24×24>) into a contiguous
+  //       host buffer of ComplexD (lex-ordered, row-major);
+  //   (b) copy that buffer to a deviceVector;
+  //   (c) build / reuse a (oSite, lane) → lex-index table on the device;
+  //   (d) accelerator_for over (oSite, lane): each thread reads its lane's
+  //       scalar entries from the flat buffer and writes them per-lane into
+  //       the InvField via coalescedWrite on each (r, c) entry.
+  void PackInverseToSimdGPU(const std::vector<SMU::SiteMatrix> &scalar_inv,
+                            std::unique_ptr<InvField> &simd_field, int cb) {
+    if (!simd_field) simd_field.reset(new InvField(&rbgrid_));
+    GridBase *grid = simd_field->Grid();
+    constexpr int N  = SMU::kDim;     // 24
+    constexpr int N2 = N * N;         // 576
+    using vobj = typename InvField::vector_object;
+    constexpr int Nsimd = vobj::Nsimd();
+    uint64_t nsites = scalar_inv.size();
+    uint64_t oSites = grid->oSites();
+    GRID_ASSERT(nsites == (uint64_t)grid->lSites());
+
+    // (a)+(b) Eigen's std::vector<Matrix<complex<double>,24,24>> is contiguous
+    // column-major storage (24×24×16 B = 9216 B per matrix, no padding).
+    // std::complex<double> and Grid's ComplexD share layout (two doubles),
+    // so we memcpy the entire array straight to the device — no host flatten
+    // pass and no temporary 921 MB std::vector.  The kernel below reads with
+    // column-major indexing src[c*N + r] to match Eigen's layout.
+    auto &M_dev = (cb == Even) ? M_dev_e_ : M_dev_o_;
+    if (M_dev.size() < nsites * N2) M_dev.resize(nsites * N2);
+    static_assert(sizeof(std::complex<double>) == sizeof(ComplexD),
+                  "std::complex<double> and ComplexD must share layout");
+    acceleratorCopyToDevice(
+        reinterpret_cast<void *>(const_cast<std::complex<double> *>(
+            scalar_inv.data()->data())),
+        &M_dev[0],
+        nsites * N2 * sizeof(ComplexD));
+
+    // (c) Compute lex-index table for (oSite, lane).  Depends only on the
+    // grid layout, so cache it once per parity.
+    auto &lex_dev = (cb == Even) ? lex_table_dev_e_ : lex_table_dev_o_;
+    auto &lex_built = (cb == Even) ? lex_table_built_e_ : lex_table_built_o_;
+    if (!lex_built) {
+      std::vector<int> lex_host(oSites * Nsimd);
+      std::vector<Coordinate> icoor(Nsimd);
+      const int ndim = grid->Nd();
+      for (int lane = 0; lane < Nsimd; ++lane) {
+        icoor[lane].resize(ndim);
+        grid->iCoorFromIindex(icoor[lane], lane);
+      }
+      thread_for(oidx, oSites, {
+        Coordinate ocoor(ndim), lcoor(ndim);
+        grid->oCoorFromOindex(ocoor, oidx);
+        for (int lane = 0; lane < Nsimd; ++lane) {
+          for (int mu = 0; mu < ndim; ++mu)
+            lcoor[mu] = ocoor[mu] + grid->_rdimensions[mu] * icoor[lane][mu];
+          int lex;
+          Lexicographic::IndexFromCoor(lcoor, lex, grid->_ldimensions);
+          lex_host[oidx * Nsimd + lane] = lex;
+        }
+      });
+      lex_dev.resize(oSites * Nsimd);
+      acceleratorCopyToDevice(&lex_host[0], &lex_dev[0],
+                              oSites * Nsimd * sizeof(int));
+      lex_built = true;
+    }
+
+    // (d) Per-lane scatter into InvField via coalescedWrite.
+    ComplexD *M_dev_ptr = &M_dev[0];
+    int *lex_dev_ptr = &lex_dev[0];
+    InvField &simd_ref = *simd_field;
+    autoView(out_v, simd_ref, AcceleratorWrite);
+    accelerator_for(s, oSites, Nsimd, {
+      // The accelerator_for macro binds 'lane' as the lambda's third parameter
+      // (the SIMD-inner thread index on GPU).  Use putlane (host+device, takes
+      // a scalar) directly to dodge the SIMT-vs-host coalescedWrite overload
+      // split that breaks compilation when the body is also compiled for host.
+      int simt_lane = static_cast<int>(lane);
+      int lex  = lex_dev_ptr[s * Nsimd + simt_lane];
+      const ComplexD *src = &M_dev_ptr[lex * N2];
+      // Eigen is column-major; element (r,c) is at offset c*N + r.
+      for (int r = 0; r < N; ++r) {
+        for (int c = 0; c < N; ++c) {
+          putlane(out_v[s]()()(r, c), src[c * N + r], simt_lane);
+        }
+      }
+    });
+    simd_field->Checkerboard() = cb;
   }
 
   // Pack the scalar Eigen 24×24 inverse into a SIMD-vectorized lattice field
@@ -341,6 +483,7 @@ class TXQCDWilsonCloverFermionEO {
     simd_field->Checkerboard() = cb;
   }
 
+ private:
   void ApplyDeltaCB(int cb, const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     auto &sig = (cb == Even) ? sigma_e_ : sigma_o_;
     auto &pi  = (cb == Even) ? pi_e_ : pi_o_;
@@ -372,13 +515,122 @@ class TXQCDWilsonCloverFermionEO {
       const char *e = std::getenv("TXQCD_MOOEEINV_SCALAR");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
+    static int use_cublas = []() {
+      const char *e = std::getenv("TXQCD_MOOEEINV_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
     if (use_scalar) {
       ApplyMooeeInvScalar(cb, in, out);
+    } else if (use_cublas) {
+      ApplyMooeeInvCublas(cb, in, out);
     } else {
       ApplyMooeeInvSimd(cb, in, out);
     }
     t_apply_inv_us_ += usecond() - t_total0;
     n_apply_inv_++;
+  }
+
+  // cuBLAS gemmBatched-based 24×24 matvec.  Reuses the flat column-major
+  // M_dev_ buffers populated by GPU pack (TXQCD_PRECOMPUTE_GPU=1) and
+  // gemmBatched(M=24, N=1, K=24, batchCount=lSites/parity) instead of the
+  // per-site SIMD accelerator_for.  Reshape kernels (SIMD ↔ flat) bracket the
+  // gemm call.  Requires TXQCD_PRECOMPUTE_GPU=1 so M_dev_ is populated.
+  void ApplyMooeeInvCublas(int cb, const TXQCDFermionNf &in,
+                           TXQCDFermionNf &out) {
+    GridBase *grid = in.f[0].Grid();
+    uint64_t lSites = grid->lSites();
+    uint64_t oSites = grid->oSites();
+    using vobj = typename LatticeFermion::vector_object;
+    constexpr int Nsimd = vobj::Nsimd();
+    constexpr int N = SMU::kDim;       // 24
+    constexpr int Ncomp = N;           // per-site fermion components
+
+    auto &fin_flat  = (cb == Even) ? fermion_in_flat_e_  : fermion_in_flat_o_;
+    auto &fout_flat = (cb == Even) ? fermion_out_flat_e_ : fermion_out_flat_o_;
+    auto &lex_dev   = (cb == Even) ? lex_table_dev_e_    : lex_table_dev_o_;
+    auto &lex_built = (cb == Even) ? lex_table_built_e_  : lex_table_built_o_;
+    GRID_ASSERT(lex_built && "TXQCD_MOOEEINV_CUBLAS requires TXQCD_PRECOMPUTE_GPU=1 (lex table built by GPU pack)");
+
+    if (fin_flat.size() < lSites * Ncomp) {
+      fin_flat.resize(lSites * Ncomp);
+      fout_flat.resize(lSites * Ncomp);
+    }
+
+    // (1) SIMD fermion → flat per-site (lex-ordered).  Per (oSite, lane) thread,
+    // extract this lane's 24 components from the 2 spinor flavors.
+    {
+      ComplexD *fin_ptr = &fin_flat[0];
+      int *lex_dev_ptr = &lex_dev[0];
+      autoView(in_v0, in.f[0], AcceleratorRead);
+      autoView(in_v1, in.f[1], AcceleratorRead);
+      accelerator_for(s, oSites, Nsimd, {
+        int simt_lane = static_cast<int>(lane);
+        int lex = lex_dev_ptr[s * Nsimd + simt_lane];
+        ComplexD *dst = &fin_ptr[lex * Ncomp];
+        auto v0 = in_v0[s];
+        auto v1 = in_v1[s];
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int i = 0; i < Nc; ++i) {
+            dst[0 * 12 + alpha * 3 + i] = getlane(v0()(alpha)(i), simt_lane);
+            dst[1 * 12 + alpha * 3 + i] = getlane(v1()(alpha)(i), simt_lane);
+          }
+        }
+      });
+    }
+
+    // (2) Set up cuBLAS pointer arrays once per parity (cached).
+    auto &Amk = (cb == Even) ? Amk_e_ : Amk_o_;
+    auto &Bkn = (cb == Even) ? Bkn_e_ : Bkn_o_;
+    auto &Cmn = (cb == Even) ? Cmn_e_ : Cmn_o_;
+    auto &built = (cb == Even) ? cublas_ptrs_built_e_ : cublas_ptrs_built_o_;
+    auto &M_dev = (cb == Even) ? M_dev_e_ : M_dev_o_;
+    if (!built) {
+      Amk.resize(lSites);
+      Bkn.resize(lSites);
+      Cmn.resize(lSites);
+      ComplexD *M_ptr   = &M_dev[0];
+      ComplexD *Bin_ptr = &fin_flat[0];
+      ComplexD *Cout_ptr = &fout_flat[0];
+      ComplexD **Amk_ptr = &Amk[0];
+      ComplexD **Bkn_ptr = &Bkn[0];
+      ComplexD **Cmn_ptr = &Cmn[0];
+      accelerator_for(i, lSites, 1, {
+        Amk_ptr[i] = &M_ptr[i * 576];
+        Bkn_ptr[i] = &Bin_ptr[i * 24];
+        Cmn_ptr[i] = &Cout_ptr[i * 24];
+      });
+      built = true;
+    }
+
+    // (3) Batched 24×24 × 24×1 matvec via cuBLAS.  Column-major matrices
+    // (Eigen layout, row index r is fastest) match the cuBLAS convention.
+    GridBLAS blas;
+    blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
+                     N, 1, N,
+                     ComplexD(1.0, 0.0),
+                     Amk, Bkn,
+                     ComplexD(0.0, 0.0),
+                     Cmn);
+
+    // (4) Flat → SIMD fermion.
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a].Checkerboard() = cb;
+    {
+      ComplexD *fout_ptr = &fout_flat[0];
+      int *lex_dev_ptr = &lex_dev[0];
+      autoView(out_v0, out.f[0], AcceleratorWrite);
+      autoView(out_v1, out.f[1], AcceleratorWrite);
+      accelerator_for(s, oSites, Nsimd, {
+        int simt_lane = static_cast<int>(lane);
+        int lex = lex_dev_ptr[s * Nsimd + simt_lane];
+        const ComplexD *src = &fout_ptr[lex * Ncomp];
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int i = 0; i < Nc; ++i) {
+            putlane(out_v0[s]()(alpha)(i), src[0 * 12 + alpha * 3 + i], simt_lane);
+            putlane(out_v1[s]()(alpha)(i), src[1 * 12 + alpha * 3 + i], simt_lane);
+          }
+        }
+      });
+    }
   }
 
   // LatticeView has no default ctor, so std::array<LatticeView,N> can't be
