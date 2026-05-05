@@ -47,12 +47,13 @@ for i in $(seq 0 $((N_STREAMS-1))); do
   # Forward tunable env vars through the prefix so mpirun inherits them.
   # Unset vars fall through to the binary's defaults.
   #
-  # Production GPU acceleration env (deploy together for ~36% wallclock
-  # cut vs PathA on TXQCD light, validated bit-exact vs PathA force):
+  # Production GPU acceleration env (deploy together for ~51% wallclock
+  # cut vs PathA on TXQCD light at 1-traj MDS=1; bit-exact vs PathA force):
   #   QUDA_FORCE=1 QUDA_FORCE_KERNEL=1   — strange Nf=1 RHMC via QUDA force
   #   TXQCD_QUDA_HYBRID=1                 — TXQCD light σ-piece via QUDA primitive
   #   TXQCD_PRECOMPUTE_GPU=1              — GPU pack of M^-1 (PrecomputeInverses 2.7→1.3 s)
-  #   TXQCD_MOOEEINV_CUBLAS=1             — cuBLAS gemmBatched 24×24 (8.2→1.9 ms/call)
+  #   TXQCD_MOOEEINV_CUBLAS=1             — cuBLAS gemmBatched 24×24 inverse (8.2→1.9 ms/call)
+  #   TXQCD_MOOEE_CUBLAS=1                — cuBLAS gemmBatched 24×24 forward (9.0→1.8 ms/call)
   CUDA_VISIBLE_DEVICES=$i LAMBDA=$LAM \
       MDSTEPS="${MDSTEPS-}" AUX_MULT="${AUX_MULT-}" GAUGE_MULT="${GAUGE_MULT-}" \
       GAUGE_INNER_MULT="${GAUGE_INNER_MULT-}" \
@@ -65,6 +66,7 @@ for i in $(seq 0 $((N_STREAMS-1))); do
       TXQCD_QUDA_HYBRID="${TXQCD_QUDA_HYBRID-}" \
       TXQCD_PRECOMPUTE_GPU="${TXQCD_PRECOMPUTE_GPU-}" \
       TXQCD_MOOEEINV_CUBLAS="${TXQCD_MOOEEINV_CUBLAS-}" \
+      TXQCD_MOOEE_CUBLAS="${TXQCD_MOOEE_CUBLAS-}" \
       QUDA_ENABLE_MPS="${QUDA_ENABLE_MPS:-1}" \
       mpirun -np 1 --map-by ppr:1:socket:PE=16 \
           ./gen_txqcd_cfgs_2plus1 --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
