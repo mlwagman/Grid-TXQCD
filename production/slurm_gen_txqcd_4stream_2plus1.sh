@@ -44,16 +44,28 @@ for i in $(seq 0 $((N_STREAMS-1))); do
   # mpirun -np 1 --map-by ppr:1:socket:PE=16 : working binding pattern for
   # 4 parallel single-GPU streams on an lq2_gpu node (see
   # production/slurm_gen_qcd_4stream.sh and the lq2-mpi reference memory).
-  # Forward tunable env vars (MDSTEPS, AUX_MULT, GAUGE_MULT, WEAK_FIELD_SCALE,
-  # NO_METROP, START_TYPE) through the prefix so mpirun inherits them.  Unset
-  # vars fall through to the binary's defaults.
+  # Forward tunable env vars through the prefix so mpirun inherits them.
+  # Unset vars fall through to the binary's defaults.
+  #
+  # Production GPU acceleration env (deploy together for ~36% wallclock
+  # cut vs PathA on TXQCD light, validated bit-exact vs PathA force):
+  #   QUDA_FORCE=1 QUDA_FORCE_KERNEL=1   — strange Nf=1 RHMC via QUDA force
+  #   TXQCD_QUDA_HYBRID=1                 — TXQCD light σ-piece via QUDA primitive
+  #   TXQCD_PRECOMPUTE_GPU=1              — GPU pack of M^-1 (PrecomputeInverses 2.7→1.3 s)
+  #   TXQCD_MOOEEINV_CUBLAS=1             — cuBLAS gemmBatched 24×24 (8.2→1.9 ms/call)
   CUDA_VISIBLE_DEVICES=$i LAMBDA=$LAM \
       MDSTEPS="${MDSTEPS-}" AUX_MULT="${AUX_MULT-}" GAUGE_MULT="${GAUGE_MULT-}" \
+      GAUGE_INNER_MULT="${GAUGE_INNER_MULT-}" \
       WEAK_FIELD_SCALE="${WEAK_FIELD_SCALE-}" NO_METROP="${NO_METROP-}" \
       START_TYPE="${START_TYPE-}" HASEN_DM="${HASEN_DM-}" SUFFIX="${SUFFIX-}" \
       AUX_SIGMA_L="${AUX_SIGMA_L-}" N_TRAJ="${N_TRAJ-}" \
       INTEGRATOR="${INTEGRATOR-}" TRAJL="${TRAJL-}" LAMBDA_MN2="${LAMBDA_MN2-}" \
       IMPORT_CFG="${IMPORT_CFG-}" \
+      QUDA_FORCE="${QUDA_FORCE-}" QUDA_FORCE_KERNEL="${QUDA_FORCE_KERNEL-}" \
+      TXQCD_QUDA_HYBRID="${TXQCD_QUDA_HYBRID-}" \
+      TXQCD_PRECOMPUTE_GPU="${TXQCD_PRECOMPUTE_GPU-}" \
+      TXQCD_MOOEEINV_CUBLAS="${TXQCD_MOOEEINV_CUBLAS-}" \
+      QUDA_ENABLE_MPS="${QUDA_ENABLE_MPS:-1}" \
       mpirun -np 1 --map-by ppr:1:socket:PE=16 \
           ./gen_txqcd_cfgs_2plus1 --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
       >"$logfile" 2>&1 &
