@@ -18,6 +18,7 @@
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/txqcd/TXQCDCloverSchurOp.h>
+#include <Grid/util/QudaPackGpu.h>
 #include <Grid/qcd/action/txqcd/TXQCDSolvers.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonPseudoFermionAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
@@ -299,7 +300,7 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
 
   TXQCDFermionNf &PseudoFermion() { return Phi; }
 
- private:
+ protected:
   TXQCDWilsonCloverFermionEO MakeEOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
     return TXQCDWilsonCloverFermionEO(Unc.U, grid_, rbgrid_, mass_, Unc.sigma,
@@ -331,16 +332,13 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
     GridBase *grid = Y.Grid();
     int cb = Y.f[0].Checkerboard();
 
-    // sigma
+    // sigma — fused: build F on RB, then accumulate scale*F → dSdU.sigma at cb.
     {
       auto G = FlavorBilinear(Y, X);
       G.Checkerboard() = cb;
       LatticeSigmaField F = HermitianFlavorForce(G);
       F.Checkerboard() = cb;
-      LatticeSigmaField tmp(&grid_);
-      tmp = Zero();
-      setCheckerboard(tmp, F);
-      dSdU.sigma = dSdU.sigma + ak * tmp;
+      Quda::AccumulateRbScaledToFull(dSdU.sigma, ak, F);
     }
     // pi
     {
@@ -353,10 +351,7 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
       G.Checkerboard() = cb;
       LatticePiField F = HermitianFlavorForce(G);
       F.Checkerboard() = cb;
-      LatticePiField tmp(&grid_);
-      tmp = Zero();
-      setCheckerboard(tmp, F);
-      dSdU.pi = dSdU.pi + ak * tmp;
+      Quda::AccumulateRbScaledToFull(dSdU.pi, ak, F);
     }
     // s
     {
@@ -365,10 +360,7 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
       G = inv_sqrt2 * G;
       LatticeSFieldC F = HermitianColorForce(G);
       F.Checkerboard() = cb;
-      LatticeSFieldC tmp(&grid_);
-      tmp = Zero();
-      setCheckerboard(tmp, F);
-      dSdU.s = dSdU.s + ak * tmp;
+      Quda::AccumulateRbScaledToFull(dSdU.s, ak, F);
     }
     // p
     {
@@ -377,41 +369,26 @@ class TXQCDWilsonCloverRationalEOAction : public Action<TXQCDField> {
       G = inv_sqrt2 * G;
       LatticePFieldC F = HermitianColorForce(G);
       F.Checkerboard() = cb;
-      LatticePFieldC tmp(&grid_);
-      tmp = Zero();
-      setCheckerboard(tmp, F);
-      dSdU.p = dSdU.p + ak * tmp;
+      Quda::AccumulateRbScaledToFull(dSdU.p, ak, F);
     }
-    // t_{mu,nu}
-    for (int mu = 0; mu < Nd; ++mu) {
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        SpinTable iSig{ISigmaMatrix(mu, nu)};
-        auto Gt = ColorBilinearSpinOp(Y, X, iSig);
-        Gt.Checkerboard() = cb;
-        LatticeSFieldC Ft = HermitianColorForce(Gt);
-        Ft.Checkerboard() = cb;
-        LatticeSFieldC Ftfull(&grid_);
-        Ftfull = Zero();
-        setCheckerboard(Ftfull, Ft);
-        autoView(dst, dSdU.t, AcceleratorWrite);
-        autoView(src, Ftfull, AcceleratorRead);
-        const int Nsimd = LatticeTField::vector_object::Nsimd();
-        const RealD ak_local = ak;
-        const int mu_l = mu;
-        const int nu_l = nu;
-        accelerator_for(ss, grid_.oSites(), Nsimd, {
-          auto s_lane = src(ss);
-          auto d_lane = dst(ss);
-          for (int i = 0; i < Nc; ++i) {
-            for (int j = 0; j < Nc; ++j) {
-              auto v = ak_local * s_lane()()(i, j);
-              d_lane()(mu_l, nu_l)(i, j) = d_lane()(mu_l, nu_l)(i, j) + v;
-              d_lane()(nu_l, mu_l)(i, j) = d_lane()(nu_l, mu_l)(i, j) - v;
-            }
+    // t_{mu,nu} — single fused kernel for all 6 (μ < ν) pairs.  Reads
+    // Y, X once per site; computes 6 G_t bilinears, projects each to F_t,
+    // accumulates ±ak·F_t into the (μ,ν)/(ν,μ) entries of dSdU.t.
+    {
+      // Flatten 6 spin matrices iσ_{μν} into a single contiguous array.
+      // Order: (0,1),(0,2),(0,3),(1,2),(1,3),(2,3).
+      static const int MU_PAIR[6] = {0, 0, 0, 1, 1, 2};
+      static const int NU_PAIR[6] = {1, 2, 3, 2, 3, 3};
+      std::array<ComplexD, 6 * Ns * Ns> isig_flat{};
+      for (int p = 0; p < 6; ++p) {
+        SpinTable iSig{ISigmaMatrix(MU_PAIR[p], NU_PAIR[p])};
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int beta = 0; beta < Ns; ++beta) {
+            isig_flat[p * Ns * Ns + alpha * Ns + beta] = iSig(alpha, beta);
           }
-          coalescedWrite(dst[ss], d_lane);
-        });
+        }
       }
+      Quda::FusedTAccumulate(dSdU.t, ak, Y, X, isig_flat);
     }
   }
 
