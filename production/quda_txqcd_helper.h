@@ -152,8 +152,12 @@ private:
     int it;
     for (it = 0; it < N_OUTER; ++it) {
       // Per-flavor QUDA QCD invert: δ_a = (M_QCD)^{-1}_a · r_a
+      // Skip flavors with negligible source norm — QUDA's invertQuda errors
+      // out on a zero source, and stochastic-loop sources zero one flavor.
+      const RealD per_flav_tol2 = 1e-30 * src2;
       for (int a = 0; a < TxqcdNf; ++a) {
         delta.f[a] = Zero();
+        if (norm2(r.f[a]) < per_flav_tol2) continue;
         int qidx = mass_to_idx_[a];
         (*quda_inv_[qidx])(dummy_HermOp, r.f[a], delta.f[a]);
       }
