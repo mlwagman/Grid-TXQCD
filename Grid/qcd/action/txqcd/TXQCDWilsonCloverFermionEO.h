@@ -145,6 +145,13 @@ class TXQCDWilsonCloverFermionEO {
                 << fmt(t_mooee_fwd_us_) / n_mooee_fwd_ * 1e3
                 << " ms/call)" << std::endl;
     }
+    if (n_meooe_) {
+      std::cout << GridLogMessage << "[TXQCD-EO timers/" << tag
+                << "] Meooe (Wilson):  " << n_meooe_
+                << " calls, " << fmt(t_meooe_us_) << " s ("
+                << fmt(t_meooe_us_) / n_meooe_ * 1e3
+                << " ms/call)" << std::endl;
+    }
   }
 
   void ImportGauge(const GaugeField &U) {
@@ -346,13 +353,19 @@ class TXQCDWilsonCloverFermionEO {
   }
 
   void Meooe(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+    auto t0 = usecond();
     for (int a = 0; a < TxqcdNf; ++a)
       Dw_.Meooe(in.f[a], out.f[a]);
+    t_meooe_us_ += usecond() - t0;
+    n_meooe_++;
   }
 
   void MeooeDag(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+    auto t0 = usecond();
     for (int a = 0; a < TxqcdNf; ++a)
       Dw_.MeooeDag(in.f[a], out.f[a]);
+    t_meooe_us_ += usecond() - t0;
+    n_meooe_++;
   }
 
   WilsonOp &Wilson() { return Dw_; }
@@ -439,6 +452,9 @@ class TXQCDWilsonCloverFermionEO {
   // ApplyDelta + ApplyClover + diag-mass).
   mutable uint64_t t_mooee_fwd_us_{0};
   mutable uint64_t n_mooee_fwd_{0};
+  // Wilson hop timer (Meooe + MeooeDag — the off-diagonal pure-Wilson piece).
+  mutable uint64_t t_meooe_us_{0};
+  mutable uint64_t n_meooe_{0};
 
   void ImportFields() {
     pickCheckerboard(Even, sigma_e_, sigma_);
@@ -523,6 +539,19 @@ class TXQCDWilsonCloverFermionEO {
     t_pre_pack_us_ += usecond() - t_pack0;
     t_precompute_us_ += usecond() - t0;
     n_precompute_++;
+  }
+
+ public:
+  // Phase J: expose precomputed 24×24 inverse buffer + lex-index table for
+  // external consumers (TXQCDLogDetCloverEOAction GPU trace kernel).  These
+  // are populated by ImportFields() (called at construction time and on every
+  // gauge update).  The buffer for parity cb stores nsites=lSites/2 matrices
+  // in column-major Eigen layout: M_inv[lex_index*576 + col*24 + row].
+  const deviceVector<ComplexD>& MdevForCb(int cb) const {
+    return cb == Even ? M_dev_e_ : M_dev_o_;
+  }
+  const deviceVector<int>& LexTableForCb(int cb) const {
+    return cb == Even ? lex_table_dev_e_ : lex_table_dev_o_;
   }
 
  public:  // Public so CUDA extended lambdas inside accelerator_for compile.
