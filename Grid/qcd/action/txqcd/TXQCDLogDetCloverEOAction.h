@@ -22,6 +22,10 @@
 #include <Grid/qcd/action/txqcd/TXQCDLogDetGpuKernel.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 #include <Grid/util/QudaPackGpu.h>
+#include <Grid/algorithms/blas/BatchedBlas.h>
+#ifdef GRID_CUDA
+#include <cublas_v2.h>
+#endif
 
 NAMESPACE_BEGIN(Grid);
 
@@ -119,8 +123,11 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     uint64_t nsites = aux.sig.size();
     t_pickcb_us_ += usecond() - t_pickcb0;
 
-    auto t_inv0 = usecond();
-    if (inv_even_.size() < nsites) inv_even_.resize(nsites);
+    auto t_build0 = usecond();
+    // Phase J.2: BUILD forward M (not inverse) on CPU, then invert on GPU
+    // via cublasZgetrfBatched + cublasZgetriBatched.  Saves ~half the
+    // per-site CPU time (Eigen invert, ~190 ms → ~50 ms cuBLAS).
+    if (m_fwd_host_.size() < nsites) m_fwd_host_.resize(nsites);
     thread_for(x, nsites, {
       SMU::SiteMatrix M;
       std::array<SMU::FmnSobj, 6> fmn_site;
@@ -132,20 +139,25 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       SMU::BuildSiteMatrix(sm_, diag_mass_, aux.sig[x], aux.pi[x],
                           aux.s[x], aux.p[x], aux.t[x],
                           csw_, fmn_ptr, M);
-      inv_even_[x] = M.inverse();
+      m_fwd_host_[x] = M;  // forward M; cuBLAS will LU-decompose + invert
     });
-    t_inv_us_ += usecond() - t_inv0;
+    t_inv_us_ += usecond() - t_build0;  // re-purposed: now CPU build only
 
     auto t_upload0 = usecond();
-    // 2) Upload contiguous Eigen 24×24 inverse buffer (column-major) to device.
-    constexpr int N2 = SMU::kDim * SMU::kDim;  // 576
+    constexpr int N  = SMU::kDim;        // 24
+    constexpr int N2 = N * N;            // 576
+
+    // 2) Upload forward M to device buffer M_fwd_dev_ (will be overwritten by
+    //    cuBLAS getrf with the LU decomposition).  M_inv_dev_ receives the
+    //    inverse.  Both are sized lazily.
+    if (M_fwd_dev_.size() < nsites * N2) M_fwd_dev_.resize(nsites * N2);
     if (M_inv_dev_.size() < nsites * N2) M_inv_dev_.resize(nsites * N2);
     static_assert(sizeof(std::complex<double>) == sizeof(ComplexD),
                   "std::complex<double> and ComplexD must share layout");
     acceleratorCopyToDevice(
         reinterpret_cast<void *>(const_cast<std::complex<double> *>(
-            inv_even_.data()->data())),
-        &M_inv_dev_[0],
+            m_fwd_host_.data()->data())),
+        &M_fwd_dev_[0],
         nsites * N2 * sizeof(ComplexD));
 
     // 3) Build lex-index table for the RB-Even grid once and cache.
@@ -153,7 +165,47 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       Quda::BuildLexTable(&rbgrid_, lex_table_dev_);
       lex_built_ = true;
     }
+
+    // 4) Build cuBLAS pointer arrays + pivot/info buffers once and cache.
+    //    pivots: nsites × N ints, info: nsites ints.
+    if (!cublas_built_ || cublas_nsites_ != nsites) {
+      Amk_ptrs_.resize(nsites);
+      Cmk_ptrs_.resize(nsites);
+      pivots_dev_.resize(nsites * N);
+      info_dev_.resize(nsites);
+      ComplexD *Mfwd = &M_fwd_dev_[0];
+      ComplexD *Minv = &M_inv_dev_[0];
+      ComplexD **Amk = &Amk_ptrs_[0];
+      ComplexD **Cmk = &Cmk_ptrs_[0];
+      accelerator_for(i, nsites, 1, {
+        Amk[i] = &Mfwd[i * N2];
+        Cmk[i] = &Minv[i * N2];
+      });
+      cublas_built_ = true;
+      cublas_nsites_ = nsites;
+    }
     t_upload_us_ += usecond() - t_upload0;
+
+    auto t_cublas0 = usecond();
+    // 5) cuBLAS getrfBatched + getriBatched: invert all 24×24 matrices on GPU.
+    //    Eigen layout is column-major, matching cuBLAS expectations directly.
+#ifdef GRID_CUDA
+    cublasHandle_t handle = GridBLAS::gridblasHandle;
+    // pointer mode device — we passed pivot/info as device pointers.
+    cublasZgetrfBatched(handle, N,
+                        reinterpret_cast<cuDoubleComplex **>(&Amk_ptrs_[0]),
+                        N, &pivots_dev_[0], &info_dev_[0],
+                        nsites);
+    cublasZgetriBatched(handle, N,
+                        reinterpret_cast<cuDoubleComplex **>(&Amk_ptrs_[0]),
+                        N, &pivots_dev_[0],
+                        reinterpret_cast<cuDoubleComplex **>(&Cmk_ptrs_[0]),
+                        N, &info_dev_[0],
+                        nsites);
+#else
+#  error "Phase J.2 GPU LogDet requires GRID_CUDA"
+#endif
+    t_cublas_us_ += usecond() - t_cublas0;
 
     auto t_traces0 = usecond();
     // 4) GPU kernel: extract 5 force traces from M^{-1}.
@@ -233,8 +285,9 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
               << "[TXQCDLogDet.gpu/" << tag << "] " << n_deriv_
               << " deriv_gpu calls (ms/call):"
               << "  pickCB=" << double(t_pickcb_us_) * 1e-3 / n_deriv_
-              << "  inv=" << double(t_inv_us_) * 1e-3 / n_deriv_
+              << "  cpu_build=" << double(t_inv_us_) * 1e-3 / n_deriv_
               << "  upload=" << double(t_upload_us_) * 1e-3 / n_deriv_
+              << "  cublas_inv=" << double(t_cublas_us_) * 1e-3 / n_deriv_
               << "  traces=" << double(t_traces_us_) * 1e-3 / n_deriv_
               << "  total=" << double(t_total_us_) * 1e-3 / n_deriv_
               << std::endl;
@@ -464,15 +517,22 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
   SMU::SpinMatrices sm_;
   std::vector<LatticeColourMatrix> FS_;
   // Phase J GPU LogDet scratch (TXQCD_LOGDET_GPU=1 default ON).
-  // - inv_even_: CPU contiguous Eigen 24×24 inverses (column-major).
-  // - M_inv_dev_: device mirror of inv_even_, uploaded once per deriv() call.
-  // - lex_table_dev_: cached (oSite, lane)→lex map for RB-Even, built once.
-  std::vector<SMU::SiteMatrix> inv_even_;
+  //   J.1: M^{-1} extraction kernel (CPU build+invert, GPU traces).
+  //   J.2: cuBLAS GPU invert.  m_fwd_host_ holds CPU-built forward M;
+  //   M_fwd_dev_ is its device mirror (overwritten by getrf with LU);
+  //   M_inv_dev_ holds the inverse from getriBatched.
+  std::vector<SMU::SiteMatrix> m_fwd_host_;
+  deviceVector<ComplexD>       M_fwd_dev_;
   deviceVector<ComplexD>       M_inv_dev_;
   deviceVector<int>            lex_table_dev_;
   bool                         lex_built_{false};
+  // cuBLAS getrf/getri pointer arrays + pivot/info scratch.
+  deviceVector<ComplexD *>     Amk_ptrs_, Cmk_ptrs_;
+  deviceVector<int>            pivots_dev_, info_dev_;
+  bool                         cublas_built_{false};
+  uint64_t                     cublas_nsites_{0};
   mutable uint64_t t_pickcb_us_{0}, t_inv_us_{0}, t_upload_us_{0};
-  mutable uint64_t t_traces_us_{0}, t_total_us_{0};
+  mutable uint64_t t_cublas_us_{0}, t_traces_us_{0}, t_total_us_{0};
   mutable uint64_t n_deriv_{0};
 
   SMU::AuxSiteArrays GetEvenAux(const TXQCDField &U) {
