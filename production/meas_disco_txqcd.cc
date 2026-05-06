@@ -1,48 +1,23 @@
 #include "params.h"
 #include "quda_helper.h"
+#include "quda_txqcd_helper.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TXQCDProduction;
 
-static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
-                    TXQCDFermionNf &x, RealD tol, int maxit) {
-  GridBase *g = b.Grid();
-  TXQCDFermionNf r(g), p(g), Mp(g), MdMp(g);
-  x = Zero();
-  r = b;
-  p = r;
-  RealD rsq = norm2(r);
-  RealD bsq = std::max(norm2(b), 1e-30);
-  RealD tol2 = tol * tol * bsq;
-  for (int it = 0; it < maxit; ++it) {
-    Mop.M(p, Mp);
-    Mop.Mdag(Mp, MdMp);
-    ComplexD pAp = innerProduct(p, MdMp);
-    ComplexD alpha = ComplexD(rsq, 0.0) / pAp;
-    axpy(x, alpha, p);
-    axpy(r, -alpha, MdMp);
-    RealD rsq_new = norm2(r);
-    if (rsq_new < tol2) break;
-    RealD beta_cg = rsq_new / rsq;
-    for (int a = 0; a < TxqcdNf; ++a) p.f[a] = r.f[a] + beta_cg * p.f[a];
-    rsq = rsq_new;
-  }
-}
-
 static std::vector<ComplexD>
-StochasticLoop_ud(TXQCDWilsonCloverOp &Mop, GridBase *grid,
-                  GridParallelRNG &pRNG, int nn) {
+StochasticLoop_ud(Grid::QudaTxqcdPropSolver &solver,
+                  GridBase *grid, GridParallelRNG &pRNG, int nn) {
   int T = grid->GlobalDimensions()[Nd - 1];
   Gamma g5(Gamma::Algebra::Gamma5);
   std::vector<ComplexD> L(T, 0.0);
 
   for (int h = 0; h < nn; ++h) {
-    TXQCDFermionNf src(grid), b(grid), x(grid);
+    TXQCDFermionNf src(grid), x(grid);
     src.f[0] = Zero();
     gaussian(pRNG, src.f[1]);
-    Mop.Mdag(src, b);
-    TxqcdCG(Mop, b, x, cg_tol, cg_max);
+    solver.solve(src, x);
 
     LatticeFermion g5x(grid);
     g5x = g5 * x.f[0];
@@ -56,15 +31,14 @@ StochasticLoop_ud(TXQCDWilsonCloverOp &Mop, GridBase *grid,
   return L;
 }
 
-static RealD StochasticTrMinv_TX(TXQCDWilsonCloverOp &Mop, GridBase *grid,
-                                 GridParallelRNG &pRNG, int nn) {
+static RealD StochasticTrMinv_TX(Grid::QudaTxqcdPropSolver &solver,
+                                 GridBase *grid, GridParallelRNG &pRNG, int nn) {
   RealD V = (RealD)grid->gSites();
   RealD acc = 0.0;
   for (int h = 0; h < nn; ++h) {
-    TXQCDFermionNf eta(grid), b(grid), x(grid);
+    TXQCDFermionNf eta(grid), x(grid);
     for (int a = 0; a < TxqcdNf; ++a) gaussian(pRNG, eta.f[a]);
-    Mop.Mdag(eta, b);
-    TxqcdCG(Mop, b, x, cg_tol, cg_max);
+    solver.solve(eta, x);
     acc += innerProduct(eta, x).real() / (2.0 * V);
   }
   return acc / nn;
@@ -128,10 +102,15 @@ int main(int argc, char **argv) {
   TXQCDWilsonCloverOp Mop(Usmeared, Grid, RBGrid, mass_light,
                            U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
 
+  std::array<RealD, TxqcdNf> mass_arr;
+  mass_arr.fill(mass_light);
+  Grid::QudaTxqcdPropSolver tx_solver(Mop, mass_arr, csw, Usmeared,
+                                       cg_tol, cg_max);
+
   std::cout << GridLogMessage << "[disco TXQCD] traj=" << traj << std::endl;
 
-  auto loop_ud = StochasticLoop_ud(Mop, &Grid, pRNG, n_noise_disco);
-  RealD trminv = StochasticTrMinv_TX(Mop, &Grid, pRNG, n_noise_disco);
+  auto loop_ud = StochasticLoop_ud(tx_solver, &Grid, pRNG, n_noise_disco);
+  RealD trminv = StochasticTrMinv_TX(tx_solver, &Grid, pRNG, n_noise_disco);
 
   // Strange quark VEV (standard QCD operator on smeared links)
   WCF Dw_s(Usmeared, Grid, RBGrid, mass_strange, csw, csw,

@@ -1,4 +1,5 @@
 #include "params.h"
+#include "quda_txqcd_helper.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/CovariantSmearing.h>
@@ -6,32 +7,6 @@
 #include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TXQCDProduction;
-
-static void TxqcdCG(TXQCDWilsonCloverOp &Mop, const TXQCDFermionNf &b,
-                    TXQCDFermionNf &x, RealD tol, int maxit) {
-  GridBase *g = b.Grid();
-  TXQCDFermionNf r(g), p(g), Mp(g), MdMp(g);
-  x = Zero();
-  r = b;
-  p = r;
-  RealD rsq = norm2(r);
-  RealD bsq = std::max(norm2(b), 1e-30);
-  RealD tol2 = tol * tol * bsq;
-  int it;
-  for (it = 0; it < maxit; ++it) {
-    Mop.M(p, Mp);
-    Mop.Mdag(Mp, MdMp);
-    ComplexD pAp = innerProduct(p, MdMp);
-    ComplexD alpha = ComplexD(rsq, 0.0) / pAp;
-    axpy(x, alpha, p);
-    axpy(r, -alpha, MdMp);
-    RealD rsq_new = norm2(r);
-    if (rsq_new < tol2) break;
-    RealD beta_cg = rsq_new / rsq;
-    for (int a = 0; a < TxqcdNf; ++a) p.f[a] = r.f[a] + beta_cg * p.f[a];
-    rsq = rsq_new;
-  }
-}
 
 static std::vector<LatticeColourMatrix>
 ExtractLinks(const LatticeGaugeField &U) {
@@ -133,6 +108,13 @@ int main(int argc, char **argv) {
   TXQCDWilsonCloverOp Mop(U_inv, Grid, RBGrid, mass_light,
                            U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
 
+  // QUDA-accelerated TXQCD propagator solver (defect correction).
+  // Defaults to plain Grid TxqcdCG fallback; activate via QUDA_SOLVER=1.
+  std::array<RealD, TxqcdNf> mass_arr;
+  mass_arr.fill(mass_light);
+  Grid::QudaTxqcdPropSolver solver(Mop, mass_arr, csw, U_inv,
+                                    cg_tol, cg_max);
+
   int T = latt[Nd - 1];
   auto sources = SourceGrid(latt);
   int nsrc = (int)sources.size();
@@ -168,13 +150,13 @@ int main(int argc, char **argv) {
           CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, sf,
                                                            gauss_width, gauss_niter, Nd - 1);
 
-          // Solve M†M x = M† src
-          TXQCDFermionNf snf(U.Grid()), b(U.Grid()), x(U.Grid());
+          // Solve M·x = src.  Solver dispatches to QUDA defect correction
+          // (env: QUDA_SOLVER=1) or full-volume Grid CG (default fallback).
+          TXQCDFermionNf snf(U.Grid()), x(U.Grid());
           snf.f[0] = Zero();
           snf.f[1] = Zero();
           snf.f[flavor] = sf;
-          Mop.Mdag(snf, b);
-          TxqcdCG(Mop, b, x, cg_tol, cg_max);
+          solver.solve(snf, x);
 
           // Gaussian smear sink
           CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, x.f[flavor],
