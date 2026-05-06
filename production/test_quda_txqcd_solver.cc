@@ -25,6 +25,7 @@
 #include "quda_txqcd_helper.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
+#include <Grid/qcd/action/txqcd/TXQCDCheckpointer.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace Grid;
@@ -39,16 +40,34 @@ int main(int argc, char **argv) {
   GridCartesian        Grid4(latt_size, simd_layout, mpi_layout);
   GridRedBlackCartesian RBGrid4(&Grid4);
 
+  GridSerialRNG   sRNG;
   GridParallelRNG pRNG(&Grid4);
+  sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({1, 2, 3, 4});
 
-  // --- Random TXQCD field (gauge + aux) ---
+  // --- Source TXQCD field: either random hot or loaded cfg.
+  // Set env LOAD_CFG_DIR=<path> + LOAD_CFG_TRAJ=<n> to read
+  //   <path>/ckpoint_lat.<n>, <path>/ckpoint_lat_aux.<n>, <path>/ckpoint_rng.<n>
+  // (production layout).  Otherwise generate random hot + tiny aux fields.
   TXQCDField U(&Grid4);
-  SU<Nc>::HotConfiguration(pRNG, U.U);
-  // Aux fields with small magnitude so Δ is "perturbatively small" (typical
-  // production regime); this is what defect correction is designed for.
-  // Use small values directly to avoid Σ-measurement step.
-  TXQCDCompositeImpl::FillAuxFields(pRNG, U, /*lambda=*/7.0, /*Sigma=*/0.06);
+  const char *load_dir = std::getenv("LOAD_CFG_DIR");
+  const char *load_traj_s = std::getenv("LOAD_CFG_TRAJ");
+  if (load_dir && *load_dir && load_traj_s && *load_traj_s) {
+    int load_traj = std::atoi(load_traj_s);
+    std::string cfg_prefix = std::string(load_dir) + "/ckpoint_lat";
+    std::string rng_prefix = std::string(load_dir) + "/ckpoint_rng";
+    std::cout << GridLogMessage
+              << "[test_quda_txqcd_solver] loading cfg from "
+              << cfg_prefix << "." << load_traj << std::endl;
+    TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
+                                  cfg_prefix, rng_prefix, load_traj);
+  } else {
+    std::cout << GridLogMessage
+              << "[test_quda_txqcd_solver] random hot + tiny aux (Σ=0.06)"
+              << std::endl;
+    SU<Nc>::HotConfiguration(pRNG, U.U);
+    TXQCDCompositeImpl::FillAuxFields(pRNG, U, /*lambda=*/7.0, /*Sigma=*/0.06);
+  }
 
   // --- TXQCD operator on the random gauge ---
   WilsonImplParams impl_p;
