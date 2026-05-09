@@ -90,14 +90,31 @@ inline std::string lambda_suffix() {
   return std::string(buf);
 }
 
+// Runtime MASS override.  Cfg/meas dirs include the mass when set so
+// lighter-pion runs do not collide with the default m=0 ensemble.
+inline RealD mass_runtime() {
+  const char *v = std::getenv("MASS");
+  return (v && *v) ? std::atof(v) : mass;
+}
+inline std::string mass_suffix() {
+  RealD m = mass_runtime();
+  if (std::abs(m - mass) < 1e-6) return "";
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "_m%+.4f", m);
+  return std::string(buf);
+}
+
 inline std::string txqcd_cfg_dir() {
-  return "configs_2pt_txqcd_wilson8x24" + lambda_suffix();
+  return "configs_2pt_txqcd_wilson8x24" + mass_suffix() + lambda_suffix();
 }
 inline std::string qcd_cfg_dir() {
-  return "configs_2pt_qcd_wilson8x24" + lambda_suffix();
+  // QCD has no lambda dependence — all TXQCD-lambda runs share one QCD
+  // ensemble.  meas_dir() still includes lambda_suffix so QCD measurement
+  // outputs land alongside their TXQCD counterparts.
+  return "configs_2pt_qcd_wilson8x24" + mass_suffix();
 }
 inline std::string meas_dir() {
-  return "meas_2pt_wilson8x24" + lambda_suffix();
+  return "meas_2pt_wilson8x24" + mass_suffix() + lambda_suffix();
 }
 
 // Local versions that use the wilson8x24 meas_trajs (env-overridable),
@@ -119,11 +136,31 @@ inline bool qcd_configs_exist() {
   }
   return !trajs.empty();
 }
+// Override base latest_*_checkpoint to honour runtime n_therm/n_prod
+// (the base versions hard-code compile-time defaults of 100+500=600 and miss
+// any cfgs past traj 600 in extended-ensemble runs).
 inline int latest_txqcd_checkpoint() {
-  return TxqcdTest2pt::latest_txqcd_checkpoint(txqcd_cfg_dir());
+  std::string dir = txqcd_cfg_dir();
+  int latest = -1;
+  int upper = n_therm_runtime() + n_prod_runtime();
+  for (int t = meas_skip; t <= upper; t += meas_skip) {
+    if (TxqcdTest2pt::file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
+        TxqcdTest2pt::file_exists(dir + "/ckpoint_lat_aux." + std::to_string(t)) &&
+        TxqcdTest2pt::file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
+      latest = t;
+  }
+  return latest;
 }
 inline int latest_qcd_checkpoint() {
-  return TxqcdTest2pt::latest_qcd_checkpoint(qcd_cfg_dir());
+  std::string dir = qcd_cfg_dir();
+  int latest = -1;
+  int upper = n_therm_runtime() + n_prod_runtime();
+  for (int t = meas_skip; t <= upper; t += meas_skip) {
+    if (TxqcdTest2pt::file_exists(dir + "/ckpoint_lat." + std::to_string(t)) &&
+        TxqcdTest2pt::file_exists(dir + "/ckpoint_rng." + std::to_string(t)))
+      latest = t;
+  }
+  return latest;
 }
 
 inline void LoadTxqcdConfig(TXQCDField &U, GridSerialRNG &sRNG,

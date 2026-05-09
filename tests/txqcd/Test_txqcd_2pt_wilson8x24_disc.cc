@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
 
       GridCartesian *Ug = dynamic_cast<GridCartesian *>(U.Grid());
       GridRedBlackCartesian RB(Ug);
-      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass, U.sigma, U.pi, U.s, U.p, U.t);
+      TXQCDWilsonOp Mop(U.U, *Ug, RB, mass_runtime(), U.sigma, U.pi, U.s, U.p, U.t);
 
       loop_ud.push_back(StochasticLoop_ud(Mop, &Grid, pRNG, n_noise,
                                            meas_tol, cg_max));
@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
         polyakov_im_qcd.push_back(poly.imag());
       }
 
-      WilsonFermionD Dw(Umu, Grid, RBGrid, mass);
+      WilsonFermionD Dw(Umu, Grid, RBGrid, mass_runtime());
       trminv_qcd.push_back(
           StochasticTrMinv_QCD(Dw, &Grid, pRNG, n_noise, meas_tol, cg_max));
     }
