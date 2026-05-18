@@ -28,9 +28,26 @@ export UCX_RNDV_THRESH=16384
 export UCX_IB_GPU_DIRECT_RDMA=no
 export UCX_MEMTYPE_CACHE=n
 
-MPI="${MPI:---mpi 1.1.1.4}"
-SHM="${SHM:---shm 2048 --shm-mpi 0}"
-LAMBDA="${LAMBDA:-0.5000}"
-NP="${NP:-4}"
+# Phase M.4.b fused multi-RHS Mooee on the TXQCD Schur EO operator: ~6×
+# faster vs the legacy full-volume MdagM CG, bit-equivalent to ~1e-10.
+# Disable by setting TXQCD_MULTIRHS_CG=0 in the submit env if needed.
+export TXQCD_MULTIRHS_CG="${TXQCD_MULTIRHS_CG:-1}"
+export TXQCD_MOOEE_CUBLAS="${TXQCD_MOOEE_CUBLAS:-1}"
+export TXQCD_MOOEEINV_CUBLAS="${TXQCD_MOOEEINV_CUBLAS:-1}"
+export TXQCD_PRECOMPUTE_GPU="${TXQCD_PRECOMPUTE_GPU:-1}"
 
-GRID_LAUNCH="mpirun -np $NP ./select_gpu.sh" LAMBDA="$LAMBDA" ./run_all_txqcd_measurements.sh $MPI $SHM
+# Chroma-style time-reversed propagator FB averaging on baryons:
+# ~√2 noise reduction at plateau (verified on lam12 cfg.60 64-src test).
+# Adds 1 extra contraction per source (~5% overhead on top of fused-CG).
+export TXQCD_TIME_REVERSED="${TXQCD_TIME_REVERSED:-1}"
+
+LAMBDA="${LAMBDA:-0.5000}"
+NGPU="${NGPU:-4}"
+
+# 4-GPU multi-cfg parallelism: each cfg measurement is single-GPU
+# (--mpi 1.1.1.1) and 4 cfgs run concurrently, one per GPU.  ~4× throughput
+# vs the spatially-decomposed run_all_txqcd_measurements.sh on this volume.
+# Set MEAS_SCRIPT=run_all_txqcd_measurements.sh to revert to single-job mode.
+MEAS_SCRIPT="${MEAS_SCRIPT:-run_all_txqcd_measurements_4gpu.sh}"
+
+LAMBDA="$LAMBDA" NGPU="$NGPU" ./"$MEAS_SCRIPT"

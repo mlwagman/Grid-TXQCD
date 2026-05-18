@@ -23,7 +23,12 @@ cd "$(dirname "$0")"
 N_TRAJ=${N_TRAJ:-200}
 SUFFIX=_nf2p1_mds30_aux4
 
-NODE_A_LAMBDAS="4 5 6 6.5"
+# λ=6 and λ=6.5 dropped from this sweep — those streams stuck in BASIN_HI
+# under weak-field MDS=30 start.  Recovery path: use slurm_nodeE_mixed.sh
+# which forks λ=6/6.5 from the thermalized λ=7 BASIN_LO cfg at MDS=10
+# (`_from_lam7_mds10` suffix).  Future lambda-sweep continues should only
+# cover λ values that thermalize cleanly under weak-field start.
+NODE_A_LAMBDAS="4 5"
 NODE_B_LAMBDAS="7 8 10 12"
 
 COMMON_ENV="\
@@ -36,7 +41,12 @@ NO_METROP=0,\
 QUDA_FORCE=1,QUDA_FORCE_KERNEL=1,\
 TXQCD_QUDA_HYBRID=1,TXQCD_QUDA_FULL=1,\
 TXQCD_PRECOMPUTE_GPU=1,TXQCD_MOOEEINV_CUBLAS=1,TXQCD_MOOEE_CUBLAS=1,\
+EIG_DIAG=1,\
 SUFFIX=${SUFFIX}"
+# NOTE 2026-05-09: brief MDSTEPS=20 experiment (job 1276457/8) reverted to
+# MDSTEPS=30 — at the bistable window (λ=6, 6.5) the non-equilibrium gauge
+# field plus larger eps gave 0% acceptance.  Two valid cfg.110 cfgs at λ=4, 5
+# were written under MDS=20 and kept (mixed-MDS chain is fine).
 
 DEP_A=""; DEP_B=""
 [ -n "$1" ] && DEP_A="--dependency=afterany:$1"

@@ -27,8 +27,16 @@ export UCX_RNDV_THRESH=16384
 export UCX_IB_GPU_DIRECT_RDMA=no
 export UCX_MEMTYPE_CACHE=n
 
-MPI="${MPI:---mpi 1.1.1.4}"
-SHM="${SHM:---shm 2048 --shm-mpi 0}"
-NP="${NP:-4}"
+# Phase M.3 QUDA invertMultiSrcQuda for QCD measurements: 12 RHS batched via
+# QUDA's native multi-source API, ~2.7× faster than per-source CG, bit-exact.
+export QCD_MULTISRC="${QCD_MULTISRC:-1}"
 
-GRID_LAUNCH="mpirun -np $NP ./select_gpu.sh" ./run_all_qcd_measurements.sh $MPI $SHM
+# Chroma-style time-reversed propagator FB averaging on baryons:
+# ~√2 noise reduction at plateau (verified on TXQCD lam12 cfg.60 64-src test).
+# Adds 1 extra contraction per source (~5% overhead).
+export QCD_TIME_REVERSED="${QCD_TIME_REVERSED:-1}"
+
+NGPU="${NGPU:-4}"
+MEAS_SCRIPT="${MEAS_SCRIPT:-run_all_qcd_measurements_4gpu.sh}"
+
+NGPU="$NGPU" ./"$MEAS_SCRIPT"

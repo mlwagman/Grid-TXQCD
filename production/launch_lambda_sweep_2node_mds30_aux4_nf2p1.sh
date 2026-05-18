@@ -18,7 +18,8 @@ cd "$(dirname "$0")"
 N_TRAJ=${N_TRAJ:-200}
 SUFFIX=_nf2p1_mds30_aux4
 
-NODE_A_LAMBDAS="4 5 6 6.5"
+# λ=6 and λ=6.5 dropped — see continue_lambda_sweep for explanation.
+NODE_A_LAMBDAS="4 5"
 NODE_B_LAMBDAS="7 8 10 12"
 
 COMMON_ENV="\
@@ -31,6 +32,7 @@ NO_METROP=0,\
 QUDA_FORCE=1,QUDA_FORCE_KERNEL=1,\
 TXQCD_QUDA_HYBRID=1,TXQCD_QUDA_FULL=1,\
 TXQCD_PRECOMPUTE_GPU=1,TXQCD_MOOEEINV_CUBLAS=1,TXQCD_MOOEE_CUBLAS=1,\
+EIG_DIAG=1,\
 SUFFIX=${SUFFIX}"
 
 echo "=== Node A (λ=${NODE_A_LAMBDAS}, N_TRAJ=${N_TRAJ}) ==="

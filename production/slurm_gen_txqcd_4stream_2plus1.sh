@@ -68,6 +68,9 @@ for i in $(seq 0 $((N_STREAMS-1))); do
       TXQCD_PRECOMPUTE_GPU="${TXQCD_PRECOMPUTE_GPU-}" \
       TXQCD_MOOEEINV_CUBLAS="${TXQCD_MOOEEINV_CUBLAS-}" \
       TXQCD_MOOEE_CUBLAS="${TXQCD_MOOEE_CUBLAS-}" \
+      EIG_DIAG="${EIG_DIAG-}" EIG_NEV="${EIG_NEV-}" EIG_NM="${EIG_NM-}" \
+      EIG_CHEBY_ORD="${EIG_CHEBY_ORD-}" EIG_CHEBY_LO="${EIG_CHEBY_LO-}" \
+      EIG_CHEBY_HI="${EIG_CHEBY_HI-}" \
       QUDA_ENABLE_MPS="${QUDA_ENABLE_MPS:-1}" \
       mpirun -np 1 --map-by ppr:1:socket:PE=16 \
           ./gen_txqcd_cfgs_2plus1 --mpi 1.1.1.1 --shm 2048 --shm-mpi 0 \
