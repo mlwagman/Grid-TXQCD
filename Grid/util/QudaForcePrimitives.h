@@ -57,14 +57,16 @@ namespace Quda {
 }  // namespace Quda
 NAMESPACE_END(Grid);
 
-// QUDA-side extern declarations of internal globals (defined in
-// external/quda-src/lib/interface_quda.cpp).  These have external linkage
-// so we can reach them from outside QUDA's translation units.
-namespace quda {
-  extern ::quda::GaugeField  *gaugePrecise;
-  extern ::quda::CloverField *cloverPrecise;
-  extern ::quda::GaugeField  *extendedGaugeResident;
-}
+// QUDA-side extern declarations of internal globals (defined at file scope
+// in external/quda-src/lib/interface_quda.cpp).  Although that file does
+// `using namespace quda` at the top, declarations at file scope still
+// reside in the GLOBAL namespace — confirmed by nm showing unmangled
+// 'gaugePrecise', 'cloverPrecise', 'extendedGaugeResident' symbols in
+// libquda.so.  Their TYPES are quda::* but the variables are ::gaugePrecise
+// etc.
+extern ::quda::GaugeField  *::gaugePrecise;
+extern ::quda::CloverField *::cloverPrecise;
+extern ::quda::GaugeField  *extendedGaugeResident;
 
 NAMESPACE_BEGIN(Grid);
 namespace Quda {
@@ -122,12 +124,12 @@ inline void computeCloverForceWithGridY(
     QudaInvertParam *inv_param)
 {
   using namespace ::quda;
-  using ::quda::gaugePrecise;
-  using ::quda::cloverPrecise;
-  using ::quda::extendedGaugeResident;
+  // gaugePrecise / cloverPrecise / extendedGaugeResident are global-scope
+  // variables in libquda.so (not in namespace quda — see header note above).
+  // Names are unqualified here, found via global namespace.
 
-  if (!gaugePrecise) errorQuda("No resident gauge field");
-  if (!cloverPrecise) errorQuda("No resident clover field");
+  if (!::gaugePrecise) errorQuda("No resident gauge field");
+  if (!::cloverPrecise) errorQuda("No resident clover field");
   if (inv_param->matpc_type != QUDA_MATPC_EVEN_EVEN_ASYMMETRIC &&
       inv_param->matpc_type != QUDA_MATPC_ODD_ODD_ASYMMETRIC) {
     errorQuda("MatPC type %d not supported by computeCloverForceWithGridY",
@@ -226,29 +228,62 @@ inline void computeCloverForceWithGridY(
     //   final gamma5(p, p) → use in oprod calls.
 
     // p_par := γ5 · Y_grid_loaded  (overwrites the loaded Y with γ5·Y)
-    gamma5(p[i][parity], p[i][parity]);
+    // QUDA_FORCE_NO_FIRST_G5 skips this; useful for isolating γ5 conventions.
+    if (std::getenv("QUDA_FORCE_NO_FIRST_G5") == nullptr) {
+      gamma5(p[i][parity], p[i][parity]);
+    }
 
     // x_other := D · γ5 · X — but our x_par is X (not γ5·X).
     // To match QUDA's flow, we need a temp field for γ5·X.
+    // QUDA_FORCE_NO_INNER_G5_X skips the γ5 before Dslash; QUDA_FORCE_NO_OUTER_G5_X
+    // skips the γ5 after Dslash.  Used to probe Wilson-hop bilinear convention.
     {
       ColorSpinorField tmp_g5x(qParam);
       tmp_g5x[parity] = ColorSpinorField(qParam)[parity];  // alloc
-      gamma5(tmp_g5x[parity], x[i][parity]);
+      if (std::getenv("QUDA_FORCE_NO_INNER_G5_X") == nullptr) {
+        gamma5(tmp_g5x[parity], x[i][parity]);
+      } else {
+        tmp_g5x[parity] = x[i][parity];
+      }
       if (dagger) dirac->Dagger(QUDA_DAG_YES);
       dirac->Dslash(x[i][other_parity], tmp_g5x[parity], other_parity);
       if (dagger) dirac->Dagger(QUDA_DAG_NO);
     }
 
     // gamma5 on x_other (matches line 62 of clover_force.cpp).
-    gamma5(x[i][other_parity], x[i][other_parity]);
+    if (std::getenv("QUDA_FORCE_NO_OUTER_G5_X") == nullptr) {
+      gamma5(x[i][other_parity], x[i][other_parity]);
+    }
+    // Optional sign flip on x[other] to match paper eq A7's
+    // X^A_o = -M_oo^{-1}·M_eo^†·X̂ convention (our wrapper produces + by default).
+    if (std::getenv("QUDA_FORCE_NEGATE_X_OTHER") != nullptr) {
+      blas::ax(-1.0, x[i][other_parity]);
+    }
+    // Optional zero of x[other] — kills Term 1 in kernel
+    // (kernel reads x[¬p] for the (1+γ_μ) outerProd contribution).
+    if (std::getenv("QUDA_FORCE_ZERO_X_OTHER") != nullptr) {
+      blas::ax(0.0, x[i][other_parity]);
+    }
 
     // Compute p_other = (Dagger? -- not_dagger pattern from clover_force.cpp:65-68)
     if (not_dagger) dirac->Dagger(QUDA_DAG_YES);
     dirac->Dslash(p[i][other_parity], p[i][parity], other_parity);
     if (not_dagger) dirac->Dagger(QUDA_DAG_NO);
 
-    // Final gamma5(p, p) — clover_force.cpp:79.
-    gamma5(p[i], p[i]);
+    // Final gamma5(p, p) — clover_force.cpp:79.  QUDA_FORCE_NO_FINAL_G5 skips.
+    if (std::getenv("QUDA_FORCE_NO_FINAL_G5") == nullptr) {
+      gamma5(p[i], p[i]);
+    }
+    // Optional sign flip on p[other] to match paper eq A8's
+    // Y^A_o = -M_oo^{-1}·M_oe·Ŷ convention (sign-paired with X^A_o convention).
+    if (std::getenv("QUDA_FORCE_NEGATE_P_OTHER") != nullptr) {
+      blas::ax(-1.0, p[i][other_parity]);
+    }
+    // Optional zero of p[other] — kills Term 2 in kernel
+    // (kernel reads p[¬p] for the (1-γ_μ) outerProd contribution).
+    if (std::getenv("QUDA_FORCE_ZERO_P_OTHER") != nullptr) {
+      blas::ax(0.0, p[i][other_parity]);
+    }
 
     // Force coefficients per clover_force.cpp:46/93 calculations done at
     // computeCloverForceQuda level; mirrored here.
@@ -271,33 +306,43 @@ inline void computeCloverForceWithGridY(
   // Note: TimeProfile would normally be supplied; reuse the inverter's profile.
   // For simplicity here we let updateExtendedGaugeResident pick the global
   // profile or skip if extendedGaugeResident is already set.
-  GaugeField &gaugeEx = *extendedGaugeResident;
+  GaugeField &gaugeEx = *::extendedGaugeResident;
 
   // ------------------------------------------------------------------
   // Primitive sequence (matches lib/clover_force.cpp:83-102).
+  //
+  // Term-by-term diagnostic mode: env vars QUDA_FORCE_SKIP_OPROD and
+  // QUDA_FORCE_SKIP_SIGMA isolate Wilson-hop vs σ contributions.
   // ------------------------------------------------------------------
+  bool skip_oprod = std::getenv("QUDA_FORCE_SKIP_OPROD") != nullptr;
+  bool skip_sigma = std::getenv("QUDA_FORCE_SKIP_SIGMA") != nullptr;
+
   // 1. Wilson hop: ⟨P|∂M_eo/∂U|X⟩ + h.c.
   vector_ref<const ColorSpinorField> x_const(x);
   vector_ref<const ColorSpinorField> p_const(p);
-  computeCloverOprod(force, *gaugePrecise,
-                     inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
-                     inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
-                     force_coeff);
+  if (!skip_oprod) {
+    computeCloverOprod(force, *::gaugePrecise,
+                       inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                       inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                       force_coeff);
+  }
 
   // 2. (optional) σ trace from clover field — LogDet.  Pass 0 to skip.
-  if (sigma_trace_coeff != 0.0) {
-    computeCloverSigmaTrace(oprod, *cloverPrecise, sigma_trace_coeff,
+  if (sigma_trace_coeff != 0.0 && !skip_sigma) {
+    computeCloverSigmaTrace(oprod, *::cloverPrecise, sigma_trace_coeff,
                             other_parity);
   }
 
   // 3. Clover σ-Oprod (X·P† projected against σ_μν).
-  computeCloverSigmaOprod(oprod,
-                          inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
-                          inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
-                          ferm_epsilon);
+  if (!skip_sigma) {
+    computeCloverSigmaOprod(oprod,
+                            inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                            inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                            ferm_epsilon);
 
-  // 4. Apply clover derivative kernel: integrate oprod into force.
-  cloverDerivative(force, gaugeEx, oprod, 1.0);
+    // 4. Apply clover derivative kernel: integrate oprod into force.
+    cloverDerivative(force, gaugeEx, oprod, 1.0);
+  }
 
   // 5. Accumulate force into mom: cudaMom += -1.0 · force.
   updateMomentum(cudaMom, -1.0, force, "clover_grid_y");
@@ -308,6 +353,382 @@ inline void computeCloverForceWithGridY(
   if (gauge_param->return_result_mom) cpuMom.copy(cudaMom);
 
   delete dirac;
+}
+
+// ----------------------------------------------------------------------------
+// computeCloverSigmaForceWithSchurFields
+// ----------------------------------------------------------------------------
+// σ-piece-only force routine that takes BOTH parity slots as user-supplied
+// host buffers, bypassing the gamma5+Dslash chain entirely.  Hybrid mode for
+// Phase B-prime: feed Grid's exact Schur-completed off-parity fields (W_o,
+// Z_o) so σ-Oprod produces a per-link force matching Path A's MeeDeriv +
+// MooDeriv exactly.
+//
+// Inputs:
+//   h_x_par   : array of N parity-slot buffers for x (= X̂_e, multishift)
+//   h_p_par   : array of N parity-slot buffers for p (= M·X̂_e, kappa-form Y)
+//   h_x_other : array of N off-parity buffers for x (= W_o = M_oo^{-1}·M_oe·X̂)
+//   h_p_other : array of N off-parity buffers for p (= Z_o = M_oo^{-1†}·M_eo†·Y)
+//
+// Skips computeCloverOprod (Wilson-hop primitive — caller handles via Grid).
+// Calls only computeCloverSigmaOprod + cloverDerivative + updateMomentum.
+inline void computeCloverSigmaForceWithSchurFields(
+    void *h_mom,
+    void **h_x_par, void **h_p_par,
+    void **h_x_other, void **h_p_other,
+    int nvector,
+    const std::vector<double> &coeff,
+    double kappa2, double ck, double dt,
+    double sigma_trace_coeff,
+    QudaGaugeParam *gauge_param,
+    QudaInvertParam *inv_param)
+{
+  using namespace ::quda;
+  if (!::gaugePrecise) errorQuda("No resident gauge field");
+  if (!::cloverPrecise) errorQuda("No resident clover field");
+  if (inv_param->matpc_type != QUDA_MATPC_EVEN_EVEN_ASYMMETRIC &&
+      inv_param->matpc_type != QUDA_MATPC_ODD_ODD_ASYMMETRIC) {
+    errorQuda("MatPC type %d not supported", inv_param->matpc_type);
+  }
+
+  GaugeFieldParam fParam(*gauge_param, h_mom, QUDA_ASQTAD_MOM_LINKS);
+  GaugeField cpuMom(fParam);
+
+  fParam.location    = QUDA_CUDA_FIELD_LOCATION;
+  fParam.create      = gauge_param->overwrite_mom ? QUDA_ZERO_FIELD_CREATE
+                                                   : QUDA_COPY_FIELD_CREATE;
+  fParam.field       = &cpuMom;
+  fParam.reconstruct = QUDA_RECONSTRUCT_10;
+  fParam.setPrecision(gauge_param->cuda_prec, true);
+  GaugeField cudaMom(fParam);
+
+  ColorSpinorParam qParam(nullptr, *inv_param, fParam.x, false,
+                          QUDA_CUDA_FIELD_LOCATION);
+  qParam.setPrecision(fParam.Precision(), fParam.Precision(), true);
+  qParam.create     = QUDA_NULL_FIELD_CREATE;
+  qParam.gammaBasis = QUDA_UKQCD_GAMMA_BASIS;
+
+  std::vector<ColorSpinorField> x(nvector), p(nvector);
+  std::vector<array<double, 2>>  ferm_epsilon(nvector);
+
+  QudaParity parity =
+      inv_param->matpc_type == QUDA_MATPC_EVEN_EVEN_ASYMMETRIC
+          ? QUDA_EVEN_PARITY
+          : QUDA_ODD_PARITY;
+  QudaParity other_parity = static_cast<QudaParity>(1 - parity);
+
+  // Force/oprod accumulators.
+  GaugeFieldParam fparam2(cudaMom);
+  fparam2.link_type   = QUDA_GENERAL_LINKS;
+  fparam2.reconstruct = QUDA_RECONSTRUCT_NO;
+  fparam2.create      = QUDA_ZERO_FIELD_CREATE;
+  fparam2.setPrecision(fparam2.Precision(), true);
+  GaugeField force(fparam2);
+  fparam2.geometry = QUDA_TENSOR_GEOMETRY;
+  GaugeField oprod(fparam2);
+
+  // Load both parity slots from caller-provided host buffers.
+  for (int i = 0; i < nvector; i++) {
+    x[i] = ColorSpinorField(qParam);
+    p[i] = ColorSpinorField(qParam);
+
+    // x[parity] = X̂
+    {
+      ColorSpinorParam cp(h_x_par[i], *inv_param, fParam.x, /*pc=*/true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][parity] = cf;
+    }
+    // x[other] = W_o (Schur-completed)
+    {
+      ColorSpinorParam cp(h_x_other[i], *inv_param, fParam.x, /*pc=*/true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][other_parity] = cf;
+    }
+    // p[parity] = M·X̂ (kappa-form Y)
+    {
+      ColorSpinorParam cp(h_p_par[i], *inv_param, fParam.x, /*pc=*/true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][parity] = cf;
+    }
+    // p[other] = Z_o (Schur-completed)
+    {
+      ColorSpinorParam cp(h_p_other[i], *inv_param, fParam.x, /*pc=*/true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][other_parity] = cf;
+    }
+
+    // σ-Oprod coefficients.  Uniform on both parities (NOT the asymmetric
+    // κ² in the standard QUDA convention) — because we feed Schur-completed
+    // off-parity fields (W_o, Z_o) which already include the κ scaling from
+    // the Wilson hop applied during Schur completion.  The asymmetric κ²
+    // would double-count κ⁴ on ODD slot.
+    ferm_epsilon[i] = {2.0 * ck * coeff[i] * dt,
+                        2.0 * ck * coeff[i] * dt};
+  }
+
+  GaugeField &gaugeEx = *::extendedGaugeResident;
+
+  vector_ref<const ColorSpinorField> x_const(x);
+  vector_ref<const ColorSpinorField> p_const(p);
+
+  if (sigma_trace_coeff != 0.0) {
+    computeCloverSigmaTrace(oprod, *::cloverPrecise, sigma_trace_coeff,
+                            other_parity);
+  }
+
+  computeCloverSigmaOprod(oprod,
+                          inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                          inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                          ferm_epsilon);
+
+  cloverDerivative(force, gaugeEx, oprod, 1.0);
+
+  updateMomentum(cudaMom, -1.0, force, "clover_sigma_schur");
+
+  if (gauge_param->return_result_mom) cpuMom.copy(cudaMom);
+}
+
+// ----------------------------------------------------------------------------
+// computeCloverWilsonForceWithSchurFields
+// ----------------------------------------------------------------------------
+// Wilson-hop-only force routine: same input contract as the σ-piece sibling
+// (caller supplies Schur-completed off-parity W_o, Z_o for each rhs) but
+// invokes ONLY computeCloverOprod (no σ).  Used as Phase D D.1 validation
+// experiment to confirm the Wilson-hop primitive matches Path A's
+// MpcDeriv+MpcDagDeriv per-link bilinear when fed the same (X̂, Y, W_o, Z_o)
+// quartet that the σ-piece already validates.
+inline void computeCloverWilsonForceWithSchurFields(
+    void *h_mom,
+    void **h_x_par, void **h_p_par,
+    void **h_x_other, void **h_p_other,
+    int nvector,
+    const std::vector<double> &coeff,
+    double kappa2, double ck, double dt,
+    QudaGaugeParam *gauge_param,
+    QudaInvertParam *inv_param)
+{
+  using namespace ::quda;
+  if (!::gaugePrecise) errorQuda("No resident gauge field");
+  if (!::cloverPrecise) errorQuda("No resident clover field");
+  if (inv_param->matpc_type != QUDA_MATPC_EVEN_EVEN_ASYMMETRIC &&
+      inv_param->matpc_type != QUDA_MATPC_ODD_ODD_ASYMMETRIC) {
+    errorQuda("MatPC type %d not supported", inv_param->matpc_type);
+  }
+
+  GaugeFieldParam fParam(*gauge_param, h_mom, QUDA_ASQTAD_MOM_LINKS);
+  GaugeField cpuMom(fParam);
+
+  fParam.location    = QUDA_CUDA_FIELD_LOCATION;
+  fParam.create      = gauge_param->overwrite_mom ? QUDA_ZERO_FIELD_CREATE
+                                                   : QUDA_COPY_FIELD_CREATE;
+  fParam.field       = &cpuMom;
+  fParam.reconstruct = QUDA_RECONSTRUCT_10;
+  fParam.setPrecision(gauge_param->cuda_prec, true);
+  GaugeField cudaMom(fParam);
+
+  ColorSpinorParam qParam(nullptr, *inv_param, fParam.x, false,
+                          QUDA_CUDA_FIELD_LOCATION);
+  qParam.setPrecision(fParam.Precision(), fParam.Precision(), true);
+  qParam.create     = QUDA_NULL_FIELD_CREATE;
+  qParam.gammaBasis = QUDA_UKQCD_GAMMA_BASIS;
+
+  std::vector<ColorSpinorField> x(nvector), p(nvector);
+  std::vector<double> force_coeff(nvector);
+
+  QudaParity parity =
+      inv_param->matpc_type == QUDA_MATPC_EVEN_EVEN_ASYMMETRIC
+          ? QUDA_EVEN_PARITY
+          : QUDA_ODD_PARITY;
+  QudaParity other_parity = static_cast<QudaParity>(1 - parity);
+
+  GaugeFieldParam fparam2(cudaMom);
+  fparam2.link_type   = QUDA_GENERAL_LINKS;
+  fparam2.reconstruct = QUDA_RECONSTRUCT_NO;
+  fparam2.create      = QUDA_ZERO_FIELD_CREATE;
+  fparam2.setPrecision(fparam2.Precision(), true);
+  GaugeField force(fparam2);
+
+  for (int i = 0; i < nvector; i++) {
+    x[i] = ColorSpinorField(qParam);
+    p[i] = ColorSpinorField(qParam);
+
+    // x[parity] = X̂
+    {
+      ColorSpinorParam cp(h_x_par[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][parity] = cf;
+    }
+    // x[other] = W_o (Schur-completed)
+    {
+      ColorSpinorParam cp(h_x_other[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][other_parity] = cf;
+    }
+    // p[parity] = (2κ)·M_pc·X̂ (kappa-form Y)
+    {
+      ColorSpinorParam cp(h_p_par[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][parity] = cf;
+    }
+    // p[other] = Z_o (Schur-completed)
+    {
+      ColorSpinorParam cp(h_p_other[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][other_parity] = cf;
+    }
+
+    // Wilson-hop force coefficient (mirrors clover_force.cpp:46/93).
+    force_coeff[i] = 2.0 * dt * coeff[i] * kappa2;
+  }
+
+  vector_ref<const ColorSpinorField> x_const(x);
+  vector_ref<const ColorSpinorField> p_const(p);
+
+  computeCloverOprod(force, *::gaugePrecise,
+                     inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                     inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                     force_coeff);
+
+  updateMomentum(cudaMom, -1.0, force, "clover_wilson_schur");
+
+  if (gauge_param->return_result_mom) cpuMom.copy(cudaMom);
+}
+
+// ----------------------------------------------------------------------------
+// computeCloverFullForceWithSchurFields
+// ----------------------------------------------------------------------------
+// Combined Wilson-hop + σ force routine.  Fuses Phase D D.2 implementation:
+// runs computeCloverOprod (Wilson hop) and computeCloverSigmaOprod +
+// cloverDerivative (σ piece) into a single force/oprod/momentum cycle so
+// we save one device-side accumulator zero-init and one momentum upload.
+// Same input contract as the σ-only routine.
+inline void computeCloverFullForceWithSchurFields(
+    void *h_mom,
+    void **h_x_par, void **h_p_par,
+    void **h_x_other, void **h_p_other,
+    int nvector,
+    const std::vector<double> &coeff,
+    double kappa2, double ck, double dt,
+    double sigma_trace_coeff,
+    QudaGaugeParam *gauge_param,
+    QudaInvertParam *inv_param)
+{
+  using namespace ::quda;
+  if (!::gaugePrecise) errorQuda("No resident gauge field");
+  if (!::cloverPrecise) errorQuda("No resident clover field");
+  if (inv_param->matpc_type != QUDA_MATPC_EVEN_EVEN_ASYMMETRIC &&
+      inv_param->matpc_type != QUDA_MATPC_ODD_ODD_ASYMMETRIC) {
+    errorQuda("MatPC type %d not supported", inv_param->matpc_type);
+  }
+
+  GaugeFieldParam fParam(*gauge_param, h_mom, QUDA_ASQTAD_MOM_LINKS);
+  GaugeField cpuMom(fParam);
+
+  fParam.location    = QUDA_CUDA_FIELD_LOCATION;
+  fParam.create      = gauge_param->overwrite_mom ? QUDA_ZERO_FIELD_CREATE
+                                                   : QUDA_COPY_FIELD_CREATE;
+  fParam.field       = &cpuMom;
+  fParam.reconstruct = QUDA_RECONSTRUCT_10;
+  fParam.setPrecision(gauge_param->cuda_prec, true);
+  GaugeField cudaMom(fParam);
+
+  ColorSpinorParam qParam(nullptr, *inv_param, fParam.x, false,
+                          QUDA_CUDA_FIELD_LOCATION);
+  qParam.setPrecision(fParam.Precision(), fParam.Precision(), true);
+  qParam.create     = QUDA_NULL_FIELD_CREATE;
+  qParam.gammaBasis = QUDA_UKQCD_GAMMA_BASIS;
+
+  std::vector<ColorSpinorField> x(nvector), p(nvector);
+  std::vector<double>            force_coeff(nvector);
+  std::vector<array<double, 2>>  ferm_epsilon(nvector);
+
+  QudaParity parity =
+      inv_param->matpc_type == QUDA_MATPC_EVEN_EVEN_ASYMMETRIC
+          ? QUDA_EVEN_PARITY
+          : QUDA_ODD_PARITY;
+  QudaParity other_parity = static_cast<QudaParity>(1 - parity);
+
+  GaugeFieldParam fparam2(cudaMom);
+  fparam2.link_type   = QUDA_GENERAL_LINKS;
+  fparam2.reconstruct = QUDA_RECONSTRUCT_NO;
+  fparam2.create      = QUDA_ZERO_FIELD_CREATE;
+  fparam2.setPrecision(fparam2.Precision(), true);
+  GaugeField force(fparam2);
+  fparam2.geometry = QUDA_TENSOR_GEOMETRY;
+  GaugeField oprod(fparam2);
+
+  for (int i = 0; i < nvector; i++) {
+    x[i] = ColorSpinorField(qParam);
+    p[i] = ColorSpinorField(qParam);
+    {
+      ColorSpinorParam cp(h_x_par[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][parity] = cf;
+    }
+    {
+      ColorSpinorParam cp(h_x_other[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][other_parity] = cf;
+    }
+    {
+      ColorSpinorParam cp(h_p_par[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][parity] = cf;
+    }
+    {
+      ColorSpinorParam cp(h_p_other[i], *inv_param, fParam.x, true,
+                          inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][other_parity] = cf;
+    }
+    force_coeff[i] = 2.0 * dt * coeff[i] * kappa2;
+    // Uniform per-parity ferm_epsilon (Phase B-prime convention for σ-piece
+    // with Schur-completed off-parity inputs).
+    ferm_epsilon[i] = {2.0 * ck * coeff[i] * dt,
+                       2.0 * ck * coeff[i] * dt};
+  }
+
+  GaugeField &gaugeEx = *::extendedGaugeResident;
+
+  vector_ref<const ColorSpinorField> x_const(x);
+  vector_ref<const ColorSpinorField> p_const(p);
+
+  // 1. Wilson-hop bilinear → force accumulator.
+  computeCloverOprod(force, *::gaugePrecise,
+                     inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                     inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                     force_coeff);
+
+  // 2. (optional) σ-trace from clover (LogDet); pass 0 to skip.
+  if (sigma_trace_coeff != 0.0) {
+    computeCloverSigmaTrace(oprod, *::cloverPrecise, sigma_trace_coeff,
+                            other_parity);
+  }
+
+  // 3. σ-Oprod → oprod accumulator.
+  computeCloverSigmaOprod(oprod,
+                          inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                          inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                          ferm_epsilon);
+
+  // 4. Apply clover derivative kernel: integrate σ-oprod into force.
+  cloverDerivative(force, gaugeEx, oprod, 1.0);
+
+  // 5. Accumulate into momentum.
+  updateMomentum(cudaMom, -1.0, force, "clover_full_schur");
+
+  if (gauge_param->return_result_mom) cpuMom.copy(cudaMom);
 }
 
 }  // namespace Quda

@@ -134,3 +134,40 @@ external/quda-src/
 # CCCL — fetched by QUDA's CPM
 external/cccl/
 
+
+# production build artifacts (compiled in-tree, never commit)
+production/bench_clover_oprod
+production/bench_dslash
+production/bench_gauge_force
+production/bench_qudahermop_dslash
+production/bench_txqcd_gauge_force
+production/probe_qudahermop_dslash
+production/test_eo_solver
+production/test_quda_init
+production/test_quda_inverter
+production/test_quda_multishift
+production/test_quda_propagator
+production/test_quda_roundtrip
+production/test_quda_txqcd_solver
+production/gen_qcd_cfgs
+production/gen_qcd_cfgs_2plus1
+production/gen_txqcd_cfgs
+production/gen_txqcd_cfgs_2plus1
+production/meas_conn_qcd
+production/meas_conn_txqcd
+production/meas_disco_qcd
+production/meas_disco_txqcd
+production/meas_aux_txqcd
+production/compare
+production/compute_vev
+*.pdf
+
+# analysis outputs / bytecode (derived data — keep on disk, not in repo)
+*.pyc
+__pycache__/
+production/analysis/**/*.dat
+production/analysis/**/*.csv
+production/analysis/**/*.png
+
+# plotting scripts (keep on disk, not in repo)
+*.gp

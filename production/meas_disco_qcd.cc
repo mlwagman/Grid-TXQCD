@@ -1,6 +1,8 @@
 #include "params.h"
 #include "quda_helper.h"
+#include "meas_helper.h"
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TXQCDProduction;
 
@@ -45,14 +47,7 @@ int main(int argc, char **argv) {
   mkdir_p(qcd_data_dir());
 
   LatticeGaugeField Umu(&Grid);
-  {
-    std::string cf = qcd_cfg_dir() + "/ckpoint_lat." + std::to_string(traj);
-    std::string rf = qcd_cfg_dir() + "/ckpoint_rng." + std::to_string(traj);
-    FieldMetaData header;
-    NerscIO::readRNGState(sRNG, pRNG, header, rf);
-    typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
-    NerscIO::readConfiguration<GaugeStats>(Umu, header, cf);
-  }
+  load_qcd_gauge(traj, Umu, sRNG, pRNG);
 
   // Stout smearing for inversions
   Smear_Stout<PeriodicGimplR> StoutInv(stout_rho_inv);
@@ -73,15 +68,25 @@ int main(int argc, char **argv) {
            WilsonAnisotropyCoefficients(), impl_p);
   RealD trminv_strange = StochasticTrMinv(Dw_s, &Grid, Usmeared, mass_strange, pRNG, n_noise_disco);
 
+  // Sanity-check metadata: plaq + link_trace on the unsmeared gauge.
+  RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu);
+
   std::string outfile = qcd_data_dir() + "/disco_qcd_" + std::to_string(traj) + ".h5";
   {
     Hdf5Writer wr(outfile);
     write(wr, "trminv", trminv);
     write(wr, "trminv_strange", trminv_strange);
     write(wr, "traj", traj);
+    write(wr, "plaq", plaq);
+    write(wr, "mass_light", mass_light);
+    write(wr, "mass_strange", mass_strange);
+    write(wr, "n_noise_disco", n_noise_disco);
   }
 
   std::cout << GridLogMessage << "Written " << outfile << std::endl;
+#ifdef GRID_HAVE_QUDA
+  Grid::Quda::finalize();
+#endif
   Grid_finalize();
   return 0;
 }

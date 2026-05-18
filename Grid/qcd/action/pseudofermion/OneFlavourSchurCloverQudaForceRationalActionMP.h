@@ -177,7 +177,15 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     double saved_epsilon               = inv_param.epsilon;
     QudaPreserveSource saved_preserve  = inv_param.preserve_source;
     inv_param.use_resident_solution = 0;
-    inv_param.dagger                = QUDA_DAG_NO;
+    // PyQUDA's CloverWilsonAction.force() sets dagger=YES before
+    // computeCloverForceQuda; this is the canonical Schur EE-asymmetric
+    // convention. Validated on hot 4⁴ (2026-05-03): cos(Ta(A),B)=1.0
+    // element-by-element vs Path A's Ta projection (was 0.894 with
+    // dagger=NO). QUDA_FORCE_DAGGER_NO=1 reverts to the legacy NO setting
+    // for regression debugging.
+    inv_param.dagger = std::getenv("QUDA_FORCE_DAGGER_NO")
+                           ? QUDA_DAG_NO
+                           : QUDA_DAG_YES;
     inv_param.twist_flavor          = QUDA_TWIST_NO;
     inv_param.mu                    = 0.0;
     inv_param.epsilon               = 0.0;

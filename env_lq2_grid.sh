@@ -24,6 +24,11 @@ export LD_LIBRARY_PATH=/srv/software/el8/x86_64/hpc/nvhpc/Linux_x86_64/23.7/comp
 export PATH=/lustre2/nplqcd/install/Python-3.12.2/bin/:/lustre1/nplqcd/install/Python-3.12.2/include/:$PATH
 
 export CUDA_CACHE_PATH=/lustre2/nplqcd/cache
+# QUDA persists kernel autotuning to disk when this is set — saves ~10-30s
+# on first force/inverter calls per run. Critical for MG solvers (lighter
+# quarks where MG setup is slow). Cache is per-(architecture, gauge geometry,
+# kappa, csw, etc.) and re-tunes only when those change.
+export QUDA_RESOURCE_PATH=/lustre2/nplqcd/cache/quda_resource
 
 # Emit module list and paths when sourced interactively, keep quiet in jobs.
 if [ -t 1 ]; then

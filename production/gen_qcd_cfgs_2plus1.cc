@@ -1,4 +1,5 @@
 #include "params.h"
+#include "eig_diag.h"
 #include <cstring>
 #include <cstdio>
 #include <Grid/parallelIO/IldgIO.h>
@@ -11,6 +12,10 @@
 #include <Grid/qcd/action/pseudofermion/TwoFlavourSchurCloverAction.h>
 #include <Grid/qcd/action/pseudofermion/TwoFlavour.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaForceRationalActionMP.h>
+#include <Grid/qcd/action/pseudofermion/TwoFlavourSchurCloverQudaForceActionMP.h>
+#endif
 #include <Grid/algorithms/iterative/ConjugateGradientMixedPrec.h>
 #include <Grid/algorithms/iterative/ConjugateGradientMultiShiftMixedPrec.h>
 
@@ -106,6 +111,13 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
   std::vector<int>    traj_;
   std::vector<RealD>  plaq_, vev_trminv_;
   std::vector<std::vector<RealD>> force_avg_, force_max_, fdt_avg_, fdt_max_;
+  // Per-traj eigenvalue diagnostic (γ5·M signed Rayleigh quotients).  Enabled
+  // by EIG_DIAG=1 env; empty inner vectors when disabled.
+  std::vector<std::vector<RealD>> eig_M2_, eig_g5M_;
+  // Sign-problem order parameters (basis-independent): smallest |γ5·M|
+  // and #modes with |γ5·M|<zero_eps.  These are the sharp det-sign
+  // diagnostics — immune to ± near-degenerate-pair relabeling.
+  std::vector<RealD> eig_minabs_, eig_nnear_;
 
   QcdDiag(const std::string &prefix, int interval,
           std::vector<ActionRef> actions,
@@ -158,6 +170,26 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
     }
     vev_trminv_.push_back(acc / n_vev_noise);
 
+    // ---- γ5·M signed eigenvalue diagnostic (opt-in via EIG_DIAG=1) --------
+    std::vector<RealD> eig_M2, eig_g5M;
+    if (eig_diag_enabled()) {
+      EigDiagParams ep = eig_diag_params_from_env();
+      RunEigDiagQcd(Dw, &grid_, prng_, ep, eig_M2, eig_g5M);
+      std::cout << GridLogMessage << "[QcdDiag] traj=" << traj
+                << " γ5·M signed lowest |·|:";
+      for (auto e : eig_g5M) std::cout << " " << e;
+      std::cout << std::endl;
+    }
+    eig_M2_.push_back(eig_M2);
+    eig_g5M_.push_back(eig_g5M);
+    {
+      RealD eig_ma; int eig_nn;
+      eig_order_params(eig_g5M, eig_diag_params_from_env().zero_eps,
+                       eig_ma, eig_nn);
+      eig_minabs_.push_back(eig_ma);
+      eig_nnear_.push_back((RealD)eig_nn);
+    }
+
     if (traj % interval_ == 0) {
       std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
       Hdf5Writer wr(fname);
@@ -168,12 +200,18 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
       write(wr, "force_max", force_max_);
       write(wr, "fdt_avg", fdt_avg_);
       write(wr, "fdt_max", fdt_max_);
+      write(wr, "eig_M2", eig_M2_);
+      write(wr, "eig_g5M", eig_g5M_);
+      write(wr, "eig_min_abs_g5M", eig_minabs_);
+      write(wr, "eig_n_near_zero", eig_nnear_);
       std::vector<std::string> names;
       for (auto &a : actions_) names.push_back(a.name);
       write(wr, "action_names", names);
       traj_.clear(); plaq_.clear(); vev_trminv_.clear();
       force_avg_.clear(); force_max_.clear();
       fdt_avg_.clear(); fdt_max_.clear();
+      eig_M2_.clear(); eig_g5M_.clear();
+      eig_minabs_.clear(); eig_nnear_.clear();
       std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
     }
   }
@@ -341,11 +379,52 @@ int main(int argc, char **argv) {
   // disentangle MP-CG bug from structural deriv vs S inconsistency.
   bool solver_debug = false;
   if (const char *t = std::getenv("SOLVER_DEBUG"); t && std::atoi(t)) solver_debug = true;
-  TwoFlavourSchurCloverActionMP<WilsonImplR, WilsonImplF>
-      LightSchurPF(FermOp, FermOpF,
-                   solver_debug ? (OperatorFunction<LatticeFermion>&)CG_action : (OperatorFunction<LatticeFermion>&)CG_md,
-                   CG_action);
-  LightSchurPF.is_smeared = true;
+  // QUDA_FORCE=1 (Phase D) routes the Nf=2 light through computeCloverForceQuda
+  // with PyQUDA's dagger=YES convention (cos=1.0 vs Path A on hot 4⁴).
+  std::unique_ptr<TwoFlavourSchurCloverActionMP<WilsonImplR, WilsonImplF>>
+      LightSchurPF_baseHolder;
+  Action<LatticeGaugeField> *LightSchurPFptr = nullptr;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<TwoFlavourSchurCloverQudaForceActionMP<WilsonImplR, WilsonImplF>>
+      LightSchurPF_qudaHolder;
+  // QUDA_FORCE_LIGHT=1 opts in to the (currently buggy — cos=0.25 vs Path A
+  // due to ODD_ODD_ASYMMETRIC parity convention) TwoFlavour QUDA force class.
+  // Default off so QUDA_FORCE=1 only routes the strange RHMC through QUDA.
+  // Fix: write TwoFlavourSchurCloverActionEven (mirrors OneFlavourSchur...Even)
+  // and adapt the QUDA force class to use EVEN parity + matpc=EE_ASYMMETRIC.
+  if (std::getenv("QUDA_FORCE_LIGHT") != nullptr) {
+    QudaCloverParams qp_l;
+    qp_l.mass = mass_light;
+    qp_l.csw  = csw;
+    qp_l.anti_periodic_t = true;
+    qp_l.tol = cg_tol;
+    qp_l.max_iter = cg_max;
+    qp_l.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+    LightSchurPF_qudaHolder = std::make_unique<
+        TwoFlavourSchurCloverQudaForceActionMP<WilsonImplR, WilsonImplF>>(
+        FermOp, FermOpF,
+        solver_debug ? (OperatorFunction<LatticeFermion>&)CG_action
+                     : (OperatorFunction<LatticeFermion>&)CG_md,
+        CG_action,
+        qp_l);
+    LightSchurPF_qudaHolder->is_smeared = true;
+    LightSchurPFptr = LightSchurPF_qudaHolder.get();
+    std::cout << GridLogMessage
+              << "[Light Nf=2] QUDA_FORCE active — full QUDA force kernel"
+              << std::endl;
+  } else
+#endif
+  {
+    LightSchurPF_baseHolder = std::make_unique<
+        TwoFlavourSchurCloverActionMP<WilsonImplR, WilsonImplF>>(
+        FermOp, FermOpF,
+        solver_debug ? (OperatorFunction<LatticeFermion>&)CG_action
+                     : (OperatorFunction<LatticeFermion>&)CG_md,
+        CG_action);
+    LightSchurPF_baseHolder->is_smeared = true;
+    LightSchurPFptr = LightSchurPF_baseHolder.get();
+  }
+  Action<LatticeGaugeField> &LightSchurPF = *LightSchurPFptr;
 
   // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC.
   // MD force uses mixed-precision multishift CG (SP inner + DP reliable).
@@ -363,9 +442,40 @@ int main(int argc, char **argv) {
                                        100, 1e-6, 1e-4);
   QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
   StrangeLogDet.is_smeared = true;
-  OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>
-      StrangeSchurPF(StrangeFermOp, StrangeFermOpF, &RBGridF, strange_rat, 50);
-  StrangeSchurPF.is_smeared = true;
+  // QUDA_FORCE=1 (Phase D) routes the strange Nf=1 RHMC deriv through
+  // computeCloverForceQuda (PyQUDA dagger=YES convention, cos=1.0 vs PathA).
+  std::unique_ptr<OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>
+      StrangeSchurPF_baseHolder;
+  Action<LatticeGaugeField> *StrangeSchurPFptr = nullptr;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>>
+      StrangeSchurPF_qudaHolder;
+  if (std::getenv("QUDA_FORCE") != nullptr) {
+    QudaCloverParams qp;
+    qp.mass = mass_strange;
+    qp.csw  = csw;
+    qp.anti_periodic_t = true;
+    qp.tol = cg_tol;
+    qp.max_iter = cg_max;
+    qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+    StrangeSchurPF_qudaHolder = std::make_unique<
+        OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>>(
+        StrangeFermOp, StrangeFermOpF, &RBGridF, strange_rat, qp, 50);
+    StrangeSchurPF_qudaHolder->is_smeared = true;
+    StrangeSchurPFptr = StrangeSchurPF_qudaHolder.get();
+    std::cout << GridLogMessage
+              << "[Strange Nf=1] QUDA_FORCE active — full QUDA force kernel"
+              << std::endl;
+  } else
+#endif
+  {
+    StrangeSchurPF_baseHolder = std::make_unique<
+        OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>(
+        StrangeFermOp, StrangeFermOpF, &RBGridF, strange_rat, 50);
+    StrangeSchurPF_baseHolder->is_smeared = true;
+    StrangeSchurPFptr = StrangeSchurPF_baseHolder.get();
+  }
+  Action<LatticeGaugeField> &StrangeSchurPF = *StrangeSchurPFptr;
 
   // Grid's SymanzikGaugeAction(β,u0) uses the RBC/Iwasaki convention
   // (c_plaq = β·(1−8c1) ≈ 1.96β, c_rect = −β/(12·u0²)) — NOT the Lüscher-

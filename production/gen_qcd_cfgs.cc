@@ -1,4 +1,5 @@
 #include "params.h"
+#include "eig_diag.h"
 #include <cstring>
 #include <cstdio>
 #include <Grid/parallelIO/IldgIO.h>
@@ -94,6 +95,7 @@ class TwoFlavourSchurCloverActionMP
 #ifdef GRID_HAVE_QUDA
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaRationalActionMP.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaForceRationalActionMP.h>
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaPrimitiveActionMP.h>
 #endif
 
 struct QcdDiag : public HmcObservable<LatticeGaugeField> {
@@ -110,6 +112,12 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
   std::vector<int>    traj_;
   std::vector<RealD>  plaq_, vev_trminv_;
   std::vector<std::vector<RealD>> force_avg_, force_max_, fdt_avg_, fdt_max_;
+  // Per-traj γ5·M signed eigenvalues (EIG_DIAG=1).
+  std::vector<std::vector<RealD>> eig_M2_, eig_g5M_;
+  // Sign-problem order parameters (basis-independent): smallest |γ5·M|
+  // and #modes with |γ5·M|<zero_eps.  These are the sharp det-sign
+  // diagnostics — immune to ± near-degenerate-pair relabeling.
+  std::vector<RealD> eig_minabs_, eig_nnear_;
 
   QcdDiag(const std::string &prefix, int interval,
           std::vector<ActionRef> actions,
@@ -162,6 +170,26 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
     }
     vev_trminv_.push_back(acc / n_vev_noise);
 
+    // ---- γ5·M signed eigenvalue diagnostic (opt-in via EIG_DIAG=1) --------
+    std::vector<RealD> eig_M2, eig_g5M;
+    if (eig_diag_enabled()) {
+      EigDiagParams ep = eig_diag_params_from_env();
+      RunEigDiagQcd(Dw, &grid_, prng_, ep, eig_M2, eig_g5M);
+      std::cout << GridLogMessage << "[QcdDiag] traj=" << traj
+                << " γ5·M signed lowest |·|:";
+      for (auto e : eig_g5M) std::cout << " " << e;
+      std::cout << std::endl;
+    }
+    eig_M2_.push_back(eig_M2);
+    eig_g5M_.push_back(eig_g5M);
+    {
+      RealD eig_ma; int eig_nn;
+      eig_order_params(eig_g5M, eig_diag_params_from_env().zero_eps,
+                       eig_ma, eig_nn);
+      eig_minabs_.push_back(eig_ma);
+      eig_nnear_.push_back((RealD)eig_nn);
+    }
+
     if (traj % interval_ == 0) {
       std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
       Hdf5Writer wr(fname);
@@ -172,11 +200,17 @@ struct QcdDiag : public HmcObservable<LatticeGaugeField> {
       write(wr, "force_max", force_max_);
       write(wr, "fdt_avg", fdt_avg_);
       write(wr, "fdt_max", fdt_max_);
+      write(wr, "eig_M2", eig_M2_);
+      write(wr, "eig_g5M", eig_g5M_);
+      write(wr, "eig_min_abs_g5M", eig_minabs_);
+      write(wr, "eig_n_near_zero", eig_nnear_);
       std::vector<std::string> names;
       for (auto &a : actions_) names.push_back(a.name);
       write(wr, "action_names", names);
       traj_.clear(); plaq_.clear(); vev_trminv_.clear();
       force_avg_.clear(); force_max_.clear();
+      eig_M2_.clear(); eig_g5M_.clear();
+      eig_minabs_.clear(); eig_nnear_.clear();
       fdt_avg_.clear(); fdt_max_.clear();
       std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
     }
@@ -357,9 +391,36 @@ int main(int argc, char **argv) {
   std::vector<std::unique_ptr<Action<LatticeGaugeField>>> RatPFs;
 
 #ifdef GRID_HAVE_QUDA
-  bool use_quda_hmc   = std::getenv("QUDA_SOLVER") != nullptr;
-  bool use_quda_force = std::getenv("QUDA_FORCE")  != nullptr;
-  if (use_quda_force) {
+  bool use_quda_hmc       = std::getenv("QUDA_SOLVER")           != nullptr;
+  bool use_quda_force     = std::getenv("QUDA_FORCE")            != nullptr;
+  bool use_quda_primitives = std::getenv("QUDA_FORCE_PRIMITIVES") != nullptr;
+  if (use_quda_primitives) {
+    // Phase 8 Path D: QUDA solver + Grid-Y-injected QUDA-primitive force.
+    // Replaces both Path A (Grid deriv chain) and Phase 7's
+    // computeCloverForceQuda monolithic call with QudaForcePrimitives
+    // wrapper.  The wrapper feeds Grid's M_pc·X output into QUDA's
+    // primitives (computeCloverOprod, computeCloverSigmaOprod,
+    // cloverDerivative, updateMomentum) — bypassing QUDA's internal
+    // γ5+Dslash+M derivation that's the suspected source of Phase 7's
+    // residual 10% perpendicular gap.  Primary path for TXQCD HMC
+    // acceleration (Phase C).
+    QudaCloverParams qp;
+    qp.mass = mass_light;
+    qp.csw  = csw;
+    qp.anti_periodic_t = true;
+    qp.tol = cg_tol;
+    qp.max_iter = cg_max;
+    qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+    for (int p = 0; p < 3; ++p) {
+      auto *act = new OneFlavourSchurCloverQudaPrimitiveActionMP<WilsonImplR, WilsonImplF>(
+          FermOp, FermOpF, &RBGridF, rat_params, qp, 50);
+      act->is_smeared = true;
+      RatPFs.emplace_back(act);
+    }
+    std::cout << GridLogMessage
+              << "QUDA_FORCE_PRIMITIVES active: QudaForcePrimitives wrapper "
+              << "with Grid-Y substitution." << std::endl;
+  } else if (use_quda_force) {
     // Phase 6: QUDA does both the multishift CG AND the gauge-deriv chain
     // via computeCloverForceQuda.  Requires the EVEN-parity rational
     // action (because computeCloverForceQuda hardcodes EVEN_EVEN).

@@ -1,8 +1,10 @@
 #include "params.h"
 #include "quda_helper.h"
 #include "quda_txqcd_helper.h"
+#include "meas_helper.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TXQCDProduction;
 
@@ -85,9 +87,7 @@ int main(int argc, char **argv) {
   mkdir_p(txqcd_data_dir());
 
   TXQCDField U(&Grid);
-  TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
-                                txqcd_cfg_dir() + "/ckpoint_lat",
-                                txqcd_cfg_dir() + "/ckpoint_rng", traj);
+  load_txqcd_field(traj, Grid, RBGrid, U, sRNG, pRNG);
 
   // Stout smearing for inversions
   Smear_Stout<PeriodicGimplR> StoutInv(stout_rho_inv);
@@ -123,6 +123,9 @@ int main(int argc, char **argv) {
   RealD vev_sigma = TensorRemove(sum(trace(U.sigma))).real() / V;
   RealD vev_s = TensorRemove(sum(trace(U.s))).real() / V;
 
+  // Sanity-check metadata: plaq on the unsmeared gauge.
+  RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
+
   std::string outfile = txqcd_data_dir() + "/disco_txqcd_" + std::to_string(traj) + ".h5";
   {
     Hdf5Writer wr(outfile);
@@ -132,9 +135,17 @@ int main(int argc, char **argv) {
     write(wr, "vev_sigma", vev_sigma);
     write(wr, "vev_s", vev_s);
     write(wr, "traj", traj);
+    write(wr, "plaq", plaq);
+    write(wr, "mass_light", mass_light);
+    write(wr, "mass_strange", mass_strange);
+    write(wr, "lambda", lambda);
+    write(wr, "n_noise_disco", n_noise_disco);
   }
 
   std::cout << GridLogMessage << "Written " << outfile << std::endl;
+#ifdef GRID_HAVE_QUDA
+  Grid::Quda::finalize();
+#endif
   Grid_finalize();
   return 0;
 }

@@ -4,13 +4,17 @@ CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I../build-gpu/Grid
 LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L../build-gpu/Grid
 LIBS     = $(shell $(GRID_CONFIG) --libs)
 
-# Optional QUDA backend.  Set QUDA_PREFIX to enable.
+# QUDA backend.  Enabled by default — all HMC and measurement binaries link
+# against QUDA and pick it up at runtime when the per-binary QUDA env vars
+# (QUDA_FORCE, QUDA_SOLVER, …) are set.  To build without QUDA:  QUDA_PREFIX= make
 # (Once configure-driven build lands, GRID_HAVE_QUDA is defined automatically.)
 # QMP_PREFIX defaults to QUDA_PREFIX (which is true for /home/agrebe/install/quda-5),
 # but chroma's install puts QMP in a separate directory so override as needed.
 # QUDA_STATIC=1 forces -l:libquda.a + -l:libqmp.a (chroma's archives are static).
-QUDA_PREFIX ?=
-QMP_PREFIX ?= $(QUDA_PREFIX)
+QUDA_PREFIX ?= /lustre2/nplqcd/Grid-TXQCD/external/quda-install
+# external/quda-install (locally built, matches the QUDA API our code uses)
+# does not ship QMP; pull QMP from the older install which has both.
+QMP_PREFIX ?= /lustre2/nplqcd/install/quda
 QUDA_STATIC ?=
 ifneq ($(QUDA_PREFIX),)
   CXXFLAGS += -DGRID_HAVE_QUDA -I$(QUDA_PREFIX)/include -I$(QMP_PREFIX)/include
@@ -38,13 +42,13 @@ all: $(PROGRAMS)
 
 # gen_txqcd_cfgs is compiled at TXQCD_Nf=3 with diag mass {m_l, m_l, m_s}.
 # Other production binaries default to TXQCD_Nf=2 (or are Nf-agnostic).
-gen_txqcd_cfgs: gen_txqcd_cfgs.cc params.h
+gen_txqcd_cfgs: gen_txqcd_cfgs.cc params.h eig_diag.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
 
 # gen_txqcd_cfgs_2plus1 is the previous Nf=2 TXQCD light + Nf=1 QCD strange
 # action structure (pre-b04af352), kept for direct comparison against the
 # Nf=3 form on the same chroma-imported config.
-gen_txqcd_cfgs_2plus1: gen_txqcd_cfgs_2plus1.cc params.h
+gen_txqcd_cfgs_2plus1: gen_txqcd_cfgs_2plus1.cc params.h eig_diag.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
 
 # meas_conn_weakfield uses TXQCDFermionNf — also Nf=3.
@@ -63,7 +67,12 @@ eigspec_diag: eigspec_diag.cc params.h
 eigspec_diag_nf2: eigspec_diag.cc params.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
 
-%: %.cc params.h
+# Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
+# edits (e.g. EIG_DIAG tuning) force a rebuild of gen_qcd_cfgs* and the
+# meas_* binaries that include them.  (Over-broad for binaries that don't
+# include these headers, but a header edit is rare and a spurious rebuild
+# is harmless.)
+%: %.cc params.h eig_diag.h meas_helper.h
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS) $(LIBS)
 
 clean:

@@ -68,6 +68,50 @@ public:
     CG_(HermOp_, b, x);
   }
 
+  // Multi-source: solve M·x_i = src_i for i = 0..N-1, all on the same gauge.
+  // QUDA path uses invertMultiSrcQuda which shares the operator setup across
+  // sources for ~2-3× speedup over sequential invertQuda calls (M.3).
+  // Grid path falls back to a sequential loop calling solve().
+  void solve_multi(const std::vector<LatticeFermion> &src,
+                   std::vector<LatticeFermion> &x) {
+    int N = (int)src.size();
+    GRID_ASSERT(N > 0);
+    GRID_ASSERT((int)x.size() == N);
+
+#ifdef GRID_HAVE_QUDA
+    if (quda_) {
+      // Pack all sources into EO-host buffers, invert as a batch, unpack.
+      int V = Quda::local_volume(grid_);
+      std::vector<std::vector<double>> src_eo(N, std::vector<double>(24 * V));
+      std::vector<std::vector<double>> sol_eo(N, std::vector<double>(24 * V, 0.0));
+      std::vector<void*> src_ptrs(N), sol_ptrs(N);
+
+      for (int i = 0; i < N; ++i) {
+        Quda::fermion_to_eo_buffer(src[i], src_eo[i].data());
+        src_ptrs[i] = src_eo[i].data();
+        sol_ptrs[i] = sol_eo[i].data();
+      }
+
+      QudaInvertParam &ip = quda_->InvertParam();
+      // QUDA convention for multi-src: tell invert how many sources via num_src.
+      ip.num_src = N;
+      ip.num_src_per_sub_partition = N;  // single MPI rank → all on this rank
+
+      invertMultiSrcQuda(sol_ptrs.data(), src_ptrs.data(), &ip);
+
+      for (int i = 0; i < N; ++i) {
+        Quda::eo_buffer_to_fermion(sol_eo[i].data(), x[i]);
+      }
+
+      std::cout << GridLogMessage << "[QudaPropSolver::solve_multi] N=" << N
+                << " batched invert done" << std::endl;
+      return;
+    }
+#endif
+    // Grid fallback: sequential loop.
+    for (int i = 0; i < N; ++i) solve(src[i], x[i]);
+  }
+
 private:
   WCF &Dw_;
   MdagMLinearOperator<WCF, LatticeFermion> &HermOp_;

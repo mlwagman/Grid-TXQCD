@@ -137,11 +137,15 @@ public:
 
       double start_force = usecond();
 
-      MemoryManager::Print();
+      // MemoryManager::Print() each call cudaMemGetInfo's which synchronizes
+      // the device — gates async kernel overlap and dominates wallclock per
+      // call. Disabled by default; INTEGRATOR_VERBOSE_MEM=1 re-enables.
+      bool _verbose_mem = std::getenv("INTEGRATOR_VERBOSE_MEM") != nullptr;
+      if (_verbose_mem) MemoryManager::Print();
       as[level].actions.at(a)->deriv_timer_start();
       as[level].actions.at(a)->deriv(Smearer, force);  // deriv should NOT include Ta
       as[level].actions.at(a)->deriv_timer_stop();
-      MemoryManager::Print();
+      if (_verbose_mem) MemoryManager::Print();
 
       auto name = as[level].actions.at(a)->action_name();
 

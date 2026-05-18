@@ -352,6 +352,123 @@ class TXQCDWilsonCloverFermionEO {
     }
   }
 
+  // ------------------------------------------------------------------------
+  // Phase M.4.b: fused multi-RHS Mooee / MooeeInv via cuBLAS gemmBatched
+  // with column dimension = NRHS.  One gemm per site does N_RHS×24 vector
+  // multiplications instead of N_RHS separate gemv calls — single matrix
+  // load per site, near-peak GPU memory bandwidth utilization.
+  //
+  // Pack/unpack uses a device-pointer-array of LatticeView _odata pointers
+  // (built per-call, NRHS small) so a single accelerator_for can iterate
+  // over all RHS columns in its inner loop without per-RHS kernel launches.
+  // ------------------------------------------------------------------------
+  void MooeeN(const std::vector<TXQCDFermionNf> &ins,
+              std::vector<TXQCDFermionNf> &outs) {
+    auto t0 = usecond();
+    static int use_cublas = []() {
+      const char *e = std::getenv("TXQCD_MOOEE_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (use_cublas && (int)ins.size() > 1) {
+      int cb = ins[0].f[0].Checkerboard();
+      ApplyMooeeCublasN(cb, ins, outs, /*inverse=*/false);
+      t_mooee_fwd_us_ += usecond() - t0;
+      n_mooee_fwd_ += (int)ins.size();
+      return;
+    }
+    // Fallback: per-RHS Mooee.
+    for (size_t j = 0; j < ins.size(); ++j) Mooee(ins[j], outs[j]);
+  }
+
+  void MooeeInvN(const std::vector<TXQCDFermionNf> &ins,
+                 std::vector<TXQCDFermionNf> &outs) {
+    auto t0 = usecond();
+    static int use_cublas = []() {
+      const char *e = std::getenv("TXQCD_MOOEEINV_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (use_cublas && (int)ins.size() > 1) {
+      int cb = ins[0].f[0].Checkerboard();
+      ApplyMooeeCublasN(cb, ins, outs, /*inverse=*/true);
+      t_apply_inv_us_ += usecond() - t0;
+      n_apply_inv_ += (int)ins.size();
+      return;
+    }
+    // Fallback: per-RHS MooeeInv.
+    for (size_t j = 0; j < ins.size(); ++j) MooeeInv(ins[j], outs[j]);
+  }
+
+  void MooeeDagN(const std::vector<TXQCDFermionNf> &ins,
+                 std::vector<TXQCDFermionNf> &outs) {
+    Gamma g5(Gamma::Algebra::Gamma5);
+    int N = (int)ins.size();
+    int cb = ins[0].f[0].Checkerboard();
+    std::vector<TXQCDFermionNf> tmps(N, TXQCDFermionNf(ins[0].Grid()));
+    for (int j = 0; j < N; ++j) {
+      for (int a = 0; a < TxqcdNf; ++a) {
+        tmps[j].f[a] = g5 * ins[j].f[a];
+        tmps[j].f[a].Checkerboard() = cb;
+      }
+    }
+    MooeeN(tmps, outs);
+    for (int j = 0; j < N; ++j) {
+      for (int a = 0; a < TxqcdNf; ++a) {
+        outs[j].f[a] = g5 * outs[j].f[a];
+        outs[j].f[a].Checkerboard() = cb;
+      }
+    }
+  }
+
+  void MooeeInvDagN(const std::vector<TXQCDFermionNf> &ins,
+                    std::vector<TXQCDFermionNf> &outs) {
+    Gamma g5(Gamma::Algebra::Gamma5);
+    int N = (int)ins.size();
+    int cb = ins[0].f[0].Checkerboard();
+    std::vector<TXQCDFermionNf> tmps(N, TXQCDFermionNf(ins[0].Grid()));
+    for (int j = 0; j < N; ++j) {
+      for (int a = 0; a < TxqcdNf; ++a) {
+        tmps[j].f[a] = g5 * ins[j].f[a];
+        tmps[j].f[a].Checkerboard() = cb;
+      }
+    }
+    MooeeInvN(tmps, outs);
+    for (int j = 0; j < N; ++j) {
+      for (int a = 0; a < TxqcdNf; ++a) {
+        outs[j].f[a] = g5 * outs[j].f[a];
+        outs[j].f[a].Checkerboard() = cb;
+      }
+    }
+  }
+
+  void MeooeN(const std::vector<TXQCDFermionNf> &ins,
+              std::vector<TXQCDFermionNf> &outs) {
+    // Wilson hop fusion across RHS would require modifying Grid's
+    // WilsonKernels — out of scope.  Loop over RHS calling the existing
+    // per-flavor Wilson Meooe.  Each call is light (~1.7 ms at 16³×48); for
+    // NRHS=24 this is ~40 ms vs ~10 ms if fully fused.  The Mooee/MooeeInv
+    // fusion (above) is the larger payoff.
+    int N = (int)ins.size();
+    auto t0 = usecond();
+    for (int j = 0; j < N; ++j) {
+      for (int a = 0; a < TxqcdNf; ++a)
+        Dw_.Meooe(ins[j].f[a], outs[j].f[a]);
+    }
+    t_meooe_us_ += usecond() - t0;
+    n_meooe_ += N;
+  }
+
+  void MeooeDagN(const std::vector<TXQCDFermionNf> &ins,
+                 std::vector<TXQCDFermionNf> &outs) {
+    int N = (int)ins.size();
+    auto t0 = usecond();
+    for (int j = 0; j < N; ++j) {
+      for (int a = 0; a < TxqcdNf; ++a)
+        Dw_.MeooeDag(ins[j].f[a], outs[j].f[a]);
+    }
+    t_meooe_us_ += usecond() - t0;
+    n_meooe_ += N;
+  }
+
   void Meooe(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
     auto t0 = usecond();
     for (int a = 0; a < TxqcdNf; ++a)
@@ -433,6 +550,17 @@ class TXQCDWilsonCloverFermionEO {
   deviceVector<ComplexD> Mfwd_dev_e_, Mfwd_dev_o_;
   deviceVector<ComplexD *> Amk_fwd_e_, Amk_fwd_o_;
   bool cublas_fwd_built_e_{false}, cublas_fwd_built_o_{false};
+  // Phase M.4.b: multi-RHS pointer arrays, sized lSites; each Bkn_N[i]
+  // points to the start of a (24×NRHS) block at site i in the flat buffers.
+  // Rebuilt when NRHS changes.  Separate flat in/out buffers from the
+  // single-RHS path so resizes don't invalidate the single-RHS pointer
+  // arrays (Bkn_e_/Cmn_e_ etc).
+  deviceVector<ComplexD>   fermion_in_flat_N_e_,  fermion_in_flat_N_o_;
+  deviceVector<ComplexD>   fermion_out_flat_N_e_, fermion_out_flat_N_o_;
+  deviceVector<ComplexD *> Bkn_N_e_, Bkn_N_o_;
+  deviceVector<ComplexD *> Cmn_N_e_, Cmn_N_o_;
+  bool cublas_N_built_e_{false}, cublas_N_built_o_{false};
+  int  cublas_N_built_NRHS_e_{0}, cublas_N_built_NRHS_o_{0};
 
   SMU::SpinMatrices sm_;
 
@@ -818,6 +946,180 @@ class TXQCDWilsonCloverFermionEO {
           }
         }
       });
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // Phase M.4.b: fused multi-RHS cuBLAS Mooee (forward or inverse).
+  //
+  // The matrix M_dev[site] is identical across RHS columns.  By calling
+  // gemmBatched with column dimension n=NRHS, we compute per-site
+  //   OUT_{site}[k, j] = sum_l M_{site}[k, l] · IN_{site}[l, j]
+  // for all j ∈ [0, NRHS) in a single batched kernel.  The matrix is loaded
+  // once per site (DRAM) and reused for all NRHS columns — near-peak GPU
+  // memory bandwidth utilization vs the single-RHS gemv (24× lower
+  // arithmetic intensity).
+  //
+  // Layout of flat buffers (lSites × 24 × NRHS ComplexD per parity):
+  //   flat[site_lex * 24 * NRHS + j * 24 + k]   for site_lex, RHS j, sc-index k
+  // This is column-major within each site (BLAS-N convention).
+  //
+  // Pack/unpack uses a one-shot device-pointer-array view-of-views: each
+  // RHS's LatticeView _odata pointer copied to a deviceVector<vobj*>, then
+  // a single accelerator_for iterates over (oSite, lane, j) inner.
+  // ------------------------------------------------------------------------
+  void ApplyMooeeCublasN(int cb,
+                         const std::vector<TXQCDFermionNf> &ins,
+                         std::vector<TXQCDFermionNf> &outs,
+                         bool inverse) {
+    int NRHS = (int)ins.size();
+    GRID_ASSERT(NRHS >= 1);
+    GRID_ASSERT((int)outs.size() == NRHS);
+    if (NRHS == 1) {
+      if (inverse) ApplyMooeeInvCublas(cb, ins[0], outs[0]);
+      else         ApplyMooeeFwdCublas(cb, ins[0], outs[0]);
+      return;
+    }
+
+    GridBase *grid = ins[0].f[0].Grid();
+    uint64_t lSites = grid->lSites();
+    uint64_t oSites = grid->oSites();
+    using vobj = typename LatticeFermion::vector_object;
+    constexpr int Nsimd = vobj::Nsimd();
+    constexpr int N = SMU::kDim;  // 24
+    int N_x_NRHS = N * NRHS;
+
+    // Use SEPARATE flat buffers for the multi-RHS path so resizes here don't
+    // invalidate the single-RHS path's pre-built pointer arrays
+    // (Bkn_e_/Cmn_e_/Amk_*_e_) which alias into fermion_{in,out}_flat_e_.
+    auto &fin_flat  = (cb == Even) ? fermion_in_flat_N_e_  : fermion_in_flat_N_o_;
+    auto &fout_flat = (cb == Even) ? fermion_out_flat_N_e_ : fermion_out_flat_N_o_;
+    auto &lex_dev   = (cb == Even) ? lex_table_dev_e_      : lex_table_dev_o_;
+    auto &lex_built = (cb == Even) ? lex_table_built_e_    : lex_table_built_o_;
+    GRID_ASSERT(lex_built);
+
+    size_t need = lSites * N_x_NRHS;
+    if (fin_flat.size() < need) {
+      fin_flat.resize(need);
+      fout_flat.resize(need);
+      // Buffer was reallocated → previously-built Bkn_N/Cmn_N pointers are
+      // now stale, force rebuild.
+      auto &N_built = (cb == Even) ? cublas_N_built_e_ : cublas_N_built_o_;
+      N_built = false;
+    }
+
+    // Build per-RHS view pointer arrays on device.  Views must be alive for
+    // the whole accelerator_for that uses them.
+    std::vector<vobj*> in_v0_host(NRHS), in_v1_host(NRHS);
+    std::vector<vobj*> out_v0_host(NRHS), out_v1_host(NRHS);
+    std::vector<LatticeView<vobj>> in_v0_views, in_v1_views, out_v0_views, out_v1_views;
+    in_v0_views.reserve(NRHS); in_v1_views.reserve(NRHS);
+    out_v0_views.reserve(NRHS); out_v1_views.reserve(NRHS);
+    for (int j = 0; j < NRHS; ++j) {
+      in_v0_views.push_back(ins[j].f[0].View(AcceleratorRead));
+      in_v1_views.push_back(ins[j].f[1].View(AcceleratorRead));
+      in_v0_host[j] = in_v0_views[j].getHostPointer();
+      in_v1_host[j] = in_v1_views[j].getHostPointer();
+      outs[j].f[0].Checkerboard() = cb;
+      outs[j].f[1].Checkerboard() = cb;
+      out_v0_views.push_back(outs[j].f[0].View(AcceleratorWrite));
+      out_v1_views.push_back(outs[j].f[1].View(AcceleratorWrite));
+      out_v0_host[j] = out_v0_views[j].getHostPointer();
+      out_v1_host[j] = out_v1_views[j].getHostPointer();
+    }
+    deviceVector<vobj*> in_v0_dev(NRHS), in_v1_dev(NRHS),
+                        out_v0_dev(NRHS), out_v1_dev(NRHS);
+    acceleratorCopyToDevice(in_v0_host.data(),  &in_v0_dev[0],  NRHS * sizeof(vobj*));
+    acceleratorCopyToDevice(in_v1_host.data(),  &in_v1_dev[0],  NRHS * sizeof(vobj*));
+    acceleratorCopyToDevice(out_v0_host.data(), &out_v0_dev[0], NRHS * sizeof(vobj*));
+    acceleratorCopyToDevice(out_v1_host.data(), &out_v1_dev[0], NRHS * sizeof(vobj*));
+
+    // (1) Pack: SIMD fermions → flat per-site (lex-ordered, column-major over RHS).
+    {
+      ComplexD *fin_ptr = &fin_flat[0];
+      int *lex_dev_ptr = &lex_dev[0];
+      vobj **v0_ptrs = &in_v0_dev[0];
+      vobj **v1_ptrs = &in_v1_dev[0];
+      accelerator_for(s, oSites, Nsimd, {
+        int simt_lane = static_cast<int>(lane);
+        int lex = lex_dev_ptr[s * Nsimd + simt_lane];
+        ComplexD *site_dst = &fin_ptr[lex * N_x_NRHS];
+        for (int j = 0; j < NRHS; ++j) {
+          ComplexD *col_dst = &site_dst[j * N];
+          auto v0 = v0_ptrs[j][s];
+          auto v1 = v1_ptrs[j][s];
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int i = 0; i < Nc; ++i) {
+              col_dst[0 * 12 + alpha * 3 + i] = getlane(v0()(alpha)(i), simt_lane);
+              col_dst[1 * 12 + alpha * 3 + i] = getlane(v1()(alpha)(i), simt_lane);
+            }
+          }
+        }
+      });
+    }
+
+    // (2) Build / refresh the multi-RHS Bkn_N / Cmn_N pointer arrays.
+    auto &Bkn_N    = (cb == Even) ? Bkn_N_e_    : Bkn_N_o_;
+    auto &Cmn_N    = (cb == Even) ? Cmn_N_e_    : Cmn_N_o_;
+    auto &N_built  = (cb == Even) ? cublas_N_built_e_ : cublas_N_built_o_;
+    auto &N_built_NRHS = (cb == Even) ? cublas_N_built_NRHS_e_ : cublas_N_built_NRHS_o_;
+    if (!N_built || N_built_NRHS != NRHS) {
+      Bkn_N.resize(lSites);
+      Cmn_N.resize(lSites);
+      ComplexD *Bin_ptr = &fin_flat[0];
+      ComplexD *Cout_ptr = &fout_flat[0];
+      ComplexD **Bkn_ptr = &Bkn_N[0];
+      ComplexD **Cmn_ptr = &Cmn_N[0];
+      int stride = N_x_NRHS;
+      accelerator_for(i, lSites, 1, {
+        Bkn_ptr[i] = &Bin_ptr[i * stride];
+        Cmn_ptr[i] = &Cout_ptr[i * stride];
+      });
+      N_built = true;
+      N_built_NRHS = NRHS;
+    }
+
+    // (3) Single fused gemmBatched: per site, M[24×24] · IN[24×NRHS] = OUT[24×NRHS].
+    auto &Amk = inverse ? ((cb == Even) ? Amk_e_ : Amk_o_)
+                        : ((cb == Even) ? Amk_fwd_e_ : Amk_fwd_o_);
+    GridBLAS blas;
+    blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
+                     N, NRHS, N,
+                     ComplexD(1.0, 0.0),
+                     Amk, Bkn_N,
+                     ComplexD(0.0, 0.0),
+                     Cmn_N);
+
+    // (4) Unpack: flat → SIMD fermions.
+    {
+      ComplexD *fout_ptr = &fout_flat[0];
+      int *lex_dev_ptr = &lex_dev[0];
+      vobj **v0_ptrs = &out_v0_dev[0];
+      vobj **v1_ptrs = &out_v1_dev[0];
+      accelerator_for(s, oSites, Nsimd, {
+        int simt_lane = static_cast<int>(lane);
+        int lex = lex_dev_ptr[s * Nsimd + simt_lane];
+        const ComplexD *site_src = &fout_ptr[lex * N_x_NRHS];
+        for (int j = 0; j < NRHS; ++j) {
+          const ComplexD *col_src = &site_src[j * N];
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int i = 0; i < Nc; ++i) {
+              putlane(v0_ptrs[j][s]()(alpha)(i), col_src[0 * 12 + alpha * 3 + i], simt_lane);
+              putlane(v1_ptrs[j][s]()(alpha)(i), col_src[1 * 12 + alpha * 3 + i], simt_lane);
+            }
+          }
+        }
+      });
+    }
+
+    // Explicit ViewClose for all per-RHS views: LatticeView has no
+    // auto-close destructor, so leaked views poison the memory manager
+    // accLock counter and trip a later assertion.
+    for (int j = 0; j < NRHS; ++j) {
+      in_v0_views[j].ViewClose();
+      in_v1_views[j].ViewClose();
+      out_v0_views[j].ViewClose();
+      out_v1_views[j].ViewClose();
     }
   }
 

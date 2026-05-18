@@ -15,6 +15,7 @@
 #include <cstring>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
+#include <Grid/qcd/action/txqcd/TXQCDCheckpointer.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 #include <Grid/qcd/smearing/StoutSmearing.h>
@@ -136,6 +137,32 @@ public:
   }
 };
 
+// γ5·M wrappers — Hermitian (since M† = γ5 M γ5  ⇒  (γ5 M)† = M† γ5 = γ5 M).
+// Signed eigenvalues: zero crossings ⇒ sign of det(M) = ∏ λ_i changes.
+class QcdG5M : public LinearFunction<LatticeFermion> {
+public:
+  WCF &Dw_;
+  QcdG5M(WCF &Dw) : Dw_(Dw) {}
+  void operator()(const LatticeFermion &in, LatticeFermion &out) override {
+    LatticeFermion tmp(in.Grid());
+    Dw_.M(in, tmp);
+    Gamma g5(Gamma::Algebra::Gamma5);
+    out = g5 * tmp;
+  }
+};
+
+class TxqcdG5M : public LinearFunction<TXQCDFermionNf> {
+public:
+  TXQCDWilsonCloverOp &Mop_;
+  TxqcdG5M(TXQCDWilsonCloverOp &Mop) : Mop_(Mop) {}
+  void operator()(const TXQCDFermionNf &in, TXQCDFermionNf &out) override {
+    TXQCDFermionNf tmp(in.Grid());
+    Mop_.M(in, tmp);
+    Gamma g5(Gamma::Algebra::Gamma5);
+    for (int a = 0; a < TxqcdNf; ++a) out.f[a] = g5 * tmp.f[a];
+  }
+};
+
 // Power iteration for λ_max.
 template <class Field>
 static RealD PowerIterMaxEval(LinearFunction<Field> &Op, GridParallelRNG &pRNG,
@@ -197,15 +224,19 @@ public:
 
 // Manual Lanczos with full re-orthogonalization on a Hermitian operator FilterOp.
 // Returns Ritz pairs (eigenvalue of FilterOp, vector index in V).  Use the
-// vectors to evaluate Rayleigh quotients for the underlying MdagM.
+// vectors to evaluate Rayleigh quotients for the underlying MdagM AND the
+// (different, Hermitian) γ5·M operator — the latter gives SIGNED eigenvalues
+// whose zero crossings flag sign-of-det(M) changes.
 //
 // Symmetric tridiagonal T = symtridiag(alpha[0..k-1], beta[0..k-2]).  Ritz
 // values are eigenvalues of T; Ritz vectors are V * eigenvec(T).
 template <class Field>
 static void Lanczos(LinearFunction<Field> &FilterOp,
                     LinearFunction<Field> &MdagM,
+                    LinearFunction<Field> &G5M,
                     GridBase *grid, GridParallelRNG &rng, int Nm,
                     std::vector<RealD> &mdagm_evals,
+                    std::vector<RealD> &g5m_evals,
                     int Nev) {
   std::vector<Field> V; V.reserve(Nm);
   for (int i = 0; i < Nm; ++i) V.emplace_back(grid);
@@ -252,33 +283,49 @@ static void Lanczos(LinearFunction<Field> &FilterOp,
   auto evecs = es.eigenvectors();
 
   // For each top Ritz pair (large FilterOp eval → small MdagM eval),
-  // build the Ritz vector u = sum_j evecs(j, idx) V_j and compute
-  // Rayleigh quotient <u, MdagM u> / <u, u>.
+  // build the Ritz vector u = sum_j evecs(j, idx) V_j and compute Rayleigh
+  // quotients <u, MdagM u>/<u,u> (positive) and <u, γ5·M u>/<u,u> (signed).
   int top = std::min(Nev, k_done);
   mdagm_evals.clear();
+  g5m_evals.clear();
+  // Keep (m2, g5) pairs together so we can sort by m2 (smallest-magnitude first)
+  // and retain the matching signed γ5·M eigenvalue.
+  std::vector<std::pair<RealD, RealD>> pairs;
+  pairs.reserve(top);
   for (int rank = 0; rank < top; ++rank) {
-    int idx = k_done - 1 - rank;  // largest first
+    int idx = k_done - 1 - rank;  // largest FilterOp eval first
     Field u(grid); u = Zero();
     for (int j = 0; j < k_done; ++j)
       axpy_ip(u, ComplexD(evecs(j, idx), 0), V[j]);
     RealD nu = norm2(u);
     if (nu < 1e-30) continue;
     MdagM(u, tmp);
-    RealD ray = real(innerProduct(u, tmp)) / nu;
-    mdagm_evals.push_back(ray);
+    RealD ray_m2 = real(innerProduct(u, tmp)) / nu;
+    G5M(u, tmp);
+    RealD ray_g5 = real(innerProduct(u, tmp)) / nu;
+    pairs.emplace_back(ray_m2, ray_g5);
   }
-  std::sort(mdagm_evals.begin(), mdagm_evals.end());
+  // Sort by M†M eigenvalue ascending (smallest magnitude first).
+  std::sort(pairs.begin(), pairs.end(),
+            [](const std::pair<RealD,RealD> &a, const std::pair<RealD,RealD> &b) {
+              return a.first < b.first;
+            });
+  for (const auto &p : pairs) {
+    mdagm_evals.push_back(p.first);
+    g5m_evals.push_back(p.second);
+  }
 }
 
+// Returns the smallest-magnitude eigenvalues of γ5·M (signed), along with the
+// matching M†M Rayleigh quotients (positive).  Same ordering for both vectors.
 template <class Field>
-static std::vector<RealD>
-SmallestEvals(LinearFunction<Field> &MdagM, GridBase *grid,
-              GridParallelRNG &pRNG, int Nev, RealD cheby_lo,
-              RealD cheby_hi, int cheby_ord, int Nm) {
+static void
+SmallestEvals(LinearFunction<Field> &MdagM, LinearFunction<Field> &G5M,
+              GridBase *grid, GridParallelRNG &pRNG, int Nev, RealD cheby_lo,
+              RealD cheby_hi, int cheby_ord, int Nm,
+              std::vector<RealD> &m2_evals, std::vector<RealD> &g5_evals) {
   ChebFilter<Field> Filter(MdagM, cheby_lo, cheby_hi, cheby_ord);
-  std::vector<RealD> evals;
-  Lanczos(Filter, MdagM, grid, pRNG, Nm, evals, Nev);
-  return evals;
+  Lanczos(Filter, MdagM, G5M, grid, pRNG, Nm, m2_evals, g5_evals, Nev);
 }
 
 int main(int argc, char **argv) {
@@ -302,7 +349,21 @@ int main(int argc, char **argv) {
   pRNG.SeedFixedIntegers({142, 143, 144, 145, 146});
 
   TXQCDField U(&Grid);
-  if (const char *ic = std::getenv("IMPORT_CFG"); ic && *ic) {
+  // prod_aux_loaded=true means we loaded BOTH gauge AND TXQCD aux fields from
+  // the per-traj production checkpoint (TXQCDCheckpointer sidecar) — i.e. the
+  // actual cfg the HMC stream sampled.  In that mode we skip the FillAuxFields
+  // call inside the λ loop and force the λ scan to the single LAMBDA env var.
+  bool prod_aux_loaded = false;
+  if (const char *pt = std::getenv("TXQCD_PROD_TRAJ"); pt && *pt) {
+    int traj_load = std::atoi(pt);
+    std::cout << GridLogMessage << "TXQCD_PROD_TRAJ=" << traj_load
+              << " — loading gauge+aux from production checkpoint "
+              << txqcd_cfg_dir() << "/ckpoint_lat." << traj_load << std::endl;
+    TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
+                                  txqcd_cfg_dir() + "/ckpoint_lat",
+                                  txqcd_cfg_dir() + "/ckpoint_rng", traj_load);
+    prod_aux_loaded = true;
+  } else if (const char *ic = std::getenv("IMPORT_CFG"); ic && *ic) {
     std::cout << GridLogMessage << "IMPORT_CFG=" << ic << std::endl;
     FILE *f = std::fopen(ic, "rb"); char magic[16] = {0};
     if (f) { std::fread(magic, 1, sizeof(magic), f); std::fclose(f); }
@@ -347,6 +408,19 @@ int main(int argc, char **argv) {
             << ", ord=" << cheby_ord << ")  Nev=" << Nev
             << "  Nm=" << Nm << std::endl;
 
+  bool skip_qcd = false;
+  if (const char *sq = std::getenv("SKIP_QCD"); sq && *sq && std::atoi(sq))
+    skip_qcd = true;
+
+  WilsonImplParams impl_p_outer;  // re-used by both sections; mirror impl_p below
+  impl_p_outer.boundary_phases.resize(Nd, 1.0);
+  impl_p_outer.boundary_phases[Nd - 1] = -1.0;
+  RealD lmax_qcd = 0.0;
+  std::vector<RealD> evals_qcd, g5_evals_qcd;
+  if (skip_qcd) {
+    std::cout << GridLogMessage << "SKIP_QCD=1 — skipping QCD spectrum"
+              << std::endl;
+  } else {
   // ---- QCD ----
   std::cout << GridLogMessage << std::endl;
   std::cout << GridLogMessage << "==== QCD ====" << std::endl;
@@ -356,57 +430,75 @@ int main(int argc, char **argv) {
   WCF DwQ(Usm, Grid, RBGrid, mass_light, csw, csw,
           WilsonAnisotropyCoefficients(), impl_p);
   QcdMdagM MdagM_qcd(DwQ);
-  RealD lmax_qcd = PowerIterMaxEval<LatticeFermion>(MdagM_qcd, pRNG, &Grid, 80);
+  QcdG5M   G5M_qcd(DwQ);
+  lmax_qcd = PowerIterMaxEval<LatticeFermion>(MdagM_qcd, pRNG, &Grid, 80);
   std::cout << GridLogMessage << "  λ_max(M†M) ≈ " << lmax_qcd << std::endl;
-  auto evals_qcd = SmallestEvals<LatticeFermion>(MdagM_qcd, &Grid, pRNG,
-                                                  Nev, cheby_lo, cheby_hi,
-                                                  cheby_ord, Nm);
+  SmallestEvals<LatticeFermion>(MdagM_qcd, G5M_qcd, &Grid, pRNG,
+                                Nev, cheby_lo, cheby_hi,
+                                cheby_ord, Nm,
+                                evals_qcd, g5_evals_qcd);
+  std::cout << GridLogMessage << "  evals(γ5·M) signed, lowest |·|:";
+  for (auto e : g5_evals_qcd) std::cout << " " << e;
+  std::cout << std::endl;
   std::cout << GridLogMessage << "  evals(M†M) lowest "
             << evals_qcd.size() << ":";
   for (auto e : evals_qcd) std::cout << " " << e;
   std::cout << std::endl;
-  std::cout << GridLogMessage << "  |γ5 M| lowest:";
-  for (auto e : evals_qcd) std::cout << " " << std::sqrt(std::abs(e));
-  std::cout << std::endl;
   if (!evals_qcd.empty())
     std::cout << GridLogMessage << "  κ ≈ " << lmax_qcd / evals_qcd.front()
               << std::endl;
+  }  // end !skip_qcd
 
   // ---- TXQCD λ scan ----
   std::vector<RealD> lambdas;
-  if (const char *l = std::getenv("LAMBDAS"); l && *l) {
+  if (prod_aux_loaded) {
+    // Use the single LAMBDA from env (the one the production stream was run at).
+    lambdas = {lambda};
+    std::cout << GridLogMessage
+              << "Production-aux mode: single λ=" << lambda << std::endl;
+  } else if (const char *l = std::getenv("LAMBDAS"); l && *l) {
     std::stringstream ss(l); RealD x; while (ss >> x) lambdas.push_back(x);
   } else {
     lambdas = {4, 6, 12, 18};
   }
+  if (const char *sx = std::getenv("SKIP_TXQCD"); sx && *sx && std::atoi(sx))
+    lambdas.clear();
 
   std::map<RealD, std::pair<RealD, std::vector<RealD>>> tx_results;
   for (RealD lam : lambdas) {
     std::cout << GridLogMessage << std::endl;
     std::cout << GridLogMessage << "==== TXQCD λ=" << lam << " ====" << std::endl;
-    GridParallelRNG pRNG_lam(&Grid);
-    pRNG_lam.SeedFixedIntegers({500 + (int)(10*lam), 501 + (int)(10*lam),
-                                 502 + (int)(10*lam), 503 + (int)(10*lam),
-                                 504 + (int)(10*lam)});
-    TXQCDCompositeImpl::FillAuxFields(pRNG_lam, U, lam, Sigma);
+    if (!prod_aux_loaded) {
+      GridParallelRNG pRNG_lam(&Grid);
+      pRNG_lam.SeedFixedIntegers({500 + (int)(10*lam), 501 + (int)(10*lam),
+                                   502 + (int)(10*lam), 503 + (int)(10*lam),
+                                   504 + (int)(10*lam)});
+      TXQCDCompositeImpl::FillAuxFields(pRNG_lam, U, lam, Sigma);
+    } else {
+      std::cout << GridLogMessage
+                << "  (using production aux fields, NOT re-drawing)" << std::endl;
+    }
 
     std::array<RealD, TxqcdNf> mass_arr;
     for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass_light;
     if (TxqcdNf >= 3) mass_arr[TxqcdNf - 1] = mass_strange;
     TXQCDWilsonCloverOp Mop(Usm, Grid, RBGrid, mass_arr,
-                             U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
+                             U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p_outer);
     TxqcdMdagM MdagM_tx(Mop);
+    TxqcdG5M   G5M_tx(Mop);
     RealD lmax_tx = PowerIterMaxEval<TXQCDFermionNf>(MdagM_tx, pRNG, &Grid, 80);
     std::cout << GridLogMessage << "  λ_max(M†M) ≈ " << lmax_tx << std::endl;
-    auto evals_tx = SmallestEvals<TXQCDFermionNf>(MdagM_tx, &Grid, pRNG,
-                                                   Nev, cheby_lo, cheby_hi,
-                                                   cheby_ord, Nm);
+    std::vector<RealD> evals_tx, g5_evals_tx;
+    SmallestEvals<TXQCDFermionNf>(MdagM_tx, G5M_tx, &Grid, pRNG,
+                                  Nev, cheby_lo, cheby_hi,
+                                  cheby_ord, Nm,
+                                  evals_tx, g5_evals_tx);
+    std::cout << GridLogMessage << "  evals(γ5·M) signed, lowest |·|:";
+    for (auto e : g5_evals_tx) std::cout << " " << e;
+    std::cout << std::endl;
     std::cout << GridLogMessage << "  evals(M†M) lowest "
               << evals_tx.size() << ":";
     for (auto e : evals_tx) std::cout << " " << e;
-    std::cout << std::endl;
-    std::cout << GridLogMessage << "  |γ5 M| lowest:";
-    for (auto e : evals_tx) std::cout << " " << std::sqrt(std::abs(e));
     std::cout << std::endl;
     if (!evals_tx.empty())
       std::cout << GridLogMessage << "  κ ≈ " << lmax_tx / evals_tx.front()

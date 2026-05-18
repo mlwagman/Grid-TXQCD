@@ -59,7 +59,17 @@ constexpr RealD gauss_width = 2.1;
 constexpr int   gauss_niter = 20;
 
 // ===== Connected source grid =====
-constexpr int space_src_per_dim = 4;
+//
+// Defaults: 4 spatial × 12 temporal per dim → 4³×12 = 768 sources.  For quick
+// per-cfg comparisons (basin diagnostics, λ sweeps), set MEAS_SPACE_SRC and
+// MEAS_TIME_SRC to small values (e.g. 1×2 = 2 sources, ~30× faster).
+inline int space_src_per_dim_runtime() {
+  return detail::env_int("MEAS_SPACE_SRC", 4);
+}
+inline int time_src_per_dim_runtime() {
+  return detail::env_int("MEAS_TIME_SRC", 12);
+}
+constexpr int space_src_per_dim = 4;   // kept for BWC; runtime accessor preferred
 constexpr int time_src_per_dim  = 12;
 inline Coordinate src_grid_origin() { return Coordinate(std::vector<int>{0, 0, 0, 0}); }
 
@@ -75,7 +85,9 @@ constexpr int n_prod = 1000;
 constexpr int meas_skip = 10;
 
 // ===== Solver =====
-constexpr RealD cg_tol = 1e-8;
+// Default tol 1e-8; override at runtime with MEAS_CG_TOL for sloppy/refined runs.
+inline RealD cg_tol_runtime() { return detail::env_real("MEAS_CG_TOL", 1e-8); }
+constexpr RealD cg_tol = 1e-8;  // legacy constexpr, kept for places that don't read env
 constexpr int   cg_max = 30000;
 
 // ===== Config paths =====
@@ -84,10 +96,18 @@ inline std::string lambda_tag() {
   ss << std::fixed << std::setprecision(4) << lambda;
   return "lam" + ss.str();
 }
-inline std::string txqcd_cfg_dir()  { return "cfgs/txqcd_" + lambda_tag(); }
-inline std::string txqcd_data_dir() { return "meas_2pt/txqcd_" + lambda_tag(); }
-inline std::string qcd_cfg_dir()    { return "cfgs/qcd"; }
-inline std::string qcd_data_dir()   { return "meas_2pt/qcd"; }
+inline std::string suffix_tag() {
+  if (const char *s = std::getenv("SUFFIX"); s && *s) return std::string(s);
+  return "";
+}
+inline std::string qcd_suffix_tag() {
+  if (const char *s = std::getenv("QCD_SUFFIX"); s && *s) return std::string(s);
+  return "";
+}
+inline std::string txqcd_cfg_dir()  { return "cfgs/txqcd_" + lambda_tag() + suffix_tag(); }
+inline std::string txqcd_data_dir() { return "meas_2pt/txqcd_" + lambda_tag() + suffix_tag(); }
+inline std::string qcd_cfg_dir()    { return "cfgs/qcd" + qcd_suffix_tag(); }
+inline std::string qcd_data_dir()   { return "meas_2pt/qcd" + qcd_suffix_tag(); }
 
 // ===== Measurement trajectories =====
 inline std::vector<int> meas_trajs() {

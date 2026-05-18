@@ -1,6 +1,8 @@
 #include "params.h"
+#include "eig_diag.h"
 #include <cstdio>
 #include <cstring>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverHasenbuschAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
@@ -43,6 +45,12 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
   std::vector<int>    traj_;
   std::vector<RealD>  plaq_, vev_sigma_, vev_s_, vev_trminv_;
   std::vector<std::vector<RealD>> force_avg_, force_max_, fdt_avg_, fdt_max_;
+  // Per-traj γ5·M signed eigenvalues (EIG_DIAG=1).
+  std::vector<std::vector<RealD>> eig_M2_, eig_g5M_;
+  // Sign-problem order parameters (basis-independent): smallest |γ5·M|
+  // and #modes with |γ5·M|<zero_eps.  These are the sharp det-sign
+  // diagnostics — immune to ± near-degenerate-pair relabeling.
+  std::vector<RealD> eig_minabs_, eig_nnear_;
 
   TxqcdDiag(const std::string &prefix, int interval,
             std::vector<ActionRef> actions,
@@ -99,6 +107,31 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     }
     vev_trminv_.push_back(acc / n_vev_noise);
 
+    // ---- γ5·M signed eigenvalue diagnostic (opt-in via EIG_DIAG=1) --------
+    std::vector<RealD> eig_M2, eig_g5M;
+    if (eig_diag_enabled()) {
+      EigDiagParams ep = eig_diag_params_from_env();
+      std::array<RealD, TxqcdNf> mass_arr;
+      for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass_light;
+      if (TxqcdNf >= 3) mass_arr[TxqcdNf - 1] = mass_strange;
+      TXQCDWilsonCloverOp Mop_eig(Usm, grid_, rbgrid_, mass_arr,
+                                   U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
+      RunEigDiagTxqcd(Mop_eig, &grid_, prng_, ep, eig_M2, eig_g5M);
+      std::cout << GridLogMessage << "[TxqcdDiag] traj=" << traj
+                << " γ5·M signed lowest |·|:";
+      for (auto e : eig_g5M) std::cout << " " << e;
+      std::cout << std::endl;
+    }
+    eig_M2_.push_back(eig_M2);
+    eig_g5M_.push_back(eig_g5M);
+    {
+      RealD eig_ma; int eig_nn;
+      eig_order_params(eig_g5M, eig_diag_params_from_env().zero_eps,
+                       eig_ma, eig_nn);
+      eig_minabs_.push_back(eig_ma);
+      eig_nnear_.push_back((RealD)eig_nn);
+    }
+
     if (traj % interval_ == 0) {
       std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
       Hdf5Writer wr(fname);
@@ -111,6 +144,10 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
       write(wr, "force_max", force_max_);
       write(wr, "fdt_avg", fdt_avg_);
       write(wr, "fdt_max", fdt_max_);
+      write(wr, "eig_M2", eig_M2_);
+      write(wr, "eig_g5M", eig_g5M_);
+      write(wr, "eig_min_abs_g5M", eig_minabs_);
+      write(wr, "eig_n_near_zero", eig_nnear_);
       std::vector<std::string> names;
       for (auto &a : actions_) names.push_back(a.name);
       write(wr, "action_names", names);
@@ -118,6 +155,8 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
       vev_sigma_.clear(); vev_s_.clear(); vev_trminv_.clear();
       force_avg_.clear(); force_max_.clear();
       fdt_avg_.clear(); fdt_max_.clear();
+      eig_M2_.clear(); eig_g5M_.clear();
+      eig_minabs_.clear(); eig_nnear_.clear();
       std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
     }
   }
@@ -224,7 +263,13 @@ int main(int argc, char **argv) {
     start_traj = latest;
   } else if (const char *ic = std::getenv("IMPORT_CFG"); ic && *ic) {
     // Import an external thermalized gauge config (chroma LIME or NERSC).
-    // Aux fields auto-initialized via Σ measured on the imported (smeared) gauge.
+    // Aux-field initialization Σ priority:
+    //   (a) AUX_INIT env var → use that Σ directly (no auto-measure).
+    //   (b) Otherwise auto-measure Σ on the imported (stout-smeared) gauge.
+    // For chroma-equilibrium starts, the static auto-measure under-shoots the
+    // true equilibrium Σ by ~2× because it doesn't account for σ-back-reaction
+    // on ⟨ψ̄ψ⟩.  Use AUX_INIT=3.5 (or AUX_INIT_ITERATIONS=N for a self-consistent
+    // loop) to get closer to equilibrium at trajectory 0.
     std::cout << GridLogMessage << "IMPORT_CFG=" << ic << std::endl;
     FILE *fp = std::fopen(ic, "rb"); char magic[16] = {0};
     if (fp) { std::fread(magic, 1, sizeof(magic), fp); std::fclose(fp); }
@@ -242,34 +287,101 @@ int main(int argc, char **argv) {
                             4 + seed_offset, 5 + seed_offset});
     pRNG.SeedFixedIntegers({6 + seed_offset, 7 + seed_offset, 8 + seed_offset,
                             9 + seed_offset, 10 + seed_offset});
-    Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
-    SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv, Stout);
-    SmearMeas.set_Field(U.U);
-    LatticeGaugeField Usm = SmearMeas.get_SmearedU();
-    WilsonImplParams impl_p_meas;
-    impl_p_meas.boundary_phases.resize(Nd, 1.0);
-    impl_p_meas.boundary_phases[Nd - 1] = -1.0;
-    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> MFO;
-    MFO Dw(Usm, Grid, RBGrid, mass_light, csw, csw,
-           WilsonAnisotropyCoefficients(), impl_p_meas);
-    MdagMLinearOperator<MFO, LatticeFermion> HermOp(Dw);
-    ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
-    RealD V = (RealD)Grid.gSites(); RealD acc = 0.0;
-    GridParallelRNG noisePRNG(&Grid);
-    noisePRNG.SeedFixedIntegers(
-        {seed_offset + 11, seed_offset + 12, seed_offset + 13,
-         seed_offset + 14, seed_offset + 15});
-    for (int h = 0; h < n_vev_noise; ++h) {
-      LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
-      gaussian(noisePRNG, eta); Dw.Mdag(eta, b); x = Zero();
-      CG(HermOp, b, x);
-      acc += innerProduct(eta, x).real() / (2.0 * V);
+    RealD Sigma = 0.0;
+    if (const char *si = std::getenv("AUX_INIT"); si && *si) {
+      Sigma = std::atof(si);
+      std::cout << GridLogMessage << "[IMPORT_CFG+AUX_INIT] Σ=" << Sigma
+                << " (manual override)" << std::endl;
+    } else {
+      Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
+      SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv, Stout);
+      SmearMeas.set_Field(U.U);
+      LatticeGaugeField Usm = SmearMeas.get_SmearedU();
+      WilsonImplParams impl_p_meas;
+      impl_p_meas.boundary_phases.resize(Nd, 1.0);
+      impl_p_meas.boundary_phases[Nd - 1] = -1.0;
+      typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> MFO;
+      MFO Dw(Usm, Grid, RBGrid, mass_light, csw, csw,
+             WilsonAnisotropyCoefficients(), impl_p_meas);
+      MdagMLinearOperator<MFO, LatticeFermion> HermOp(Dw);
+      ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+      RealD V = (RealD)Grid.gSites(); RealD acc = 0.0;
+      GridParallelRNG noisePRNG(&Grid);
+      noisePRNG.SeedFixedIntegers(
+          {seed_offset + 11, seed_offset + 12, seed_offset + 13,
+           seed_offset + 14, seed_offset + 15});
+      for (int h = 0; h < n_vev_noise; ++h) {
+        LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
+        gaussian(noisePRNG, eta); Dw.Mdag(eta, b); x = Zero();
+        CG(HermOp, b, x);
+        acc += innerProduct(eta, x).real() / (2.0 * V);
+      }
+      Sigma = (acc / n_vev_noise);  // Σ = vev_trminv (no /2 — see header)
+      std::cout << GridLogMessage << "[IMPORT_CFG+AUX_AUTO] Σ=" << Sigma
+                << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
+                << std::endl;
     }
-    RealD Sigma = (acc / n_vev_noise) / 2.0;
-    std::cout << GridLogMessage << "[IMPORT_CFG+AUX_AUTO] Σ=" << Sigma
-              << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
-              << std::endl;
     TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+
+    // Self-consistent iteration: for chroma-cfg starts the bare auto-measure
+    // under-shoots the equilibrium aux mean by ~2× (σ-back-reaction on ⟨ψ̄ψ⟩
+    // is missing).  Each iteration measures Tr[M_TXQCD⁻¹] / (4·N_f·V) on the
+    // CURRENT aux fields and refills.  Converges in 2-3 iterations on chroma.
+    if (const char *ni = std::getenv("AUX_INIT_ITERATIONS"); ni && *ni) {
+      int n_iter = std::atoi(ni);
+      Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
+      SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv, Stout);
+      SmearMeas.set_Field(U.U);
+      LatticeGaugeField Usm = SmearMeas.get_SmearedU();
+      WilsonImplParams impl_p_meas;
+      impl_p_meas.boundary_phases.resize(Nd, 1.0);
+      impl_p_meas.boundary_phases[Nd - 1] = -1.0;
+      RealD V = (RealD)Grid.gSites();
+      GridParallelRNG noisePRNG(&Grid);
+      noisePRNG.SeedFixedIntegers(
+          {seed_offset + 21, seed_offset + 22, seed_offset + 23,
+           seed_offset + 24, seed_offset + 25});
+      for (int it = 0; it < n_iter; ++it) {
+        // Nf=3 mass array: light pair + strange.
+        std::array<RealD, TxqcdNf> mass_arr;
+        for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass_light;
+        if (TxqcdNf >= 3) mass_arr[TxqcdNf - 1] = mass_strange;
+        TXQCDWilsonCloverOp Mop(Usm, Grid, RBGrid, mass_arr,
+                                 U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p_meas);
+        RealD acc = 0.0;
+        for (int h = 0; h < n_vev_noise; ++h) {
+          TXQCDFermionNf eta(&Grid), b(&Grid), x(&Grid);
+          for (int a = 0; a < TxqcdNf; ++a) gaussian(noisePRNG, eta.f[a]);
+          Mop.Mdag(eta, b);
+          x = Zero();
+          // Inline single-shift CG on M_TXQCD†M_TXQCD.
+          TXQCDFermionNf r(&Grid), p(&Grid), Mp(&Grid), MdMp(&Grid);
+          r = b; p = r;
+          RealD rsq = norm2(r);
+          RealD bsq = std::max(norm2(b), 1e-30);
+          RealD tol2 = 1e-16 * bsq;
+          for (int cg_it = 0; cg_it < cg_max; ++cg_it) {
+            Mop.M(p, Mp); Mop.Mdag(Mp, MdMp);
+            ComplexD pAp = innerProduct(p, MdMp);
+            ComplexD alpha = ComplexD(rsq, 0.0) / pAp;
+            for (int a = 0; a < TxqcdNf; ++a) x.f[a] = x.f[a] + alpha * p.f[a];
+            for (int a = 0; a < TxqcdNf; ++a) r.f[a] = r.f[a] - alpha * MdMp.f[a];
+            RealD rsq_new = norm2(r);
+            if (rsq_new < tol2) break;
+            RealD beta_cg = rsq_new / rsq;
+            for (int a = 0; a < TxqcdNf; ++a) p.f[a] = r.f[a] + beta_cg * p.f[a];
+            rsq = rsq_new;
+          }
+          acc += innerProduct(eta, x).real() / (2.0 * (RealD)TxqcdNf * V);
+        }
+        Sigma = (acc / n_vev_noise);  // Σ = vev_trminv (TXQCD-op self-consist)
+        std::cout << GridLogMessage << "[AUX_ITER " << (it+1) << "/" << n_iter
+                  << "] Σ=" << Sigma
+                  << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
+                  << std::endl;
+        TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+      }
+    }
   } else {
     sRNG.SeedFixedIntegers({1 + seed_offset, 2 + seed_offset, 3 + seed_offset,
                             4 + seed_offset, 5 + seed_offset});
@@ -282,25 +394,27 @@ int main(int argc, char **argv) {
     if (const char *st = std::getenv("START_TYPE"); st && *st) start_type = st;
     double wf_scale = 0.1;
     if (const char *ws = std::getenv("WEAK_FIELD_SCALE"); ws && *ws) wf_scale = std::atof(ws);
-    // Aux-field equilibrium offset is parameterized by Σ ≡ vev_trminv/2 =
-    // Tr[M⁻¹]/(4V) on the stout-smeared weak-field gauge (per the TXQCD aux
-    // init convention memory).  Equilibrium relations:
-    //   <σ_aa>  = Σ / λ²
+    // Aux-field equilibrium offset is Σ = vev_trminv = Tr[M⁻¹]/(2V) on the
+    // SINGLE-flavor QCD Wilson-clover op, stout-smeared gauge.  Confirmed on
+    // dynamical streams to 0.2% (2026-05-17) — the old "Σ≡vev_trminv/2 =
+    // Tr/(4V)" was WRONG (spurious /2; harmless in HMC, under-init'd σ).
+    //   <σ_aa>  = Σ / λ²            (per-flavor diagonal component)
     //   <s_ii>  = (N_f/(√2·N_c)) · Σ / λ²
+    //   vev_sigma diag = N_f·<σ_aa>  (trivial N_f flavor trace)
     //
     // Three input modes (in priority order):
     //   AUX_INIT=value  → set Σ explicitly to this number
-    //   AUX_SIGMA_L=v   → legacy env var; Σ = −AUX_SIGMA_L/2  (since old
-    //                     code used Σ_l_old = −2·vev_trminv)
+    //   AUX_SIGMA_L=v   → legacy env var; Σ = −AUX_SIGMA_L  (AUX_SIGMA_L is
+    //                     calibrated as −vev_trminv = −Σ; meaning unchanged)
     //   AUX_INIT_AUTO=1 (default if neither is set) → measure vev_trminv on
-    //                     the just-generated weak-field gauge with stout
-    //                     smearing + antiperiodic time BC, set Σ = vev_trminv/2.
+    //                     the gauge with stout smearing + antiperiodic time
+    //                     BC, set Σ = vev_trminv.
     RealD Sigma = 0.0;
     bool auto_measure = false;
     if (const char *si = std::getenv("AUX_INIT"); si && *si) {
       Sigma = std::atof(si);
     } else if (const char *sl = std::getenv("AUX_SIGMA_L"); sl && *sl) {
-      Sigma = -std::atof(sl) / 2.0;
+      Sigma = -std::atof(sl);  // AUX_SIGMA_L = −Σ = −vev_trminv (no /2)
     } else {
       auto_measure = true;
     }
@@ -354,7 +468,7 @@ int main(int argc, char **argv) {
           acc += innerProduct(eta, x).real() / (2.0 * V);
         }
         RealD vev_trminv = acc / n_vev_noise;
-        Sigma = vev_trminv / 2.0;
+        Sigma = vev_trminv;  // Σ = vev_trminv (corrected 2026-05-17, no /2)
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO] vev_trminv=" << vev_trminv
                   << "  Σ=" << Sigma
