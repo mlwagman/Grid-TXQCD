@@ -20,7 +20,12 @@
 
 NAMESPACE_BEGIN(Grid);
 
-inline void TXQCDMultiShiftCG(TXQCDWilsonOp &Mop,
+// Templated on the TXQCD Dirac operator type (TXQCDWilsonOp,
+// TXQCDWilsonCloverOp, TXQCDMobiusOp, ...): only requires M(in,out) and
+// Mdag(in,out) on TXQCDFermionNf.  Existing call sites that pass a
+// TXQCDWilsonOp continue to work unchanged.
+template <class TXQCDOp>
+inline void TXQCDMultiShiftCG(TXQCDOp &Mop,
                               const std::vector<RealD> &poles,
                               const std::vector<RealD> &tol,
                               const TXQCDFermionNf &src,
