@@ -25,8 +25,10 @@
 // Δ is γ5-hermitian + s-diagonal, so M_TX is γ5R5-hermitian as well.
 
 #include <Grid/qcd/action/txqcd/TXQCDDeltaOp.h>
+#include <Grid/qcd/action/txqcd/TXQCDMobiusSiteLU.h>
 #include <Grid/qcd/action/fermion/MobiusFermion.h>
 #include <Grid/qcd/action/fermion/WilsonImpl.h>
+#include <memory>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -101,10 +103,33 @@ class TXQCDMobiusFermionEO {
   // ---- MooeeInv via inner CG on the normal equations ----
   // Solve (Mooee_TX^† Mooee_TX) x = Mooee_TX^† in, i.e.
   // x = MooeeInv_TX in.  Initial guess from stock MooeeInv_QCD.
+  // Build the analytic per-site LU for both checkerboards by probing the
+  // (FD-validated) Mooee.  Once built, MooeeInv/MooeeInvDag use the exact
+  // dense solve instead of inner PCG.  Opt-in via env TXQCD_MOBIUS_LU=1
+  // (default off so the committed PCG path is unchanged unless requested).
+  void BuildLU() {
+    lu_e_ = std::make_unique<TXQCDMobiusSiteLU>(FrbGrid_, Ls_);
+    lu_o_ = std::make_unique<TXQCDMobiusSiteLU>(FrbGrid_, Ls_);
+    lu_e_->Build([this](const TXQCDFermionNf &i, TXQCDFermionNf &o) {
+      this->Mooee(i, o); }, Even);
+    lu_o_->Build([this](const TXQCDFermionNf &i, TXQCDFermionNf &o) {
+      this->Mooee(i, o); }, Odd);
+  }
+  static bool LUEnabled() {
+    const char *v = std::getenv("TXQCD_MOBIUS_LU");
+    return v && *v && std::atoi(v) != 0;
+  }
+
   void MooeeInv(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+    int cb = in.f[0].Checkerboard();
+    auto &lu = (cb == Even) ? lu_e_ : lu_o_;
+    if (lu && lu->built()) { lu->Apply(in, out, /*dag=*/false); return; }
     MooeeInvCG_(in, out, /*dag=*/false);
   }
   void MooeeInvDag(const TXQCDFermionNf &in, TXQCDFermionNf &out) {
+    int cb = in.f[0].Checkerboard();
+    auto &lu = (cb == Even) ? lu_e_ : lu_o_;
+    if (lu && lu->built()) { lu->Apply(in, out, /*dag=*/true); return; }
     MooeeInvCG_(in, out, /*dag=*/true);
   }
 
@@ -229,6 +254,7 @@ class TXQCDMobiusFermionEO {
               << " final ||r||^2=" << rsq << " tol2=" << tol2 << std::endl;
   }
 
+  std::unique_ptr<TXQCDMobiusSiteLU> lu_e_, lu_o_;
   MobiusOp Dmob_;
   GridCartesian *FGrid_;
   GridRedBlackCartesian *FrbGrid_;

@@ -237,9 +237,11 @@ class TXQCDMobiusRationalEOAction : public Action<TXQCDField> {
  private:
   TXQCDMobiusFermionEO MakeEOp(const TXQCDField &U) {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
-    return TXQCDMobiusFermionEO(Unc.U, FGrid_, FrbGrid_, UGrid_, UrbGrid_,
-                                mass_, M5_, b_, c_,
-                                Unc.sigma, Unc.pi, Unc.s, Unc.p, Unc.t);
+    TXQCDMobiusFermionEO EOp(Unc.U, FGrid_, FrbGrid_, UGrid_, UrbGrid_,
+                             mass_, M5_, b_, c_,
+                             Unc.sigma, Unc.pi, Unc.s, Unc.p, Unc.t);
+    if (TXQCDMobiusFermionEO::LUEnabled()) EOp.BuildLU();
+    return EOp;
   }
 
   void ApplyRational(TXQCDMobiusSchurOp &SchurOp, const MultiShiftFunction &rat,
