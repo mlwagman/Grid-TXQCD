@@ -247,7 +247,11 @@ class TXQCDWilsonCloverFermionEO {
       autoView(in_v0, in.f[0], AcceleratorRead);
       autoView(in_v1, in.f[1], AcceleratorRead);
       accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
         int simt_lane = static_cast<int>(lane);
+#else
+        int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         ComplexD *dst = &fin_ptr[lex * Ncomp];
         auto v0 = in_v0[s];
@@ -304,7 +308,11 @@ class TXQCDWilsonCloverFermionEO {
       autoView(out_v0, out.f[0], AcceleratorWrite);
       autoView(out_v1, out.f[1], AcceleratorWrite);
       accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
         int simt_lane = static_cast<int>(lane);
+#else
+        int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         const ComplexD *src = &fout_ptr[lex * Ncomp];
         for (int alpha = 0; alpha < Ns; ++alpha) {
@@ -764,7 +772,11 @@ class TXQCDWilsonCloverFermionEO {
       // (the SIMD-inner thread index on GPU).  Use putlane (host+device, takes
       // a scalar) directly to dodge the SIMT-vs-host coalescedWrite overload
       // split that breaks compilation when the body is also compiled for host.
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
       int simt_lane = static_cast<int>(lane);
+#else
+      int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
       int lex  = lex_dev_ptr[s * Nsimd + simt_lane];
       const ComplexD *src = &M_dev_ptr[lex * N2];
       // Eigen is column-major; element (r,c) is at offset c*N + r.
@@ -880,7 +892,11 @@ class TXQCDWilsonCloverFermionEO {
       autoView(in_v0, in.f[0], AcceleratorRead);
       autoView(in_v1, in.f[1], AcceleratorRead);
       accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
         int simt_lane = static_cast<int>(lane);
+#else
+        int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         ComplexD *dst = &fin_ptr[lex * Ncomp];
         auto v0 = in_v0[s];
@@ -936,7 +952,11 @@ class TXQCDWilsonCloverFermionEO {
       autoView(out_v0, out.f[0], AcceleratorWrite);
       autoView(out_v1, out.f[1], AcceleratorWrite);
       accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
         int simt_lane = static_cast<int>(lane);
+#else
+        int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         const ComplexD *src = &fout_ptr[lex * Ncomp];
         for (int alpha = 0; alpha < Ns; ++alpha) {
@@ -1041,7 +1061,11 @@ class TXQCDWilsonCloverFermionEO {
       vobj **v0_ptrs = &in_v0_dev[0];
       vobj **v1_ptrs = &in_v1_dev[0];
       accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
         int simt_lane = static_cast<int>(lane);
+#else
+        int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         ComplexD *site_dst = &fin_ptr[lex * N_x_NRHS];
         for (int j = 0; j < NRHS; ++j) {
@@ -1097,7 +1121,11 @@ class TXQCDWilsonCloverFermionEO {
       vobj **v0_ptrs = &out_v0_dev[0];
       vobj **v1_ptrs = &out_v1_dev[0];
       accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
         int simt_lane = static_cast<int>(lane);
+#else
+        int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         const ComplexD *site_src = &fout_ptr[lex * N_x_NRHS];
         for (int j = 0; j < NRHS; ++j) {
