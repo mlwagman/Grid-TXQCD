@@ -4,7 +4,7 @@ How to run any Grid-built binary (`gen_txqcd_cfgs_2plus1`, `compute_vev`,
 `meas_*`, etc.) on more than one node, and the gotchas we hit on 2026-05-23
 that aren't obvious.
 
-## TL;DR
+## TL;DR — current build (`--enable-setdevice=yes`)
 
 Inside an `salloc`-allocated interactive bash session on N nodes × 4 GPUs:
 
@@ -14,19 +14,33 @@ source ../env_lq2_grid.sh
 srun --overlap --mpi=pmix \
      -N $SLURM_NNODES -n $(( SLURM_NNODES * 4 )) \
      --cpu-bind=none \
-     ./srun_gpu_wrapper.sh \
      ./<binary> --grid Lx.Ly.Lz.Lt --mpi mx.my.mz.mt <args...>
 ```
 
-`srun_gpu_wrapper.sh` is a 4-line shim (already in `production/`):
+That's it. Grid now binds GPU per node-local rank internally — the log
+will print `AcceleratorCudaInit: rank N setting device to node rank K`,
+and bus IDs come out distinct (0000:2F:00.0 / 0000:30:00.0 / 0000:AF:00.0 /
+0000:B0:00.0 for the 4 GPUs on an lq2gpu node).
+
+## Historical: `srun_gpu_wrapper.sh` (not needed anymore)
+
+Earlier (before 2026-05-23 rebuild), Grid was built with
+`--enable-setdevice=no` and **didn't** bind GPUs internally. Without help,
+all 4 ranks on a node would attach to GPU 0 → instant OOM. The fix was a
+4-line shim that set `CUDA_VISIBLE_DEVICES` from `SLURM_LOCALID` before
+exec'ing the binary:
 
 ```bash
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=${SLURM_LOCALID:-0}
+LOCAL_RANK=${SLURM_LOCALID:-${OMPI_COMM_WORLD_LOCAL_RANK:-0}}
+export CUDA_VISIBLE_DEVICES=$LOCAL_RANK
 exec "$@"
 ```
 
-That's the whole recipe. The notes below explain *why* each piece is needed.
+The wrapper is still on disk at `production/srun_gpu_wrapper.sh` and is
+harmless (the env var just gets overridden by Grid's own setdevice call),
+but new srun invocations don't need it. If you see `--enable-setdevice=no`
+in `build-gpu/Grid/Config.h` you're on the old build and need the wrapper.
 
 ## Things that fail and why
 
@@ -76,30 +90,18 @@ $ srun --mpi=list
 Our OpenMPI 4.1.5 build (via `gompi/2023a`) wants `pmix`. `pmi2` will give
 mismatched-protocol errors. The reference NPLQCD scripts all use `pmix`.
 
-### 4. Grid is built with `--enable-setdevice=no` — you MUST set CUDA_VISIBLE_DEVICES per rank
+### 4. (resolved 2026-05-23) GPU binding now handled by Grid
 
-This is the most insidious one. Without a wrapper, all 4 ranks on a node
-bind to GPU 0 (same bus id), Grid reports:
+After the `--enable-setdevice=yes` rebuild, Grid binds GPUs internally
+based on node-local MPI rank, printing
+`AcceleratorCudaInit: rank N setting device to node rank K` and yielding
+distinct bus IDs across the 4 ranks on a node. **No wrapper needed.**
 
-```
-local rank 0 device 0 bus id: 0000:2F:00.0
-local rank 1 device 0 bus id: 0000:2F:00.0   ← same GPU!
-local rank 2 device 0 bus id: 0000:2F:00.0
-local rank 3 device 0 bus id: 0000:2F:00.0
-```
+If you instead see `--enable-setdevice=no` in `build-gpu/Grid/Config.h`
+(older build), all ranks bind to GPU 0 → instant OOM; revert to using
+`./srun_gpu_wrapper.sh ./<binary>` until you can rebuild.
 
-→ effectively one GPU per node, instant OOM on anything larger than a toy
-lattice. The Grid binary even prints this warning at startup:
-
-> `AcceleratorCudaInit: assume user either uses (a) IBM jsrun, or
-> (b) invokes through a wrapping script to set CUDA_VISIBLE_DEVICES`
-
-The fix is a 4-line bash wrapper that sets `CUDA_VISIBLE_DEVICES` from
-`SLURM_LOCALID` and exec's the binary. We keep one at
-`production/srun_gpu_wrapper.sh`. **Always go through it for Grid
-multi-rank-per-node runs.**
-
-Sanity check after launch — the log should show distinct bus IDs:
+Sanity check after launch — log should show distinct bus IDs:
 
 ```
 local rank 0 device 0 bus id: 0000:2F:00.0
@@ -108,7 +110,8 @@ local rank 2 device 0 bus id: 0000:AF:00.0
 local rank 3 device 0 bus id: 0000:B0:00.0
 ```
 
-If you see the same bus id repeated, the wrapper isn't taking effect.
+If you see the same bus id repeated under setdevice=yes, something else
+is wrong (check that `mpi 1.1.x.y` actually multiplies to ntasks).
 
 ### 5. salloc shape that pairs with this recipe
 
@@ -147,7 +150,7 @@ loads: `cmake gompi ucx_cuda ucc_cuda gcc/12.3.0 hdf5/1.14.2_gompi_2023a`.
 That gives us OpenMPI 4.1.5 + PMIx 4.2.6 + UCX-CUDA + NCCL — everything
 the srun/pmix path needs. **Source it before every multi-node run.**
 
-## Concrete working example (from 2026-05-23 b6.3 48³×96 smoke)
+## Concrete working example (post setdevice=yes rebuild)
 
 ```bash
 salloc -N 2 --ntasks-per-node 4 --gres=gpu:a100:4 --cpus-per-task=16 \
@@ -161,15 +164,15 @@ source ../env_lq2_grid.sh
 CFG=/lustre2/nplqcd/cfgs/cl21_48_96_b6p3_m0p2416_m0p2050-djm-3/...lime
 
 srun --overlap --mpi=pmix -N 2 -n 8 --cpu-bind=none \
-     ./srun_gpu_wrapper.sh ./compute_vev \
+     ./compute_vev \
        --grid 48.48.48.96 --mpi 1.1.2.4 \
        --mass -0.2416 --csw 1.20536588031793 \
        --n-noise 4 --cg-tol 1e-8 --seed 1234567 \
        "$CFG"
 ```
 
-This works. Took our 48³ runs from "single-node OOMs in smearing" (4-GPU
-split into one node) to a fully-loaded 2-node CG that grinds steadily.
+Pre-rebuild this same command needed `./srun_gpu_wrapper.sh ./compute_vev`
+instead of `./compute_vev` — see the historical section above.
 
 ## Quick troubleshoot table
 

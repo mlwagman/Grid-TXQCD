@@ -82,8 +82,11 @@ for i in 0 1 2 3; do
       MDSTEPS=$MDS \
       TRAJL=0.353553390593274 \
       GAUGE_MULT=4 \
-      GAUGE_INNER_MULT=4 \
-      AUX_MULT=4 \
+      GAUGE_INNER_MULT=2 \
+      AUX_MULT=1 \
+      `# 2026-05-23: MULT 4/4/4 → 4/2/1. Fdt diagnostic showed aux Fdt 9× smaller` \
+      `# than TXQCD light at λ=5-8; AUX_MULT=4 was over-engineered. Combined with` \
+      `# smear-skip patch in TXQCDSmearedConfiguration.h, ~50% wallclock reduction.` \
       HASEN_DM=0 \
       NO_METROP=0 \
       WEAK_FIELD_SCALE=0.1 \
