@@ -36,15 +36,17 @@ LATT="${LATT:-16.16.16.48}"
 SX=2; ST=6
 MEAS_CG_TOL="${MEAS_CG_TOL:-1e-8}"
 
+# Low-λ members of the 12 streams actively being extended in the queue
+# (2026-05-18 audit).  λ=6/6.5 use the RENAMED _fromchroma_md30 dirs (true
+# MDS=30); λ=5/7 fork_t50_mds10 are the thermalized chroma-pedigree streams;
+# the _nf2p1_mds10_fork are the weak-field streams nodeA_v2 extends.
 STREAMS=(
-  "txqcd 4    _fromchroma_md20"
-  "txqcd 5    _nf2p1_mds10_fork"
-  "txqcd 5    _fromchroma_md20"
-  "txqcd 6    _fromchroma_md20"
-  "txqcd 6.5  _fromchroma_md20"
-  "txqcd 7    _nf2p1_mds10_fork"
-  "txqcd 7    _fromchroma_md20_fork_t50_mds10"
-  "txqcd 7.5  _fromchroma_md20_fork_t50_mds10"
+  "txqcd 5    _nf2p1_mds10_fork"                  # nodeA_v2  λ5 weak-field
+  "txqcd 5    _fromchroma_md20_fork_t50_mds10"    # chain     λ5 thermalized (was missing)
+  "txqcd 6    _fromchroma_md30"                   # chain     λ6  (renamed from _md20)
+  "txqcd 6.5  _fromchroma_md30"                   # chain     λ6.5 (renamed from _md20)
+  "txqcd 7    _nf2p1_mds10_fork"                  # nodeA_v2  λ7 weak-field
+  "txqcd 7    _fromchroma_md20_fork_t50_mds10"    # chain     λ7 thermalized
 )
 
 ALL_DIR="meas_2pt/all_2x6_sparse"
@@ -94,7 +96,8 @@ run_one () {
   fi
 }
 
-CFG_NUMBERS=(50 100 150 200 250 300 350 400)
+CFG_FROM="${CFG_FROM:-510}"; CFG_STEP="${CFG_STEP:-10}"; CFG_TO="${CFG_TO:-2000}"
+CFG_NUMBERS=($(seq "$CFG_FROM" "$CFG_STEP" "$CFG_TO"))   # default=production 510..2000; override CFG_FROM/STEP/TO for backlog
 
 PASS=0
 while true; do

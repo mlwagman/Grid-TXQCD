@@ -76,7 +76,8 @@ run_one () {
   fi
 }
 
-CFG_NUMBERS=(50 100 150 200 250 300 350 400)
+CFG_FROM="${CFG_FROM:-510}"; CFG_STEP="${CFG_STEP:-10}"; CFG_TO="${CFG_TO:-2000}"
+CFG_NUMBERS=($(seq "$CFG_FROM" "$CFG_STEP" "$CFG_TO"))   # default=production 510..2000; override CFG_FROM/STEP/TO for backlog
 
 PASS=0
 while true; do

@@ -20,6 +20,7 @@
 // deriv all live on EVEN parity, matching what QUDA expects.
 
 #include <Grid/qcd/action/pseudofermion/TwoFlavourSchurCloverActionEven.h>
+#include <Grid/algorithms/iterative/QudaCloverInverter.h>
 #include <Grid/algorithms/iterative/QudaCloverMultiShiftInverter.h>
 #include <Grid/util/QudaFieldConvert.h>
 #include <Grid/util/QudaInit.h>
@@ -91,9 +92,79 @@ class TwoFlavourSchurCloverQudaForceActionMP
     FermionField X(fcbgrid);
     SchurDifferentiableOperator<ImplD> Mpc(FermOp);
 
-    // Solve X = (Mpc_ee†Mpc_ee)^{-1} PhiEven via DerivativeSolver (MP CG wrapper).
+    // Solve X = (Mpc_ee†Mpc_ee)^{-1} PhiEven.  Default path: MP CG via the
+    // base class's DerivativeSolver.  USE_HMC_MG=1 swaps in QUDA multigrid
+    // via the two-solve Schur reduction trick:
+    //   y_full = M†^{-1}·(PhiEven, 0)            (full-volume MG, dagger=YES)
+    //   y_e = even part of y_full = Mpc^{-†}·PhiEven
+    //   X_full = M^{-1}·(y_e, 0)                  (full-volume MG, dagger=NO)
+    //   X = even part of X_full = (Mpc†·Mpc)^{-1}·PhiEven   ✓
+    // The trick: setting the odd half of the source to zero reduces M^{-1}
+    // (full) to Mpc^{-1} on the even sublattice (see Schur algebra).  Both
+    // MG solves are at the same expensive light mass, but each is many
+    // times faster than vanilla CG.
     X = Zero();
-    this->DerivativeSolver(Mpc, this->PhiEven, X);
+    const bool use_hmc_mg = std::getenv("USE_HMC_MG") != nullptr;
+    if (use_hmc_mg) {
+      // Lazy-init the MG inverter on first deriv() call.  Reuses gauge via
+      // QudaCloverInverter::SetGauge thin-update (newMultigridQuda only on
+      // first SetGauge, updateMultigridQuda thereafter).
+      if (!mg_inv_) {
+        QudaCloverParams qp_mg = qp_;
+        qp_mg.use_multigrid = true;
+        // 2 levels by default (4⁴ / 16³×48 tests); HMC_MG_NLEVEL=3 for
+        // production 48³×96.  HMC_MG_BLOCK_L0 etc override blocks.
+        const char *nlv = std::getenv("HMC_MG_NLEVEL");
+        qp_mg.mg.n_level = nlv ? std::atoi(nlv) : 2;
+        auto parse_block = [](const char *s, std::array<int,4> dflt) {
+          if (!s || !*s) return dflt;
+          std::array<int,4> b = dflt;
+          std::sscanf(s, "%d %d %d %d", &b[0], &b[1], &b[2], &b[3]);
+          return b;
+        };
+        std::array<int,4> b0 = parse_block(std::getenv("HMC_MG_BLOCK_L0"), {4,4,4,4});
+        std::array<int,4> b1 = parse_block(std::getenv("HMC_MG_BLOCK_L1"), {2,2,2,2});
+        qp_mg.mg.geo_block_size = (qp_mg.mg.n_level >= 3)
+            ? std::vector<std::array<int,4>>{b0, b1}
+            : std::vector<std::array<int,4>>{b0};
+        mg_inv_.reset(new QudaCloverInverter(ggrid, qp_mg));
+        std::cout << GridLogMessage
+                  << "[TwoFlavourSchurCloverQudaForceActionMP] USE_HMC_MG=1 — "
+                  << "built MG inverter (" << qp_mg.mg.n_level << " levels)"
+                  << std::endl;
+      }
+      mg_inv_->SetGauge(U);
+
+      FermionField src_full(ggrid), y_full(ggrid), X_full(ggrid);
+      FermionField y_e(fcbgrid);
+      // src_full = (PhiEven, 0).  setCheckerboard places PhiEven on even sites;
+      // odd sites are zero from the Zero() above (the Zero() at line 162 is
+      // for X — set a separate zero for src_full).
+      src_full = Zero();
+      setCheckerboard(src_full, this->PhiEven);
+
+      // Step 1: y_full = M†^{-1} · src_full
+      QudaInvertParam &mg_iparam = mg_inv_->InvertParam();
+      QudaDagType saved_mg_dagger = mg_iparam.dagger;
+      mg_iparam.dagger = QUDA_DAG_YES;
+      (*mg_inv_)(Mpc, src_full, y_full);
+
+      // Extract EVEN part of y_full → y_e, embed in fresh src_full with odd = 0
+      y_e.Checkerboard() = Even;
+      pickCheckerboard(Even, y_e, y_full);
+      src_full = Zero();
+      setCheckerboard(src_full, y_e);
+
+      // Step 2: X_full = M^{-1} · src_full
+      mg_iparam.dagger = QUDA_DAG_NO;
+      (*mg_inv_)(Mpc, src_full, X_full);
+      X.Checkerboard() = Even;
+      pickCheckerboard(Even, X, X_full);
+
+      mg_iparam.dagger = saved_mg_dagger;
+    } else {
+      this->DerivativeSolver(Mpc, this->PhiEven, X);
+    }
 
     // QUDA_FORCE_KERNEL_COMPARE=1: compute Path A force and emit Ta-projected
     // cos(PathA, PathB) comparator. Mirrors Phase 7's diagnostic at line 406+.
@@ -262,6 +333,10 @@ class TwoFlavourSchurCloverQudaForceActionMP
   FermOpF &opF_;
   QudaCloverParams qp_;
   std::unique_ptr<QudaCloverMultiShiftInverter> quda_loader_;
+  // USE_HMC_MG=1 path: lazy-init MG inverter for the (Mpc†·Mpc)^{-1}·PhiEven
+  // solve via the Schur 2-solve trick.  Reuses gauge across MD steps via
+  // QudaCloverInverter::SetGauge thin-update.
+  mutable std::unique_ptr<QudaCloverInverter> mg_inv_;
 };
 
 }  // namespace Grid

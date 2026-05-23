@@ -34,6 +34,7 @@ PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_qcd_cfgs gen_qcd_cfgs_2plus1
            meas_aux_txqcd compare compute_plaq compute_vev \
            eigspec_diag eigspec_diag_nf2 \
            test_quda_init test_quda_roundtrip test_quda_inverter \
+           test_quda_clover_mg \
            test_quda_multishift test_quda_propagator \
            bench_dslash bench_clover_oprod bench_qudahermop_dslash \
            test_quda_txqcd_solver

@@ -16,6 +16,7 @@
 #include <Grid/algorithms/LinearOperator.h>
 #include <Grid/util/QudaInit.h>
 #include <Grid/util/QudaFieldConvert.h>
+#include <Grid/util/QudaMultigridConfig.h>
 
 #ifndef GRID_HAVE_QUDA
 #  error "QudaCloverInverter requires GRID_HAVE_QUDA — configure --with-quda"
@@ -39,6 +40,13 @@ struct QudaCloverParams {
   QudaPrecision  cuda_prec_sloppy = QUDA_SINGLE_PRECISION;
   QudaReconstructType recon = QUDA_RECONSTRUCT_NO;
   QudaReconstructType recon_sloppy = QUDA_RECONSTRUCT_12;
+
+  // Multigrid preconditioning.  Off by default — opt-in for light-mass
+  // inversions where CG convergence is slow.  When enabled, the outer
+  // solver switches from CG to GCR with a QUDA-side MG preconditioner.
+  // See Grid/util/QudaMultigridConfig.h for the per-level knobs.
+  bool use_multigrid = false;
+  QudaMgUserParams mg;
 };
 
 class QudaCloverInverter : public OperatorFunction<LatticeFermion> {
@@ -49,7 +57,11 @@ public:
   }
 
   ~QudaCloverInverter() {
-    // QUDA-side cleanup is handled by Grid::Quda::finalize() at program end.
+    if (mg_preconditioner_ != nullptr) {
+      destroyMultigridQuda(mg_preconditioner_);
+      mg_preconditioner_ = nullptr;
+    }
+    // The rest of QUDA-side cleanup is handled by Grid::Quda::finalize().
   }
 
   // Re-upload gauge + clover to the GPU.  Call after every smearing update.
@@ -102,6 +114,32 @@ public:
     // F_μν · σ_μν · csw·κ on-device, sidestepping any Grid-vs-QUDA clover
     // sign-convention mismatch.
     loadCloverQuda(nullptr, nullptr, &inv_param_);
+
+    // ---- Multigrid setup --------------------------------------------------
+    // Must happen AFTER loadGauge + loadClover.  If MG is already built (this
+    // is a re-SetGauge after smearing update), update it in place rather
+    // than rebuild from scratch — `updateMultigridQuda` re-uses the existing
+    // null vectors when the gauge has changed only mildly (matches the
+    // chroma+QUDA "thin update" recipe).
+    if (params_.use_multigrid) {
+      if (mg_preconditioner_ == nullptr) {
+        buildMgInnerInvertParam(mg_inv_param_, inv_param_, params_.mg);
+        buildMultigridParam(mg_param_, params_.mg);
+        mg_param_.invert_param = &mg_inv_param_;
+        mg_preconditioner_ = newMultigridQuda(&mg_param_);
+        inv_param_.preconditioner = mg_preconditioner_;
+        std::cout << GridLogMessage
+                  << "QudaCloverInverter: MG preconditioner built ("
+                  << params_.mg.n_level << " levels)" << std::endl;
+      } else {
+        mg_param_.thin_update_only = QUDA_BOOLEAN_TRUE;
+        updateMultigridQuda(mg_preconditioner_, &mg_param_);
+        mg_param_.thin_update_only = QUDA_BOOLEAN_FALSE;
+        std::cout << GridLogMessage
+                  << "QudaCloverInverter: MG preconditioner thin-updated"
+                  << std::endl;
+      }
+    }
 
     gauge_loaded_ = true;
   }
@@ -187,12 +225,30 @@ private:
     inv_param_.return_clover = 0;
     inv_param_.return_clover_inverse = 0;
 
-    inv_param_.inv_type        = QUDA_CG_INVERTER;
+    // Outer solver: vanilla CG by default; GCR-with-MG-preconditioner when
+    // params_.use_multigrid is set.  The MG preconditioner handle is
+    // installed in SetGauge() after loadGaugeQuda/loadCloverQuda — until
+    // then inv_param_.preconditioner stays null.
+    if (params_.use_multigrid) {
+      inv_param_.inv_type           = QUDA_GCR_INVERTER;
+      inv_param_.inv_type_precondition = QUDA_MG_INVERTER;
+      // QUDA's MG-as-preconditioner currently REQUIRES QUDA_DIRECT_SOLVE
+      // on the outer solve (not _PC_); the MG preconditioner handles
+      // the EO preconditioning internally via mg.smoother_solve_type.
+      // (Mismatch ⇒ "Outer MG solver can only use QUDA_DIRECT_SOLVE")
+      inv_param_.solve_type         = QUDA_DIRECT_SOLVE;
+      inv_param_.schwarz_type       = QUDA_INVALID_SCHWARZ;
+      inv_param_.precondition_cycle = 1;
+      inv_param_.tol_precondition   = 1e-1;
+      inv_param_.maxiter_precondition = 1;
+    } else {
+      inv_param_.inv_type           = QUDA_CG_INVERTER;
+      inv_param_.solve_type         = QUDA_NORMOP_PC_SOLVE;
+    }
     // Full M^-1 solve: take a full-volume source, return full-volume
     // solution; QUDA does EO preconditioning internally and reconstructs
     // the odd half from the even solution.
     inv_param_.solution_type   = QUDA_MAT_SOLUTION;
-    inv_param_.solve_type      = QUDA_NORMOP_PC_SOLVE;
     inv_param_.matpc_type      = QUDA_MATPC_EVEN_EVEN;
     inv_param_.dagger          = QUDA_DAG_NO;
     // Grid's M is mass-form: (m+4) - 0.5·D_W - 0.5·c_sw·σF (no κ scaling).
@@ -251,6 +307,10 @@ private:
   int    last_iter_     = 0;
   double last_residual_ = 0.0;
   double last_secs_     = 0.0;
+  // Multigrid state — populated only if params_.use_multigrid (else null).
+  QudaMultigridParam mg_param_{};
+  QudaInvertParam    mg_inv_param_{};
+  void              *mg_preconditioner_ = nullptr;
 };
 
 NAMESPACE_END(Grid);

@@ -82,7 +82,11 @@ constexpr int n_noise_disco = 32;
 // ===== HMC =====
 constexpr int n_therm = 100;
 constexpr int n_prod = 1000;
-constexpr int meas_skip = 10;
+// meas_skip is the checkpoint-save cadence (used in gen_*_cfgs.cc via
+// CheckpointerParameters::saveInterval).  Env-overridable as N_SKIP so
+// short runs can save every traj (N_SKIP=1).  Default 10 for production.
+inline int meas_skip_runtime() { return detail::env_int("N_SKIP", 10); }
+#define meas_skip (TXQCDProduction::meas_skip_runtime())
 
 // ===== Solver =====
 // Default tol 1e-8; override at runtime with MEAS_CG_TOL for sloppy/refined runs.

@@ -22,15 +22,15 @@ export QUDA_SOLVER=1
 
 LATT="${LATT:-16.16.16.48}"
 
+# Low-λ members of the 12 streams actively being extended (2026-05-18 audit;
+# λ=6/6.5 RENAMED to _fromchroma_md30; λ=5 fork_t50_mds10 added).
 STREAMS=(
-  "txqcd 4    _fromchroma_md20"
   "txqcd 5    _nf2p1_mds10_fork"
-  "txqcd 5    _fromchroma_md20"
-  "txqcd 6    _fromchroma_md20"
-  "txqcd 6.5  _fromchroma_md20"
+  "txqcd 5    _fromchroma_md20_fork_t50_mds10"
+  "txqcd 6    _fromchroma_md30"
+  "txqcd 6.5  _fromchroma_md30"
   "txqcd 7    _nf2p1_mds10_fork"
   "txqcd 7    _fromchroma_md20_fork_t50_mds10"
-  "txqcd 7.5  _fromchroma_md20_fork_t50_mds10"
 )
 
 ALL_DIR="meas_2pt/all_disco_sparse"
@@ -75,7 +75,8 @@ run_one () {
   fi
 }
 
-CFG_NUMBERS=(50 100 150 200 250 300 350 400)
+CFG_FROM="${CFG_FROM:-510}"; CFG_STEP="${CFG_STEP:-10}"; CFG_TO="${CFG_TO:-2000}"
+CFG_NUMBERS=($(seq "$CFG_FROM" "$CFG_STEP" "$CFG_TO"))   # default=production 510..2000; override CFG_FROM/STEP/TO for backlog
 
 PASS=0
 while true; do
