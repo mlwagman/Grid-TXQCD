@@ -349,6 +349,9 @@ private:
     inv_param_.output_location = QUDA_CPU_FIELD_LOCATION;
 
     inv_param_.verbosity = QUDA_SUMMARIZE;
+    // QUDA_VERBOSE_HMC=1 cranks multishift logging to per-iter detail —
+    // diagnostic-only knob for debugging b6.3 48^3 x 96 stalls.
+    if (std::getenv("QUDA_VERBOSE_HMC")) inv_param_.verbosity = QUDA_VERBOSE;
     inv_param_.struct_size = sizeof(inv_param_);
   }
 
