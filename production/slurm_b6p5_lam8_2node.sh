@@ -33,7 +33,7 @@ source ../env_lq2_grid.sh
 export LATT=32.32.32.64
 export BETA=6.5
 export CSW=1.170082389372972
-export U0=0.865525
+export U0=0.85703554213273
 export MASS_LIGHT=-0.1788
 export MASS_STRANGE=-0.1788                                  # Nf=2+1 degenerate
 export LAMBDA=8
@@ -45,9 +45,9 @@ export N_TRAJ=2000                                           # production target
 export NO_METROP=0                                           # WITH metropolis
 export INTEGRATOR=MinimumNorm2
 export LAMBDA_MN2=0.1789
-export MDSTEPS=10
+export MDSTEPS=16
 export TRAJL=0.353553390593274
-export GAUGE_MULT=4
+export GAUGE_MULT=5
 export GAUGE_INNER_MULT=2
 export AUX_MULT=1
 export HASEN_DM=0
@@ -81,7 +81,7 @@ date
 # sbatch script IS slurm step .0 → no --overlap needed
 srun --mpi=pmix -N 2 -n 8 --cpu-bind=none \
     ./gen_txqcd_cfgs_2plus1 \
-        --mpi 1.1.2.4 --shm 1024 --shm-mpi 0
+        --mpi 1.1.2.4 --shm 1024 --shm-mpi 1
 
 echo "=== exit code $? — end $(date) ==="
 echo "latest ckpts:"
