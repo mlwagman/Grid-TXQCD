@@ -26,37 +26,14 @@ class TXQCDSmearedConfiguration
       : Nsmear_(Nsmear),
         gauge_smearing_(UGrid, Nsmear, Stout),
         SmearedField_(UGrid),
-        ThinLinks_(nullptr),
-        last_u_norm_(0.0),
-        first_set_(true) {}
+        ThinLinks_(nullptr) {}
 
   void set_Field(TXQCDField &U) override {
     ThinLinks_ = &U;
-    // SMEAR-SKIP (2026-05-23, retry): integrator calls set_Field after every
-    // Q-step at any nested level, including aux-only Q steps where U is
-    // unchanged.  Re-smearing the gauge chain on those calls is wasted work
-    // (~30% of traj wallclock at AUX_MULT=4).  Guard the gauge_smearing_
-    // .set_Field call with a fast norm2(U.U) check; if U is unchanged the
-    // cached SmearedU_ is still valid.
-    //
-    // First attempt was wrongly blamed for a 40× hermop slowdown that
-    // turned out to be unrelated (also seen with the patch reverted).
-    // Disable via env TXQCD_SMEAR_ALWAYS=1 if needed for debugging.
-    static const bool always_smear = std::getenv("TXQCD_SMEAR_ALWAYS") != nullptr;
-    bool gauge_changed = always_smear || first_set_;
-    if (!gauge_changed && Nsmear_ > 0) {
-      RealD u_norm = norm2(U.U);
-      gauge_changed = std::abs(u_norm - last_u_norm_) > 1e-10 * std::max(u_norm, last_u_norm_);
-      if (gauge_changed) last_u_norm_ = u_norm;
-    }
-    if (gauge_changed && Nsmear_ > 0) {
-      gauge_smearing_.set_Field(U.U);
-      last_u_norm_ = norm2(U.U);
-      first_set_ = false;
-    }
-    SmearedField_ = U;                                   // updates aux components
+    gauge_smearing_.set_Field(U.U);
+    SmearedField_ = U;
     if (Nsmear_ > 0)
-      SmearedField_.U = gauge_smearing_.get_SmearedU(); // cached smeared U
+      SmearedField_.U = gauge_smearing_.get_SmearedU();
   }
 
   void smeared_force(TXQCDField &dSdU) override {
@@ -76,8 +53,6 @@ class TXQCDSmearedConfiguration
   SmearedConfiguration<PeriodicGimplR> gauge_smearing_;
   TXQCDField SmearedField_;
   TXQCDField *ThinLinks_;
-  RealD last_u_norm_;
-  bool first_set_;
 };
 
 NAMESPACE_END(Grid);
