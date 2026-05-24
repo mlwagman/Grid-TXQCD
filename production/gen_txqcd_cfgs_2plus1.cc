@@ -202,8 +202,17 @@ int main(int argc, char **argv) {
   }
 
   // 10 poles on the rational (chroma ref uses 10-12), MD tol 1e-6.
-  OneFlavourRationalParams rat_params(1e-4, 100.0, cg_max, cg_tol, 20, 64,
-                                      100, 1e-6, 1e-4);
+  // Env overrides for wiring-test smokes that need fast CGs (RAT_LO=0.01
+  // RAT_DEGREE=8 RAT_TOL=1e-5 → multishift converges in ≪100 iters on 4⁴).
+  // Production leaves these unset and uses the defaults below.
+  RealD rat_lo = 1e-4, rat_hi = 100.0, rat_tol = cg_tol;
+  int rat_degree = 20;
+  if (const char *e = std::getenv("RAT_LO");     e && *e) rat_lo     = std::atof(e);
+  if (const char *e = std::getenv("RAT_HI");     e && *e) rat_hi     = std::atof(e);
+  if (const char *e = std::getenv("RAT_TOL");    e && *e) rat_tol    = std::atof(e);
+  if (const char *e = std::getenv("RAT_DEGREE"); e && *e) rat_degree = std::atoi(e);
+  OneFlavourRationalParams rat_params(rat_lo, rat_hi, cg_max, rat_tol,
+                                      rat_degree, 64, 100, 1e-6, 1e-4);
 
   // Grid's SymanzikGaugeAction uses RBC convention — NOT chroma's.
   // Chroma's LW_TREE_GAUGEACT literally sets c0=β, c1=−β/(20·u0²).
@@ -256,6 +265,79 @@ int main(int argc, char **argv) {
                                               mass_light, mass_heavy,
                                               rat_params, csw);
   PF_ratio.is_smeared = true;
+
+  // ────────────────────────────────────────────────────────────────────────
+  // N-level Hasenbusch ladder (HASEN_LADDER env var, comma-separated masses
+  // light→heavy).  Overrides HASEN_DM when set.
+  //
+  // Example: HASEN_LADDER="-0.2416,-0.20,-0.10,0.05"  → 4-level chain:
+  //   |det M(-0.2416)|
+  //     = |det M(0.05)|                        (rational at heaviest)
+  //       × |det M(-0.10) / M(0.05)|           (ratio)
+  //       × |det M(-0.20) / M(-0.10)|          (ratio)
+  //       × |det M(-0.2416) / M(-0.20)|        (ratio)
+  //
+  // Each link uses the existing TXQCDWilsonCloverHasenbuschAction class
+  // (mathematically |det M_a / M_b| at masses a < b).  The chain composes
+  // because the ratios telescope: M(m_1)/M(m_2) · M(m_2)/M(m_3) … M(m_{N-1})/M(m_N)
+  // = M(m_1)/M(m_N), and we multiply back by |det M(m_N)| via the rational.
+  //
+  // For N=2 (HASEN_LADDER="m_light,m_heavy"), produces the same actions as
+  // HASEN_DM = m_heavy - m_light.  Bit-exact recovery is a validation gate.
+  // ────────────────────────────────────────────────────────────────────────
+  std::vector<RealD> ladder_masses;
+  if (const char *hl = std::getenv("HASEN_LADDER"); hl && *hl) {
+    std::string s(hl);
+    size_t pos = 0, comma;
+    while ((comma = s.find(',', pos)) != std::string::npos) {
+      ladder_masses.push_back(std::atof(s.substr(pos, comma - pos).c_str()));
+      pos = comma + 1;
+    }
+    if (pos < s.size())
+      ladder_masses.push_back(std::atof(s.substr(pos).c_str()));
+  }
+
+  // Build the ladder (only when HASEN_LADDER is set and has ≥2 levels).
+  // ladder_rational holds the heaviest rational; ladder_ratios holds N-1
+  // Hasenbusch ratio actions in order (m_1,m_2), (m_2,m_3), …, (m_{N-1},m_N).
+  std::unique_ptr<TXQCDWilsonCloverRationalEOAction> ladder_rational;
+  std::vector<std::unique_ptr<TXQCDWilsonCloverHasenbuschAction>> ladder_ratios;
+  bool use_ladder = (ladder_masses.size() >= 2);
+  if (use_ladder) {
+    // Validate strictly increasing (light→heavy) mass list.
+    for (size_t i = 1; i < ladder_masses.size(); ++i) {
+      if (!(ladder_masses[i] > ladder_masses[i - 1])) {
+        std::cerr << "HASEN_LADDER masses must be strictly increasing (light→heavy)."
+                  << " Got: ";
+        for (auto m : ladder_masses) std::cerr << m << " ";
+        std::cerr << std::endl;
+        std::exit(1);
+      }
+    }
+    // Sanity: lightest must match mass_light (the physical light quark mass
+    // we're sampling).  Otherwise the user is silently changing the action.
+    if (std::abs(ladder_masses.front() - mass_light) > 1e-12) {
+      std::cerr << "HASEN_LADDER first mass " << ladder_masses.front()
+                << " must equal mass_light " << mass_light << std::endl;
+      std::exit(1);
+    }
+    std::cout << GridLogMessage << "HASEN_LADDER (N=" << ladder_masses.size() << "):";
+    for (auto m : ladder_masses) std::cout << " " << m;
+    std::cout << std::endl;
+    const RealD m_top = ladder_masses.back();
+    ladder_rational = std::make_unique<TXQCDWilsonCloverRationalEOAction>(
+        Grid, RBGrid, m_top, rat_params, csw);
+    ladder_rational->is_smeared = true;
+    for (size_t i = 0; i + 1 < ladder_masses.size(); ++i) {
+      ladder_ratios.emplace_back(
+          std::make_unique<TXQCDWilsonCloverHasenbuschAction>(
+              Grid, RBGrid,
+              /*mass_light=*/ladder_masses[i],
+              /*mass_heavy=*/ladder_masses[i + 1],
+              rat_params, csw));
+      ladder_ratios.back()->is_smeared = true;
+    }
+  }
 
   TXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass_light, csw);
   LogDet.is_smeared = true;
@@ -660,7 +742,11 @@ int main(int argc, char **argv) {
             << "  AUX_MULT=" << aux_mult << std::endl;
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  if (hasen_dm > 0.0) {
+  if (use_ladder) {
+    // Heaviest rational first, then ratios in order (light side to heavy side).
+    L1.push_back(ladder_rational.get());
+    for (auto &r : ladder_ratios) L1.push_back(r.get());
+  } else if (hasen_dm > 0.0) {
     L1.push_back(&PF_heavy);
     L1.push_back(&PF_ratio);
   } else {
@@ -722,7 +808,13 @@ int main(int argc, char **argv) {
   TXQCDCheckpointer ckpt(CPp);
 
   std::vector<TxqcdDiag::ActionRef> diag_actions;
-  if (hasen_dm > 0.0) {
+  if (use_ladder) {
+    diag_actions.push_back({"PseudoFermionLadder_top", ladder_rational.get()});
+    for (size_t i = 0; i < ladder_ratios.size(); ++i) {
+      diag_actions.push_back(
+          {"PseudoFermionLadder_ratio" + std::to_string(i), ladder_ratios[i].get()});
+    }
+  } else if (hasen_dm > 0.0) {
     diag_actions.push_back({"PseudoFermionHeavy", &PF_heavy});
     diag_actions.push_back({"PseudoFermionRatio", &PF_ratio});
   } else {
