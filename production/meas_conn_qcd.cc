@@ -80,8 +80,8 @@ static std::vector<ComplexD> NucleonCorrelatorPos(const LatticePropagator &S) {
   return out;
 }
 
-static std::vector<Coordinate> SourceGrid(const Coordinate &latt) {
-  Coordinate origin = src_grid_origin();
+static std::vector<Coordinate> SourceGrid(const Coordinate &latt, int traj) {
+  Coordinate origin = src_grid_origin(traj);
   const int sx = space_src_per_dim_runtime();
   const int st = time_src_per_dim_runtime();
   std::vector<Coordinate> sites;
@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
   Grid::QudaPropSolver<WCF> solver(Dw, HermOp, U_inv, mass_light, csw, cg_tol, cg_max);
 
   int T = latt[Nd - 1];
-  auto sources = SourceGrid(latt);
+  auto sources = SourceGrid(latt, traj);
   int nsrc = (int)sources.size();
 
   std::vector<std::vector<RealD>>    all_pion;
@@ -312,7 +312,7 @@ int main(int argc, char **argv) {
   }
 
   std::string outfile = qcd_data_dir() + "/conn_qcd_" + std::to_string(traj) + ".h5";
-  {
+  if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
     // All averaged correlators are in SOURCE-RELATIVE TIME with APBC sign.
     write(wr, "pion_conn", pion_avg);
@@ -336,6 +336,13 @@ int main(int argc, char **argv) {
       write(wr, "nucleon_tr_per_src_lat", all_nucleon_tr);
     write(wr, "traj", traj);
     write(wr, "plaq", WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
+    {
+      // Per-cfg source-grid origin shift (see params.h src_grid_origin).
+      Coordinate s = src_grid_origin(traj);
+      std::vector<int> sv(Nd);
+      for (int d = 0; d < Nd; ++d) sv[d] = s[d];
+      write(wr, "src_shift", sv);
+    }
   }
 
   std::cout << GridLogMessage << "Written " << outfile << std::endl;

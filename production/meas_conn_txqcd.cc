@@ -226,8 +226,8 @@ BaryonAabCorrelatorPosNeg(const LatticePropagator &S_aa,
   return {contract_proj(+1), contract_proj(-1)};
 }
 
-static std::vector<Coordinate> SourceGrid(const Coordinate &latt) {
-  Coordinate origin = src_grid_origin();
+static std::vector<Coordinate> SourceGrid(const Coordinate &latt, int traj) {
+  Coordinate origin = src_grid_origin(traj);
   const int sx = space_src_per_dim_runtime();
   const int st = time_src_per_dim_runtime();
   std::vector<Coordinate> sites;
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
   }
 
   int T = latt[Nd - 1];
-  auto sources = SourceGrid(latt);
+  auto sources = SourceGrid(latt, traj);
   int nsrc = (int)sources.size();
 
   std::vector<std::vector<RealD>>    all_pion;
@@ -626,7 +626,7 @@ int main(int argc, char **argv) {
   }
 
   std::string outfile = txqcd_data_dir() + "/conn_txqcd_" + std::to_string(traj) + ".h5";
-  {
+  if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
     // All averaged correlators are in SOURCE-RELATIVE TIME (Δt = t - t_s mod T)
     // with APBC sign already applied for baryons.  index 0 = source contact,
@@ -683,6 +683,14 @@ int main(int argc, char **argv) {
     }
     write(wr, "traj", traj);
     write(wr, "plaq", WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
+    {
+      // Per-cfg source-grid origin shift (zero for cfg<1000, deterministic
+      // mt19937 shift for cfg>=1000; see params.h src_grid_origin).
+      Coordinate s = src_grid_origin(traj);
+      std::vector<int> sv(Nd);
+      for (int d = 0; d < Nd; ++d) sv[d] = s[d];
+      write(wr, "src_shift", sv);
+    }
   }
 
   std::cout << GridLogMessage << "Written " << outfile << std::endl;

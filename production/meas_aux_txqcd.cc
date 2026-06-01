@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
   for (int t = 0; t < T; ++t) aux_s[t] = lam4 * C_s[t];
 
   std::string outfile = txqcd_data_dir() + "/aux_txqcd_" + std::to_string(traj) + ".h5";
-  {
+  if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
     write(wr, "aux_pi", C_pi);
     write(wr, "aux_sigma", aux_sigma);

@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
   RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu);
 
   std::string outfile = qcd_data_dir() + "/disco_qcd_" + std::to_string(traj) + ".h5";
-  {
+  if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
     write(wr, "trminv", trminv);
     write(wr, "trminv_strange", trminv_strange);
