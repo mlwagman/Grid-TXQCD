@@ -15,9 +15,9 @@
 # Cadence: every 5th saved cfg (50, 100, 150, ...).
 # Same-λ pairs (fork vs chroma) kept in this job to enable direct comparison.
 
-cd "$SLURM_SUBMIT_DIR"
+source /lustre2/nplqcd/Grid-TXQCD/env_lq2_grid.sh
+cd "$PRODUCTION_DIR"
 mkdir -p slurm-logs logs
-source ../env_lq2_grid.sh
 
 export OMP_NUM_THREADS=4
 export TXQCD_MULTIRHS_CG=1
@@ -36,17 +36,18 @@ LATT="${LATT:-16.16.16.48}"
 SX=2; ST=6
 MEAS_CG_TOL="${MEAS_CG_TOL:-1e-8}"
 
-# Low-λ members of the 12 streams actively being extended in the queue
-# (2026-05-18 audit).  λ=6/6.5 use the RENAMED _fromchroma_md30 dirs (true
-# MDS=30); λ=5/7 fork_t50_mds10 are the thermalized chroma-pedigree streams;
-# the _nf2p1_mds10_fork are the weak-field streams nodeA_v2 extends.
+# Low-λ members of the actively-extended streams (audit 2026-05-25 post-disaster).
+# Most `_fromchroma_md30` and `_fromchroma_md20_fork_t50_mds10` dirs were wiped
+# in the 2026-05-24 cfg loss and replaced by fresh chroma-imported MDS=10
+# streams (clean post-AUX_INIT-fix 2026-05-17).  λ=5/7 weak-field continuation
+# streams (`_nf2p1_mds10_fork`) survived.
 STREAMS=(
-  "txqcd 5    _nf2p1_mds10_fork"                  # nodeA_v2  λ5 weak-field
-  "txqcd 5    _fromchroma_md20_fork_t50_mds10"    # chain     λ5 thermalized (was missing)
-  "txqcd 6    _fromchroma_md30"                   # chain     λ6  (renamed from _md20)
-  "txqcd 6.5  _fromchroma_md30"                   # chain     λ6.5 (renamed from _md20)
-  "txqcd 7    _nf2p1_mds10_fork"                  # nodeA_v2  λ7 weak-field
-  "txqcd 7    _fromchroma_md20_fork_t50_mds10"    # chain     λ7 thermalized
+  "txqcd 5    _nf2p1_mds10_fork"   # nodeA_v2 GPU0  λ=5  weak-field continuation
+  "txqcd 6    _fromchroma_md10"    # 1280723        λ=6  fresh from chroma MDS=10
+  "txqcd 6    _weakfield_md10"     # 1283399 GPU0   λ=6  Nf=2+1 weak-field (strange comparison partner)
+  "txqcd 6    _nostrange_weakfield_md10"  # 1283399 GPU2  λ=6  Nf=2 NO-strange weak-field (gen_txqcd_cfgs_nf2) — pair w/ _weakfield_md10 to isolate strange
+  "txqcd 6.5  _fromchroma_md10"    # nodeA_v2 GPU1  λ=6.5 fresh from chroma MDS=10 (2026-05-25)
+  "txqcd 7    _nf2p1_mds10_fork"   # nodeA_v2 GPU3  λ=7  weak-field continuation
 )
 
 ALL_DIR="meas_2pt/all_2x6_sparse"
@@ -96,8 +97,8 @@ run_one () {
   fi
 }
 
-CFG_FROM="${CFG_FROM:-510}"; CFG_STEP="${CFG_STEP:-10}"; CFG_TO="${CFG_TO:-2000}"
-CFG_NUMBERS=($(seq "$CFG_FROM" "$CFG_STEP" "$CFG_TO"))   # default=production 510..2000; override CFG_FROM/STEP/TO for backlog
+CFG_FROM="${CFG_FROM:-10}"; CFG_STEP="${CFG_STEP:-10}"; CFG_TO="${CFG_TO:-2000}"
+CFG_NUMBERS=($(seq "$CFG_FROM" "$CFG_STEP" "$CFG_TO"))   # default=10..2000 every 10 to catch fresh streams from the start
 
 PASS=0
 while true; do

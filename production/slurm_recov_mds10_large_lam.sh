@@ -16,10 +16,9 @@
 # have 4-5 cfgs each from the earlier MDS=10 batch (more thermalized than
 # the brief _fromchroma_md20 batch with 1-2 cfgs each).
 
-cd "$SLURM_SUBMIT_DIR"
+source /lustre2/nplqcd/Grid-TXQCD/env_lq2_grid.sh
+cd "$PRODUCTION_DIR"
 mkdir -p slurm-logs
-
-source ../env_lq2_grid.sh
 
 export OMP_NUM_THREADS=16
 N_TRAJ=${N_TRAJ:-2500}

@@ -12,22 +12,23 @@
 #SBATCH --output=slurm-logs/b6p5_lam8_2n.%j.out
 
 # Production 2-node 8-GPU HMC chain for b6.5 32³×64 m=-0.1788 TXQCD at λ=8.
-# Uses the validated optimization stack:
-#   MULT=4/2/1 (b6.5 v11 validated): aux Fdt 7× smaller than TXQCD light at this λ
-#   smear-skip patch in TXQCDSmearedConfiguration.h: ~3250× fewer smearings/traj
-#   full QUDA + cuBLAS + PRECOMPUTE_GPU stack (8-GPU per-rank fits comfortably)
+# Chroma-matched parameters (cl3_32_64_b6p5 cfg4200 XML reference):
+#   MDS=16, GAUGE_MULT=5, u0=0.85703554213273, stout ρ=0.125 n=1.
+# Performance stack: full QUDA + cuBLAS + PRECOMPUTE_GPU + --shm-mpi 1.
+# AUX_MULT=1 (4/2/1 outer×inner×aux) keeps redundant smear-chain calls at
+# <0.1% of trajectory cost — no smear-skip optimization needed.
 #
-# Expected wallclock at MDS=10: ~41 min/traj → ~35 trajs/day per 24h job.
-# N_SKIP=10 saves every 10th cfg (production cadence) → 3-4 saved ckpts/day.
+# Expected wallclock at MDS=16: ~65 min/traj → ~22 trajs/day per 24h job.
+# N_SKIP=10 saves every 10th cfg (production cadence) → 2-3 saved ckpts/day.
 #
 # Chain via: sbatch --dependency=afterany:<prev> slurm_b6p5_lam8_2node.sh
 # Resume: gen_txqcd_cfgs_2plus1 picks up latest ckpoint_lat in cfg_dir; first
 # launch uses IMPORT_CFG (chroma cfg_4200), subsequent launches resume from
 # last saved ckpt + aux sidecar + RNG state.
 
-cd "$SLURM_SUBMIT_DIR"
+source /lustre2/nplqcd/Grid-TXQCD/env_lq2_grid.sh
+cd "$PRODUCTION_DIR"
 mkdir -p slurm-logs cfgs
-source ../env_lq2_grid.sh
 
 # ===== b6.5 ensemble parameters =====
 export LATT=32.32.32.64
@@ -44,7 +45,13 @@ export N_TRAJ=2000                                           # production target
 # N_SKIP unset → use params.h default (10)
 export NO_METROP=0                                           # WITH metropolis
 export INTEGRATOR=MinimumNorm2
-export LAMBDA_MN2=0.1789
+# Outer MN2 lambda: leave UNSET so Grid uses its default 0.1931833275037836,
+# which matches chroma cl3_32_64_b6p5 cfg4200's outer fermion-level lambda
+# (Omelyan minimum-error optimum).  Chroma uses a separate 0.1789 at the
+# gauge sub-integrator level, but Grid's MN2 has a single class-level lambda
+# applied at all levels — pick the outer optimum where stability matters most.
+# (b6.1 scripts keep LAMBDA_MN2=0.1789 to match chroma b6.1's single value.)
+unset LAMBDA_MN2
 export MDSTEPS=16
 export TRAJL=0.353553390593274
 export GAUGE_MULT=5
@@ -68,12 +75,12 @@ export OMP_NUM_THREADS=4                                     # 4 GPUs/node × 4 
 export IMPORT_CFG=/lustre2/nplqcd/cfgs/cl3_32_64_b6p5_m0p1788/cl3_32_64_b6p5_m0p1788_cfg_4200.lime
 
 # ===== 2-node 8-GPU split =====
-export SUFFIX="_b6p5_lam8_mds10_2node"                       # production dir (no _first10/_g4i2a1 suffix)
+export SUFFIX="_b6p5_lam8_mds16_2node"                       # chroma-matched MDS=16, GAUGE_MULT=5
 unset CUDA_VISIBLE_DEVICES                                   # Grid handles per-rank binding internally
 
 LAM_TAG=$(printf "lam%.4f" "$LAMBDA")
 CFG_DIR="cfgs/txqcd_${LAM_TAG}${SUFFIX}"
-echo "=== b6.5 32³×64 λ=8 MDS=10 MULT=4/2/1 + smear-skip — 2-node 8-GPU ==="
+echo "=== b6.5 32³×64 λ=8 MDS=16 MULT=5/2/1 chroma-matched — 2-node 8-GPU ==="
 echo "cfg_dir=$CFG_DIR"
 echo "N_TRAJ=$N_TRAJ (resume from latest ckpt if present)"
 date

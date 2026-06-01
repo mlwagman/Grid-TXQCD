@@ -146,10 +146,8 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     }
 
     if (traj % interval_ == 0) {
-      // Hdf5Writer is SERIAL — all MPI ranks racing to open the same file
-      // throws H5::FileIException under file-locking.  Crashed b6.5 1283314
-      // at traj 10 with 4 ranks.  Guard with rank 0 only; clear arrays on
-      // all ranks afterwards so memory doesn't grow without bound.
+      // See gen_txqcd_cfgs_2plus1.cc: Hdf5Writer is SERIAL; all ranks racing
+      // throws H5::FileIException. Guard with rank 0; clear on all ranks.
       if (grid_.IsBoss()) {
         std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
         Hdf5Writer wr(fname);
@@ -672,81 +670,15 @@ int main(int argc, char **argv) {
     report("after ");
   }
 
-  // Strange quark (Nf=1): EO-preconditioned LogDet + Schur RHMC, wrapped for TXQCD HMC.
-  // Uses the mixed-precision rational action (matches gen_qcd_cfgs.cc): MD force
-  // runs ConjugateGradientMultiShiftMixedPrec with reliable updates, refresh and
-  // S keep full-DP multishift CG.  Roughly 2× faster than full-DP on the strange
-  // force eval, which dominates the per-traj cost outside the TXQCD light deriv.
-  typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-  typedef WilsonCloverFermion<WilsonImplF, CloverHelpers<WilsonImplF>> WCF_f;
-  // Antiperiodic time BC to match chroma <boundary>1 1 1 -1</boundary>.
-  WilsonImplParams strange_impl_p;
-  strange_impl_p.boundary_phases.resize(Nd, 1.0);
-  strange_impl_p.boundary_phases[Nd - 1] = -1.0;
-  WilsonImplParams strange_impl_pF;
-  strange_impl_pF.boundary_phases.resize(Nd, 1.0);
-  strange_impl_pF.boundary_phases[Nd - 1] = -1.0;
-
-  // Single-precision sibling grids + gauge field for the MP CG.
-  GridCartesian        StrangeGridF(latt, GridDefaultSimd(Nd, vComplexF::Nsimd()), mpi);
-  GridRedBlackCartesian StrangeRBGridF(&StrangeGridF);
-  LatticeGaugeFieldF StrangeUmuF(&StrangeGridF);
-  {
-    LatticeColourMatrix  U_d(&Grid);
-    LatticeColourMatrixF U_f(&StrangeGridF);
-    for (int mu = 0; mu < Nd; ++mu) {
-      U_d = PeekIndex<LorentzIndex>(U.U, mu);
-      precisionChange(U_f, U_d);
-      PokeIndex<LorentzIndex>(StrangeUmuF, U_f, mu);
-    }
-  }
-  WCF_f StrangeFermOpF(StrangeUmuF, StrangeGridF, StrangeRBGridF, mass_strange,
-                       csw, csw, WilsonAnisotropyCoefficients(), strange_impl_pF);
-
-  WCF StrangeFermOp(U.U, Grid, RBGrid, mass_strange, csw, csw,
-                    WilsonAnisotropyCoefficients(), strange_impl_p);
-  // Chroma-matched bounds for the rat_3strange monomial: lo=1e-4, hi=32,
-  // force degree=13.  See gen_qcd_cfgs.cc note for details.
-  OneFlavourRationalParams strange_rat(1e-4, 100.0, cg_max, cg_tol, 20, 64,
-                                       100, 1e-6, 1e-4);
-  QCDLogDetCloverEOAction<WilsonImplR> StrangeLogDet(StrangeFermOp, 1);
-  QCDActionAdapter StrangeLogDetAdapter(StrangeLogDet);
-  StrangeLogDetAdapter.is_smeared = true;
-  // MP rational: deriv() uses ConjugateGradientMultiShiftMixedPrec.
-  // QUDA_FORCE=1 (Phase D) swaps in the QUDA-force kernel variant — same
-  // multishift outputs, but deriv() calls computeCloverForceQuda (Wilson+σ
-  // fused) with PyQUDA's dagger=YES convention. Validated cos=1.0 vs Path A.
-  std::unique_ptr<OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>
-      StrangeSchurBase_holder;
-  Action<LatticeGaugeField> *StrangeSchurInner = nullptr;
-#ifdef GRID_HAVE_QUDA
-  std::unique_ptr<OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>>
-      StrangeSchurQuda_holder;
-  if (env_enabled("QUDA_FORCE")) {
-    QudaCloverParams qp;
-    qp.mass = mass_strange;
-    qp.csw  = csw;
-    qp.anti_periodic_t = true;
-    qp.tol = cg_tol;
-    qp.max_iter = cg_max;
-    qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
-    StrangeSchurQuda_holder = std::make_unique<
-        OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>>(
-        StrangeFermOp, StrangeFermOpF, &StrangeRBGridF, strange_rat, qp, 50);
-    StrangeSchurInner = StrangeSchurQuda_holder.get();
-    std::cout << GridLogMessage
-              << "[TXQCD strange Nf=1] QUDA_FORCE active — full QUDA force kernel"
-              << std::endl;
-  } else
-#endif
-  {
-    StrangeSchurBase_holder = std::make_unique<
-        OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>(
-        StrangeFermOp, StrangeFermOpF, &StrangeRBGridF, strange_rat, 50);
-    StrangeSchurInner = StrangeSchurBase_holder.get();
-  }
-  QCDActionAdapter StrangeSchurAdapter(*StrangeSchurInner);
-  StrangeSchurAdapter.is_smeared = true;
+  // NO STRANGE QUARK.  This is the Nf=2 light-only diagnostic driver: it drops
+  // the strange Nf=1 (QCDLogDet + Schur RHMC) monomials that gen_txqcd_cfgs_2plus1
+  // carries, keeping everything else (light TXQCD rational PF, light LogDet,
+  // gauge, aux) bit-identical.  Comparing this stream against the matching
+  // Nf=2+1 λ=6 WEAK-FIELD stream isolates the strange quark's role.  Must be
+  // started from a weak-field cold start (NOT a chroma import): chroma configs
+  // were generated WITH the strange quark, so its dynamics are already baked
+  // into the imported gauge field — a clean no-strange diagnostic needs the
+  // entire HMC history to be strange-free.
 
   // Nested levels:
   //   L1 (outer, MDsteps):  fermion actions (expensive CG, large coarse dt).
@@ -776,8 +708,6 @@ int main(int argc, char **argv) {
     L1.push_back(PF);
   }
   L1.push_back(&LogDet);
-  L1.push_back(&StrangeLogDetAdapter);
-  L1.push_back(&StrangeSchurAdapter);
   ActionLevel<TXQCDField, Reps> L2(gauge_mult);
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
@@ -845,8 +775,6 @@ int main(int argc, char **argv) {
   }
   diag_actions.push_back({"LogDet", &LogDet});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
-  diag_actions.push_back({"StrangeLogDet", &StrangeLogDetAdapter});
-  diag_actions.push_back({"StrangeSchurPF", &StrangeSchurAdapter});
   diag_actions.push_back({"Gauge", &GaugeAction});
   TxqcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, diag_actions,
                  Smear, Grid, RBGrid, pRNG);

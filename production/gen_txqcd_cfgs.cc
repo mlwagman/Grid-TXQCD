@@ -4,6 +4,7 @@
 #include <cstring>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOActionQudaPrimitive.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverHasenbuschAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDSmearedConfiguration.h>
@@ -17,6 +18,20 @@
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
 
 using namespace TXQCDProduction;
+
+// Boolean env-var helper: treat unset, "", "0", "false", "no" as false; any
+// other value as true.  Mirrors gen_txqcd_cfgs_2plus1.cc so `export FOO=0`
+// reliably disables (vs the older getenv()!=nullptr pattern which would treat
+// "0" as enabled).
+static inline bool env_enabled(const char *name) {
+  const char *v = std::getenv(name);
+  if (!v || !*v) return false;
+  if (v[0] == '0' && v[1] == '\0') return false;
+  if (std::strcmp(v, "false") == 0 || std::strcmp(v, "False") == 0 ||
+      std::strcmp(v, "FALSE") == 0 || std::strcmp(v, "no") == 0 ||
+      std::strcmp(v, "No") == 0    || std::strcmp(v, "NO") == 0) return false;
+  return true;
+}
 
 // This driver is now compiled at TXQCD_Nf=3 with diag mass {m_l, m_l, m_s}.
 // The previous Nf=2 (light) + Nf=1 (strange QCD-wrap) structure had two
@@ -133,31 +148,35 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     }
 
     if (traj % interval_ == 0) {
-      std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
-      Hdf5Writer wr(fname);
-      write(wr, "traj", traj_);
-      write(wr, "plaq", plaq_);
-      write(wr, "vev_sigma", vev_sigma_);
-      write(wr, "vev_s", vev_s_);
-      write(wr, "vev_trminv", vev_trminv_);
-      write(wr, "force_avg", force_avg_);
-      write(wr, "force_max", force_max_);
-      write(wr, "fdt_avg", fdt_avg_);
-      write(wr, "fdt_max", fdt_max_);
-      write(wr, "eig_M2", eig_M2_);
-      write(wr, "eig_g5M", eig_g5M_);
-      write(wr, "eig_min_abs_g5M", eig_minabs_);
-      write(wr, "eig_n_near_zero", eig_nnear_);
-      std::vector<std::string> names;
-      for (auto &a : actions_) names.push_back(a.name);
-      write(wr, "action_names", names);
+      // See gen_txqcd_cfgs_2plus1.cc: Hdf5Writer is SERIAL; all ranks racing
+      // throws H5::FileIException. Guard with rank 0; clear on all ranks.
+      if (grid_.IsBoss()) {
+        std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
+        Hdf5Writer wr(fname);
+        write(wr, "traj", traj_);
+        write(wr, "plaq", plaq_);
+        write(wr, "vev_sigma", vev_sigma_);
+        write(wr, "vev_s", vev_s_);
+        write(wr, "vev_trminv", vev_trminv_);
+        write(wr, "force_avg", force_avg_);
+        write(wr, "force_max", force_max_);
+        write(wr, "fdt_avg", fdt_avg_);
+        write(wr, "fdt_max", fdt_max_);
+        write(wr, "eig_M2", eig_M2_);
+        write(wr, "eig_g5M", eig_g5M_);
+        write(wr, "eig_min_abs_g5M", eig_minabs_);
+        write(wr, "eig_n_near_zero", eig_nnear_);
+        std::vector<std::string> names;
+        for (auto &a : actions_) names.push_back(a.name);
+        write(wr, "action_names", names);
+        std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
+      }
       traj_.clear(); plaq_.clear();
       vev_sigma_.clear(); vev_s_.clear(); vev_trminv_.clear();
       force_avg_.clear(); force_max_.clear();
       fdt_avg_.clear(); fdt_max_.clear();
       eig_M2_.clear(); eig_g5M_.clear();
       eig_minabs_.clear(); eig_nnear_.clear();
-      std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
     }
   }
 };
@@ -248,8 +267,40 @@ int main(int argc, char **argv) {
 
   // ONE rational pseudofermion per flavor (3 total) with the diag mass array.
   // Each carries its own pseudofermion field; refresh independently.
-  TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass_arr, rat_params, csw);
-  PF.is_smeared = true;
+  // TXQCD_QUDA_HYBRID=1 swaps in the QUDA σ-piece hybrid action (Phase H).
+  // Masses must be degenerate for the hybrid path (single κ inside QUDA) —
+  // safe here because params.h defaults mass_strange = mass_light, and all
+  // production b6.1/b6.5 setups override both to the same value.
+  bool tx_quda_hybrid = env_enabled("TXQCD_QUDA_HYBRID");
+  if (tx_quda_hybrid) {
+    bool degenerate = true;
+    for (int a = 1; a < TxqcdNf; ++a)
+      if (std::abs(mass_arr[a] - mass_arr[0]) > 1e-12) degenerate = false;
+    if (!degenerate) {
+      std::cerr << "ERROR: TXQCD_QUDA_HYBRID requires degenerate masses; got {";
+      for (int a = 0; a < TxqcdNf; ++a)
+        std::cerr << mass_arr[a] << (a + 1 < TxqcdNf ? ", " : "");
+      std::cerr << "}\n";
+      std::exit(1);
+    }
+  }
+  std::unique_ptr<TXQCDWilsonCloverRationalEOAction>            PF_grid_holder;
+  std::unique_ptr<TXQCDWilsonCloverRationalEOActionQudaPrimitive> PF_quda_holder;
+  Action<TXQCDField> *PF = nullptr;
+  if (tx_quda_hybrid) {
+    PF_quda_holder = std::make_unique<TXQCDWilsonCloverRationalEOActionQudaPrimitive>(
+        Grid, RBGrid, mass_arr, rat_params, csw);
+    PF_quda_holder->is_smeared = true;
+    PF = PF_quda_holder.get();
+    std::cout << GridLogMessage
+              << "[TXQCD Nf=" << TxqcdNf << "] using QUDA σ-piece hybrid action"
+              << std::endl;
+  } else {
+    PF_grid_holder = std::make_unique<TXQCDWilsonCloverRationalEOAction>(
+        Grid, RBGrid, mass_arr, rat_params, csw);
+    PF_grid_holder->is_smeared = true;
+    PF = PF_grid_holder.get();
+  }
 
   TXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass_arr, csw);
   LogDet.is_smeared = true;
@@ -505,7 +556,7 @@ int main(int argc, char **argv) {
             << "  AUX_MULT=" << aux_mult << std::endl;
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  L1.push_back(&PF);
+  L1.push_back(PF);
   L1.push_back(&LogDet);
   ActionLevel<TXQCDField, Reps> L2(gauge_mult);
   L2.push_back(&GaugeAction);
@@ -560,7 +611,7 @@ int main(int argc, char **argv) {
   TXQCDCheckpointer ckpt(CPp);
 
   std::vector<TxqcdDiag::ActionRef> diag_actions;
-  diag_actions.push_back({"PseudoFermion", &PF});
+  diag_actions.push_back({"PseudoFermion", PF});
   diag_actions.push_back({"LogDet", &LogDet});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
   diag_actions.push_back({"Gauge", &GaugeAction});

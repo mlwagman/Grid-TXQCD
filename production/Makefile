@@ -28,7 +28,7 @@ ifneq ($(QUDA_PREFIX),)
   endif
 endif
 
-PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
+PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
            meas_conn_txqcd meas_conn_qcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
            meas_aux_txqcd compare compute_plaq compute_vev \
@@ -50,6 +50,11 @@ gen_txqcd_cfgs: gen_txqcd_cfgs.cc params.h eig_diag.h
 # action structure (pre-b04af352), kept for direct comparison against the
 # Nf=3 form on the same chroma-imported config.
 gen_txqcd_cfgs_2plus1: gen_txqcd_cfgs_2plus1.cc params.h eig_diag.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
+
+# gen_txqcd_cfgs_nf2: Nf=2 light-only diagnostic — gen_txqcd_cfgs_2plus1 with the
+# strange Nf=1 monomials removed.  Isolates the strange quark's role.  Nf=2.
+gen_txqcd_cfgs_nf2: gen_txqcd_cfgs_nf2.cc params.h eig_diag.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
 
 # meas_conn_weakfield uses TXQCDFermionNf — also Nf=3.

@@ -13,20 +13,19 @@
 
 # Node A successor: 4 streams of mixed type.
 #  GPU 0: λ=5  MDS=10 fork continue        (cfgs/txqcd_lam5.0000_nf2p1_mds10_fork/)
-#  GPU 1: λ=6.5 MDS=30 reference continue  (cfgs/txqcd_lam6.5000_fromchroma_md30/)
+#  GPU 1: λ=6.5 MDS=10 fresh from chroma   (cfgs/txqcd_lam6.5000_fromchroma_md10/) — matches lam=6 fromchroma_md10 progeny
 #  GPU 2: λ=10 MDS=10 fork continue        (cfgs/txqcd_lam10.0000_nf2p1_mds10_fork/)
 #  GPU 3: λ=7  MDS=10 fork continue        (cfgs/txqcd_lam7.0000_nf2p1_mds10_fork/)
 #
-# 2026-05-22 swap: GPU 1 changed from Nf=3 QCD (qcd_s702_nf3_fromchroma_mds10,
-# completed at ckpt 880, plaq 0.51329 = chroma ✓) to λ=6.5 MDS=30 reference.
-# This reference stream remains in service while the new MDS=10 forks
-# (slurm_lam6_6p5_md30_lam7_5_md10.sh GPU 0/1) take the primary production
-# slots — having a parallel MDS=30 stream lets us cross-check the
-# integrator-bias assumption at fixed λ.
+# 2026-05-24 post-disaster: GPU 1 changed from λ=6.5 MDS=30 reference
+# (_fromchroma_md30) to λ=6.5 MDS=10 fork (_fromchroma_mds10_fork) at .220.
+# MDS=10 sustained |dH|≈2 over 10 trajs (~25% accept) — bumped to MDS=20
+# and re-pointed at the existing _fromchroma_mds20_fork dir; the 1 cfg
+# generated under MDS=10 is dropped.  Fresh resume from ckpt .220.
 
-cd "$SLURM_SUBMIT_DIR"
+source /lustre2/nplqcd/Grid-TXQCD/env_lq2_grid.sh
+cd "$PRODUCTION_DIR"
 mkdir -p slurm-logs
-source ../env_lq2_grid.sh
 export OMP_NUM_THREADS=16
 
 N_TRAJ=${N_TRAJ:-2000}
@@ -69,23 +68,27 @@ CUDA_VISIBLE_DEVICES=0 \
 sleep 2
 
 # -----------------------------------------------------------------
-# GPU 1: λ=6.5 MDS=30 reference continuation.  Was QCD Nf=3 chroma-start
-# (qcd_s702_nf3_fromchroma_mds10, completed at ckpt 880 with plaq 0.51329
-# matching chroma 0.51365 within ~1σ — Nf=3 plaq-offset saga closed).
-# Now repurposed to keep one MDS=30 stream alive at λ=6.5 as integrator
-# cross-check while the new MDS=10 forks (slurm_lam6_6p5_md30_lam7_5_md10.sh
-# GPU 0/1) take the primary production slots.  Same dir as before
-# (cfgs/txqcd_lam6.5000_fromchroma_md30/, latest ckpt 180); resumes via
-# checkpoint + aux sidecar + RNG.
-logfile="slurm-logs/nodeA_v2_lam6p5_md30ref.${SLURM_JOB_ID}.out"
-echo "[gpu 1] λ=6.5 MDS=30 reference log=$logfile"
+# GPU 1: λ=6.5 FRESH MDS=10 from chroma cfg_11100 (2026-05-25 swap).
+# Replaces the prior `_fromchroma_mds20_fork` continuation. Rationale:
+#  - The MDS=20 fork's dH sd was still falling (0.50 → 0.28 over 38 trajs)
+#    and would need ~50-100 more trajs to reach its integrator floor before
+#    we could safely fork to MDS=10.  See [[project_mds10_viable_at_lam6]].
+#  - lam=6 MDS=10 fresh-from-chroma started cleanly post-AUX_INIT-fix
+#    (66 trajs, dH sd settling 0.33 → 0.25, accept 91%).  Same approach
+#    should work for λ=6.5: skip the slow MDS=20 transient and start
+#    fresh with the now-correct AUX_INIT auto-measure.
+#  - Distinct cfg dir `_fromchroma_md10` so old MDS=20 fork (220+38=258
+#    cfgs at last save) stays preserved for cross-check.
+logfile="slurm-logs/nodeA_v2_lam6p5_fromchroma_md10.${SLURM_JOB_ID}.out"
+echo "[gpu 1] λ=6.5 MDS=10 fresh-from-chroma log=$logfile"
 CUDA_VISIBLE_DEVICES=1 \
     LAMBDA=6.5 \
-    SUFFIX="_fromchroma_md30" \
+    SUFFIX="_fromchroma_md10" \
     N_TRAJ="$N_TRAJ" \
+    IMPORT_CFG="$CHROMA_CFG" \
     INTEGRATOR=MinimumNorm2 \
     LAMBDA_MN2=0.1789 \
-    MDSTEPS=30 \
+    MDSTEPS=10 \
     TRAJL=0.353553390593274 \
     GAUGE_MULT=4 \
     GAUGE_INNER_MULT=2 \
