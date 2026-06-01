@@ -21,9 +21,13 @@
 #include <Grid/qcd/action/txqcd/TXQCDDeltaOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDDeltaCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDSiteMatrix.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetGpuKernel.h>  // for Phase J.3 GPU BuildSiteMatrix
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
 #include <Grid/util/Lexicographic.h>
 #include <Grid/algorithms/blas/BatchedBlas.h>
+#ifdef GRID_CUDA
+#include <cublas_v2.h>
+#endif
 
 NAMESPACE_BEGIN(Grid);
 
@@ -529,38 +533,58 @@ class TXQCDWilsonCloverFermionEO {
   // of inverses (24×24 ComplexD per site, lex-ordered) and the (oSite, lane)
   // → lex-index table.  Both grow monotonically; the lex table is grid-only
   // and is computed once per parity.
-  deviceVector<ComplexD> M_dev_e_, M_dev_o_;
-  deviceVector<int> lex_table_dev_e_, lex_table_dev_o_;
-  bool lex_table_built_e_{false}, lex_table_built_o_{false};
+  // INLINE STATIC 2026-05-27: shared across EO instances to dodge per-ctor
+  // cudaMalloc churn (~3.6 GB at 16³) that thrashed QUDA's managed memory
+  // working set, slowing unrelated GPU work (QCD strange RHMC) by ~15%.
+  inline static deviceVector<ComplexD> M_dev_e_, M_dev_o_;
+  inline static deviceVector<int> lex_table_dev_e_, lex_table_dev_o_;
+  inline static bool lex_table_built_e_{false}, lex_table_built_o_{false};
   // cuBLAS gemmBatched scratch (TXQCD_MOOEEINV_CUBLAS=1 path): per-parity flat
   // fermion in/out buffers (lex-ordered, lSites × 24 ComplexD) and pointer
   // arrays for batched 24×24 × 24×1 gemm.  Amk pointers are static once
   // M_dev is populated; Bkn/Cmn point into the reusable flat buffers.
-  deviceVector<ComplexD> fermion_in_flat_e_, fermion_in_flat_o_;
-  deviceVector<ComplexD> fermion_out_flat_e_, fermion_out_flat_o_;
-  deviceVector<ComplexD *> Amk_e_, Amk_o_;
-  deviceVector<ComplexD *> Bkn_e_, Bkn_o_;
-  deviceVector<ComplexD *> Cmn_e_, Cmn_o_;
-  bool cublas_ptrs_built_e_{false}, cublas_ptrs_built_o_{false};
+  // INLINE STATIC: same rationale as M_dev_e_/o_ above — paired with the
+  // static cublas_*_built_ flags; per-instance would race the flag state.
+  inline static deviceVector<ComplexD> fermion_in_flat_e_, fermion_in_flat_o_;
+  inline static deviceVector<ComplexD> fermion_out_flat_e_, fermion_out_flat_o_;
+  inline static deviceVector<ComplexD *> Amk_e_, Amk_o_;
+  inline static deviceVector<ComplexD *> Bkn_e_, Bkn_o_;
+  inline static deviceVector<ComplexD *> Cmn_e_, Cmn_o_;
+  inline static bool cublas_ptrs_built_e_{false}, cublas_ptrs_built_o_{false};
   // Forward Mooee cuBLAS (TXQCD_MOOEE_CUBLAS=1) scratch: pre-inversion
   // matrix M (=Mee or Moo) on CPU and GPU, plus a separate Amk pointer
   // array indexing the forward matrix buffer.  The fermion in/out flat
   // buffers and Bkn/Cmn pointer arrays are reused with the inverse path.
   std::vector<SMU::SiteMatrix> fwd_even_, fwd_odd_;
-  deviceVector<ComplexD> Mfwd_dev_e_, Mfwd_dev_o_;
-  deviceVector<ComplexD *> Amk_fwd_e_, Amk_fwd_o_;
-  bool cublas_fwd_built_e_{false}, cublas_fwd_built_o_{false};
+  // INLINE STATIC 2026-05-27: same rationale as M_dev_e_/o_ above.
+  inline static deviceVector<ComplexD> Mfwd_dev_e_, Mfwd_dev_o_;
+  inline static deviceVector<ComplexD *> Amk_fwd_e_, Amk_fwd_o_;
+  inline static bool cublas_fwd_built_e_{false}, cublas_fwd_built_o_{false};
+  // Phase J.4: GPU PrecomputeInverses scratch (TXQCD_PRECOMPUTE_BUILD_GPU=1).
+  // INLINE STATIC: shared across all TXQCDWilsonCloverFermionEO instances to
+  // avoid cudaMalloc/cudaFree churn at every EO ctor (7.2 GB at 16³, more at
+  // 32³).  Diagnosed 2026-05-27: per-instance allocation thrashed QUDA's
+  // managed-memory working set, slowing QCD strange RHMC by 15-19% per call.
+  // Safe because EO instances don't overlap (sequential ImportFields → destruct).
+  inline static deviceVector<ComplexD>   Mscratch_dev_e_, Mscratch_dev_o_;
+  inline static deviceVector<ComplexD *> Amk_inv_e_, Amk_inv_o_;
+  inline static deviceVector<ComplexD *> Cmk_inv_e_, Cmk_inv_o_;
+  inline static deviceVector<int>        inv_pivots_e_, inv_pivots_o_;
+  inline static deviceVector<int>        inv_info_e_, inv_info_o_;
+  inline static bool cublas_inv_built_e_{false}, cublas_inv_built_o_{false};
+  inline static uint64_t cublas_inv_nsites_e_{0}, cublas_inv_nsites_o_{0};
   // Phase M.4.b: multi-RHS pointer arrays, sized lSites; each Bkn_N[i]
   // points to the start of a (24×NRHS) block at site i in the flat buffers.
   // Rebuilt when NRHS changes.  Separate flat in/out buffers from the
   // single-RHS path so resizes don't invalidate the single-RHS pointer
   // arrays (Bkn_e_/Cmn_e_ etc).
-  deviceVector<ComplexD>   fermion_in_flat_N_e_,  fermion_in_flat_N_o_;
-  deviceVector<ComplexD>   fermion_out_flat_N_e_, fermion_out_flat_N_o_;
-  deviceVector<ComplexD *> Bkn_N_e_, Bkn_N_o_;
-  deviceVector<ComplexD *> Cmn_N_e_, Cmn_N_o_;
-  bool cublas_N_built_e_{false}, cublas_N_built_o_{false};
-  int  cublas_N_built_NRHS_e_{0}, cublas_N_built_NRHS_o_{0};
+  // INLINE STATIC: same rationale.
+  inline static deviceVector<ComplexD>   fermion_in_flat_N_e_,  fermion_in_flat_N_o_;
+  inline static deviceVector<ComplexD>   fermion_out_flat_N_e_, fermion_out_flat_N_o_;
+  inline static deviceVector<ComplexD *> Bkn_N_e_, Bkn_N_o_;
+  inline static deviceVector<ComplexD *> Cmn_N_e_, Cmn_N_o_;
+  inline static bool cublas_N_built_e_{false}, cublas_N_built_o_{false};
+  inline static int  cublas_N_built_NRHS_e_{0}, cublas_N_built_NRHS_o_{0};
 
   SMU::SpinMatrices sm_;
 
@@ -607,48 +631,78 @@ class TXQCDWilsonCloverFermionEO {
         }
     }
 
-    auto t_unv0 = usecond();
-    auto aux_e = SMU::UnvectorizeAux(sigma_e_, pi_e_, s_e_, p_e_, t_e_);
-    auto aux_o = SMU::UnvectorizeAux(sigma_o_, pi_o_, s_o_, p_o_, t_o_);
-    t_pre_unvec_us_ += usecond() - t_unv0;
-
     auto t0 = usecond();
     static int use_mooee_cublas = []() {
       const char *e = std::getenv("TXQCD_MOOEE_CUBLAS");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
+    static int use_build_gpu = []() {
+#if defined(GRID_CUDA)
+      const char *e = std::getenv("TXQCD_PRECOMPUTE_BUILD_GPU");
+      // Default ON — kernel is 16× faster per PrecomputeInverses call
+      // (175 ms vs 2.8 s at 16³).  Earlier 6.6% per-traj regression was
+      // root-caused 2026-05-27 to the BatchedBlas alpha/beta cudaMemcpy
+      // storm (5M+ tiny HtoD copies serialized cuBLAS) and resolved by
+      // caching alpha/beta in Grid/algorithms/blas/BatchedBlas.h.  After
+      // patch: PhB (J.4 ON) trajectory 312.6 → 267.1 s (−14.6%).
+      // Opt-out: TXQCD_PRECOMPUTE_BUILD_GPU=0.
+      return (e && *e) ? std::atoi(e) : 1;
+#else
+      return 0;
+#endif
+    }();
     std::vector<SMU::SiteMatrix> *fwd_e_ptr = use_mooee_cublas ? &fwd_even_ : nullptr;
     std::vector<SMU::SiteMatrix> *fwd_o_ptr = use_mooee_cublas ? &fwd_odd_  : nullptr;
-    if (csw_ != 0.0) {
-      auto t_cl0 = usecond();
-      auto cl_e = SMU::UnvectorizeClover(FS_e_);
-      auto cl_o = SMU::UnvectorizeClover(FS_o_);
-      t_pre_unvec_us_ += usecond() - t_cl0;
+#if defined(GRID_CUDA)
+    if (use_build_gpu) {
+      // Phase J.4: skip UnvectorizeAux/Clover + CPU PrecomputeInverses entirely.
+      // The GPU build+invert pipeline reads aux + Fmn Lattice fields directly
+      // and writes the inverse into M_dev_e_/M_dev_o_ on device.
       auto t_inv0 = usecond();
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_, fwd_e_ptr);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_,  fwd_o_ptr);
+      PrecomputeInversesBuildGPU(Even);
+      PrecomputeInversesBuildGPU(Odd);
       t_pre_inv_us_ += usecond() - t_inv0;
-    } else {
-      auto t_inv0 = usecond();
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_, fwd_e_ptr);
-      SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_,  fwd_o_ptr);
-      t_pre_inv_us_ += usecond() - t_inv0;
+    } else
+#endif
+    {
+      auto t_unv0 = usecond();
+      auto aux_e = SMU::UnvectorizeAux(sigma_e_, pi_e_, s_e_, p_e_, t_e_);
+      auto aux_o = SMU::UnvectorizeAux(sigma_o_, pi_o_, s_o_, p_o_, t_o_);
+      t_pre_unvec_us_ += usecond() - t_unv0;
+      if (csw_ != 0.0) {
+        auto t_cl0 = usecond();
+        auto cl_e = SMU::UnvectorizeClover(FS_e_);
+        auto cl_o = SMU::UnvectorizeClover(FS_o_);
+        t_pre_unvec_us_ += usecond() - t_cl0;
+        auto t_inv0 = usecond();
+        SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, csw_, &cl_e, inv_even_, fwd_e_ptr);
+        SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, csw_, &cl_o, inv_odd_,  fwd_o_ptr);
+        t_pre_inv_us_ += usecond() - t_inv0;
+      } else {
+        auto t_inv0 = usecond();
+        SMU::PrecomputeInverses(sm_, diag_mass_, aux_e, 0.0, nullptr, inv_even_, fwd_e_ptr);
+        SMU::PrecomputeInverses(sm_, diag_mass_, aux_o, 0.0, nullptr, inv_odd_,  fwd_o_ptr);
+        t_pre_inv_us_ += usecond() - t_inv0;
+      }
     }
     auto t_pack0 = usecond();
     static int use_gpu_pack = []() {
       const char *e = std::getenv("TXQCD_PRECOMPUTE_GPU");
       return (e && *e && std::atoi(e)) ? 1 : 0;
     }();
-    if (use_gpu_pack) {
-      PackInverseToSimdGPU(inv_even_, inv_simd_e_, Even);
-      PackInverseToSimdGPU(inv_odd_,  inv_simd_o_, Odd);
+    if (use_gpu_pack || use_build_gpu) {
+      // BUILD_GPU populated M_dev_e_/o_ directly; pass empty scalar_inv so
+      // PackInverseToSimdGPU skips its host→device copy.
+      static const std::vector<SMU::SiteMatrix> empty_inv;
+      PackInverseToSimdGPU(use_build_gpu ? empty_inv : inv_even_, inv_simd_e_, Even);
+      PackInverseToSimdGPU(use_build_gpu ? empty_inv : inv_odd_,  inv_simd_o_, Odd);
     } else {
       PackInverseToSimd(inv_even_, inv_simd_e_, Even);
       PackInverseToSimd(inv_odd_,  inv_simd_o_, Odd);
     }
-    if (use_mooee_cublas) {
+    if (use_mooee_cublas && !use_build_gpu) {
       // Memcpy forward matrices CPU → GPU (Eigen std::vector is contiguous
-      // column-major).
+      // column-major).  BUILD_GPU already populated Mfwd_dev_e_/o_ device-side.
       uint64_t nsites_e = fwd_even_.size();
       uint64_t nsites_o = fwd_odd_.size();
       if (Mfwd_dev_e_.size() < nsites_e * 576) Mfwd_dev_e_.resize(nsites_e * 576);
@@ -697,6 +751,161 @@ class TXQCDWilsonCloverFermionEO {
   //   (d) accelerator_for over (oSite, lane): each thread reads its lane's
   //       scalar entries from the flat buffer and writes them per-lane into
   //       the InvField via coalescedWrite on each (r, c) entry.
+  // Phase J.4: end-to-end GPU PrecomputeInverses for one parity.
+  //
+  //   1. Phase J.3 BuildSiteMatrixFromLattice kernel reads aux + Fmn RB-Even
+  //      Lattice views (already populated by pickCheckerboard above) and
+  //      writes the forward 24×24 M directly to Mfwd_dev[cb] (the same buffer
+  //      consumed by TXQCD_MOOEE_CUBLAS=1's forward gemm — so MOOEE_CUBLAS
+  //      continues to work).
+  //   2. Memcpy Mfwd_dev → Mscratch_dev (cuBLAS getrf is in-place, would
+  //      otherwise destroy the forward M).
+  //   3. cuBLAS getrfBatched on Mscratch_dev → LU.
+  //   4. cuBLAS getriBatched: Mscratch_dev (LU) → M_dev[cb] (inverse).
+  //
+  // After this returns, M_dev[cb] contains the inverse and is consumed by
+  // PackInverseToSimdGPU's scatter step (which can short-circuit the
+  // host→device copy when its scalar_inv arg is empty — see overload below).
+  //
+  // Eliminates the CPU PrecomputeInverses thread_for (~1.45 s × 2 parities
+  // per ImportFields at 16³×48) and the matching UnvectorizeAux/Clover
+  // host-side passes.
+#if defined(GRID_CUDA)
+  void PrecomputeInversesBuildGPU(int cb) {
+    constexpr int N  = SMU::kDim;     // 24
+    constexpr int N2 = N * N;         // 576
+
+    // Select per-parity scratch.
+    auto &Mfwd_dev    = (cb == Even) ? Mfwd_dev_e_    : Mfwd_dev_o_;
+    auto &Mscratch    = (cb == Even) ? Mscratch_dev_e_ : Mscratch_dev_o_;
+    auto &M_dev       = (cb == Even) ? M_dev_e_       : M_dev_o_;
+    auto &Amk_inv     = (cb == Even) ? Amk_inv_e_     : Amk_inv_o_;
+    auto &Cmk_inv     = (cb == Even) ? Cmk_inv_e_     : Cmk_inv_o_;
+    auto &inv_pivots  = (cb == Even) ? inv_pivots_e_  : inv_pivots_o_;
+    auto &inv_info    = (cb == Even) ? inv_info_e_    : inv_info_o_;
+    bool &built       = (cb == Even) ? cublas_inv_built_e_ : cublas_inv_built_o_;
+    uint64_t &built_n = (cb == Even) ? cublas_inv_nsites_e_ : cublas_inv_nsites_o_;
+
+    auto &lex_dev   = (cb == Even) ? lex_table_dev_e_ : lex_table_dev_o_;
+    auto &lex_built = (cb == Even) ? lex_table_built_e_ : lex_table_built_o_;
+
+    // RB-Even/-Odd Lattice handles (already filled by ImportFields above).
+    auto &sigma = (cb == Even) ? sigma_e_ : sigma_o_;
+    auto &pi    = (cb == Even) ? pi_e_    : pi_o_;
+    auto &s     = (cb == Even) ? s_e_     : s_o_;
+    auto &p     = (cb == Even) ? p_e_     : p_o_;
+    auto &t     = (cb == Even) ? t_e_     : t_o_;
+    auto &FS    = (cb == Even) ? FS_e_    : FS_o_;
+
+    uint64_t nsites = sigma.Grid()->lSites();
+
+    // Allocate/grow device buffers.
+    if (Mfwd_dev.size() < nsites * N2) Mfwd_dev.resize(nsites * N2);
+    if (Mscratch.size() < nsites * N2) Mscratch.resize(nsites * N2);
+    if (M_dev.size()    < nsites * N2) M_dev.resize(nsites * N2);
+
+    // lex_table for this parity (cached).
+    if (!lex_built) {
+      using vobj = typename InvField::vector_object;
+      constexpr int Nsimd = vobj::Nsimd();
+      GridBase *rb = sigma.Grid();
+      uint64_t oSites = rb->oSites();
+      std::vector<int> lex_host(oSites * Nsimd);
+      std::vector<Coordinate> icoor(Nsimd);
+      const int ndim = rb->Nd();
+      for (int lane = 0; lane < Nsimd; ++lane) {
+        icoor[lane].resize(ndim);
+        rb->iCoorFromIindex(icoor[lane], lane);
+      }
+      thread_for(oidx, oSites, {
+        Coordinate ocoor(ndim), lcoor(ndim);
+        rb->oCoorFromOindex(ocoor, oidx);
+        for (int lane = 0; lane < Nsimd; ++lane) {
+          for (int mu = 0; mu < ndim; ++mu)
+            lcoor[mu] = ocoor[mu] + rb->_rdimensions[mu] * icoor[lane][mu];
+          int lex;
+          Lexicographic::IndexFromCoor(lcoor, lex, rb->_ldimensions);
+          lex_host[oidx * Nsimd + lane] = lex;
+        }
+      });
+      lex_dev.resize(oSites * Nsimd);
+      acceleratorCopyToDevice(&lex_host[0], &lex_dev[0],
+                              oSites * Nsimd * sizeof(int));
+      lex_built = true;
+    }
+
+    // Wrap FS_e_/FS_o_ (std::vector<LatticeColourMatrix>) into an std::array.
+    std::array<LatticeColourMatrix, 6> fmn_arr{
+        FS[0], FS[1], FS[2], FS[3], FS[4], FS[5]};
+
+    // Step 1: GPU BuildSiteMatrix → Mfwd_dev.
+    TxqcdLogDet::BuildSiteMatrixFromLattice(
+        &Mfwd_dev[0], &lex_dev[0], diag_mass_, csw_,
+        sigma, pi, s, p, t,
+        (csw_ != 0.0) ? &fmn_arr : nullptr);
+
+    // Step 2: copy Mfwd_dev → Mscratch (cuBLAS getrf is in-place; we keep
+    // Mfwd_dev intact so MOOEE_CUBLAS's forward gemm still has it).
+    cudaMemcpy(&Mscratch[0], &Mfwd_dev[0],
+               nsites * N2 * sizeof(ComplexD),
+               cudaMemcpyDeviceToDevice);
+
+    // Step 3+4: cuBLAS getrf then getri.
+    // ALWAYS rebuild pointer arrays — Mscratch is class-static (pointer stable
+    // across EO instances) but M_dev is per-instance (reallocates at every EO
+    // ctor), so Cmk_inv would otherwise hold dangling pointers.  Rebuild cost
+    // is ~few hundred μs for an accelerator_for over nsites — negligible.
+    if (Amk_inv.size() < nsites)    Amk_inv.resize(nsites);
+    if (Cmk_inv.size() < nsites)    Cmk_inv.resize(nsites);
+    if (inv_pivots.size() < nsites * N) inv_pivots.resize(nsites * N);
+    if (inv_info.size() < nsites)   inv_info.resize(nsites);
+    {
+      ComplexD *Mscr = &Mscratch[0];
+      ComplexD *Minv = &M_dev[0];
+      ComplexD **Amk = &Amk_inv[0];
+      ComplexD **Cmk = &Cmk_inv[0];
+      accelerator_for(i, nsites, 1, {
+        Amk[i] = &Mscr[i * N2];
+        Cmk[i] = &Minv[i * N2];
+      });
+    }
+    built   = true;
+    built_n = nsites;
+    (void)built; (void)built_n;
+
+    GridBLAS::Init();
+    cublasHandle_t handle = GridBLAS::gridblasHandle;
+    cublasStatus_t st1 = cublasZgetrfBatched(handle, N,
+        reinterpret_cast<cuDoubleComplex **>(&Amk_inv[0]),
+        N, &inv_pivots[0], &inv_info[0], nsites);
+    cublasStatus_t st2 = cublasZgetriBatched(handle, N,
+        reinterpret_cast<cuDoubleComplex **>(&Amk_inv[0]),
+        N, &inv_pivots[0],
+        reinterpret_cast<cuDoubleComplex **>(&Cmk_inv[0]),
+        N, &inv_info[0], nsites);
+    if (st1 != 0 || st2 != 0) {
+      std::cout << GridLogError
+                << "[TXQCD-EO::PrecomputeInversesBuildGPU] cuBLAS error: getrf="
+                << st1 << " getri=" << st2 << std::endl;
+      abort();
+    }
+
+    // Optional: release the scratch buffer (Mscratch only — Mfwd is kept).
+    static int transient = []() {
+      const char *e = std::getenv("WCF_BUFFERS_TRANSIENT");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (transient) {
+      Mscratch.resize(0);
+      Amk_inv.resize(0);
+      Cmk_inv.resize(0);
+      inv_pivots.resize(0);
+      inv_info.resize(0);
+      built = false;
+    }
+  }
+#endif  // GRID_CUDA
+
   void PackInverseToSimdGPU(const std::vector<SMU::SiteMatrix> &scalar_inv,
                             std::unique_ptr<InvField> &simd_field, int cb) {
     if (!simd_field) simd_field.reset(new InvField(&rbgrid_));
@@ -705,9 +914,8 @@ class TXQCDWilsonCloverFermionEO {
     constexpr int N2 = N * N;         // 576
     using vobj = typename InvField::vector_object;
     constexpr int Nsimd = vobj::Nsimd();
-    uint64_t nsites = scalar_inv.size();
     uint64_t oSites = grid->oSites();
-    GRID_ASSERT(nsites == (uint64_t)grid->lSites());
+    uint64_t nsites = (uint64_t)grid->lSites();
 
     // (a)+(b) Eigen's std::vector<Matrix<complex<double>,24,24>> is contiguous
     // column-major storage (24×24×16 B = 9216 B per matrix, no padding).
@@ -715,15 +923,22 @@ class TXQCDWilsonCloverFermionEO {
     // so we memcpy the entire array straight to the device — no host flatten
     // pass and no temporary 921 MB std::vector.  The kernel below reads with
     // column-major indexing src[c*N + r] to match Eigen's layout.
+    //
+    // Phase J.4: when called with empty scalar_inv, M_dev[cb] is assumed to
+    // already hold the inverse (populated by PrecomputeInversesBuildGPU).
+    // Skip the host→device copy entirely.
     auto &M_dev = (cb == Even) ? M_dev_e_ : M_dev_o_;
     if (M_dev.size() < nsites * N2) M_dev.resize(nsites * N2);
     static_assert(sizeof(std::complex<double>) == sizeof(ComplexD),
                   "std::complex<double> and ComplexD must share layout");
-    acceleratorCopyToDevice(
-        reinterpret_cast<void *>(const_cast<std::complex<double> *>(
-            scalar_inv.data()->data())),
-        &M_dev[0],
-        nsites * N2 * sizeof(ComplexD));
+    if (!scalar_inv.empty()) {
+      GRID_ASSERT(scalar_inv.size() == nsites);
+      acceleratorCopyToDevice(
+          reinterpret_cast<void *>(const_cast<std::complex<double> *>(
+              scalar_inv.data()->data())),
+          &M_dev[0],
+          nsites * N2 * sizeof(ComplexD));
+    }
 
     // (c) Compute lex-index table for (oSite, lane).  Depends only on the
     // grid layout, so cache it once per parity.

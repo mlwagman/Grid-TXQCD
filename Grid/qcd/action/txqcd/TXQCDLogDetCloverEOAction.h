@@ -60,6 +60,17 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
                GridParallelRNG &pRNG) override {}
 
   RealD S(const TXQCDField &U) override {
+    static int use_gpu = []() {
+      const char *e = std::getenv("TXQCD_LOGDET_S_GPU");
+      if (!e || !*e) return 1;        // default ON (Phase J + cuBLAS getrf)
+      return std::atoi(e);             // explicit "0" disables
+    }();
+    if (use_gpu) return S_gpu(U);
+    return S_cpu(U);
+  }
+
+  // CPU path (the original implementation).
+  RealD S_cpu(const TXQCDField &U) {
     auto aux = GetEvenAux(U);
     auto cl = GetEvenClover(U);
     uint64_t nsites = aux.sig.size();
@@ -90,6 +101,87 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     return action;
   }
 
+  // GPU path: same M build as CPU, then cuBLAS getrfBatched + GPU reduction
+  // of log|diag(U)|.  Reuses the deriv_gpu's persistent device buffers.
+  RealD S_gpu(const TXQCDField &U) {
+    auto aux = GetEvenAux(U);
+    auto cl  = GetEvenClover(U);
+    uint64_t nsites = aux.sig.size();
+    constexpr int N  = SMU::kDim;        // 24
+    constexpr int N2 = N * N;            // 576
+
+    if (m_fwd_host_.size() < nsites) m_fwd_host_.resize(nsites);
+    thread_for(x, nsites, {
+      SMU::SiteMatrix M;
+      std::array<SMU::FmnSobj, 6> fmn_site;
+      const std::array<SMU::FmnSobj, 6> *fmn_ptr = nullptr;
+      if (csw_ != 0.0) {
+        for (int k = 0; k < 6; ++k) fmn_site[k] = cl.fs[k][x];
+        fmn_ptr = &fmn_site;
+      }
+      SMU::BuildSiteMatrix(sm_, diag_mass_, aux.sig[x], aux.pi[x],
+                          aux.s[x], aux.p[x], aux.t[x],
+                          csw_, fmn_ptr, M);
+      m_fwd_host_[x] = M;
+    });
+
+    if (M_fwd_dev_.size() < nsites * N2) M_fwd_dev_.resize(nsites * N2);
+    if (pivots_dev_.size() < nsites * N)  pivots_dev_.resize(nsites * N);
+    if (info_dev_.size()   < nsites)      info_dev_.resize(nsites);
+    if (Amk_ptrs_.size()   < nsites)      Amk_ptrs_.resize(nsites);
+    static deviceVector<RealD> logdet_per_site_dev;
+    if ((int)logdet_per_site_dev.size() < (int)nsites)
+      logdet_per_site_dev.resize(nsites);
+    acceleratorCopyToDevice(
+        reinterpret_cast<void *>(const_cast<std::complex<double> *>(
+            m_fwd_host_.data()->data())),
+        &M_fwd_dev_[0],
+        nsites * N2 * sizeof(ComplexD));
+    {
+      ComplexD *Mfwd = &M_fwd_dev_[0];
+      ComplexD **Amk = &Amk_ptrs_[0];
+      accelerator_for(i, nsites, 1, { Amk[i] = &Mfwd[i * N2]; });
+    }
+
+#ifdef GRID_CUDA
+    GridBLAS::Init();
+    cublasStatus_t st = cublasZgetrfBatched(
+        GridBLAS::gridblasHandle, N,
+        reinterpret_cast<cuDoubleComplex **>(&Amk_ptrs_[0]),
+        N, &pivots_dev_[0], &info_dev_[0], nsites);
+    if (st != 0) {
+      std::cout << GridLogError
+                << "[TXQCDLogDet::S_gpu] cublasZgetrfBatched status=" << st << std::endl;
+      abort();
+    }
+#endif
+
+    // Per-site Σ_k log|U_kk|.  Pointer-mode-device cuBLAS leaves M_fwd_dev_
+    // overwritten with L (below diag) and U (on+above diag).
+    ComplexD *MA = &M_fwd_dev_[0];
+    RealD    *LD = &logdet_per_site_dev[0];
+    accelerator_for(i, nsites, 1, {
+      RealD s = 0.0;
+      for (int k = 0; k < N; ++k) {
+        ComplexD u_kk = MA[i * N2 + k + k * N];
+        RealD mod2 = u_kk.real() * u_kk.real() + u_kk.imag() * u_kk.imag();
+        s += 0.5 * ::log(mod2);
+      }
+      LD[i] = s;
+    });
+
+    std::vector<RealD> ld_host(nsites);
+    acceleratorCopyFromDevice(&logdet_per_site_dev[0], ld_host.data(),
+                              nsites * sizeof(RealD));
+    RealD logdet = 0.0;
+    for (uint64_t i = 0; i < nsites; ++i) logdet += ld_host[i];
+    grid_.GlobalSum(logdet);
+    RealD action = -logdet;
+    std::cout << GridLogMessage << "[" << action_name() << "] S = " << action
+              << " (GPU)" << std::endl;
+    return action;
+  }
+
   void deriv(const TXQCDField &U, TXQCDField &dSdU) override {
     static int use_gpu = []() {
       const char *e = std::getenv("TXQCD_LOGDET_GPU");
@@ -114,13 +206,73 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
   //      run the existing Cmunu chain on the full grid.
   void deriv_gpu(const TXQCDField &U, TXQCDField &dSdU) {
     auto t_total0 = usecond();
-    // 1) CPU build M_e^{-1} on EVEN parity only (half the work of constructing
-    //    a full TXQCDWilsonCloverFermionEO which would do both parities + many
-    //    extra Lattice allocs for Mooee/Wilson scratch we never use here).
+    constexpr int N  = SMU::kDim;        // 24
+    constexpr int N2 = N * N;            // 576
+
+    // Path selection: BUILD_GPU=1 keeps aux/Fmn on device and builds M via
+    // GPU kernel (no host roundtrip).  Default OFF — bit-exact at 4⁴ but
+    // measured 14% slower per traj at 16³ MDS=1 (see project_phase_j3_gpu_buildsm
+    // memory).  Per-call kernel is fast; suspect downstream interactions.
+    static int build_gpu = []() {
+      const char *e = std::getenv("TXQCD_LOGDET_BUILD_GPU");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+
+    uint64_t nsites = 0;
+    if (build_gpu) {
+      // GPU build path: pickCheckerboard each aux to RB-Even, compute Fmn
+      // lattices if csw≠0, then call BuildSiteMatrixFromLattice.  No host
+      // unvectorize / Eigen / acceleratorCopyToDevice for M_fwd.
+      auto t_pickcb0 = usecond();
+      LatticeSigmaField sigma_e(&rbgrid_);
+      LatticePiField    pi_e(&rbgrid_);
+      LatticeSFieldC    s_e(&rbgrid_);
+      LatticePFieldC    p_e(&rbgrid_);
+      LatticeTField     t_e(&rbgrid_);
+      pickCheckerboard(Even, sigma_e, U.sigma);
+      pickCheckerboard(Even, pi_e,    U.pi);
+      pickCheckerboard(Even, s_e,     U.s);
+      pickCheckerboard(Even, p_e,     U.p);
+      pickCheckerboard(Even, t_e,     U.t);
+      std::array<LatticeColourMatrix, 6> fmn_e{
+          LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_),
+          LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_),
+          LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_)};
+      if (csw_ != 0.0) {
+        int k = 0;
+        for (int mu = 0; mu < Nd; ++mu)
+          for (int nu = mu + 1; nu < Nd; ++nu) {
+            LatticeColourMatrix FS_full(&grid_);
+            WilsonLoops<WilsonImplR>::FieldStrength(FS_full, U.U, mu, nu);
+            pickCheckerboard(Even, fmn_e[k], FS_full);
+            ++k;
+          }
+      }
+      nsites = sigma_e.Grid()->lSites();
+      t_pickcb_us_ += usecond() - t_pickcb0;
+
+      auto t_build0 = usecond();
+      if (M_fwd_dev_.size() < nsites * N2) M_fwd_dev_.resize(nsites * N2);
+      if (M_inv_dev_.size() < nsites * N2) M_inv_dev_.resize(nsites * N2);
+      if (!lex_built_) {
+        Quda::BuildLexTable(&rbgrid_, lex_table_dev_);
+        lex_built_ = true;
+      }
+      TxqcdLogDet::BuildSiteMatrixFromLattice(
+          &M_fwd_dev_[0], &lex_table_dev_[0],
+          diag_mass_, csw_,
+          sigma_e, pi_e, s_e, p_e, t_e,
+          (csw_ != 0.0) ? &fmn_e : nullptr);
+      t_inv_us_ += usecond() - t_build0;
+      goto cublas_step;  // skip the CPU-build branch below
+    }
+
+    // ----- CPU-build path (legacy, default) -----
+    {
     auto t_pickcb0 = usecond();
     auto aux = GetEvenAux(U);
     auto cl  = GetEvenClover(U);
-    uint64_t nsites = aux.sig.size();
+    nsites = aux.sig.size();
     t_pickcb_us_ += usecond() - t_pickcb0;
 
     auto t_build0 = usecond();
@@ -144,8 +296,6 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     t_inv_us_ += usecond() - t_build0;  // re-purposed: now CPU build only
 
     auto t_upload0 = usecond();
-    constexpr int N  = SMU::kDim;        // 24
-    constexpr int N2 = N * N;            // 576
 
     // 2) Upload forward M to device buffer M_fwd_dev_ (will be overwritten by
     //    cuBLAS getrf with the LU decomposition).  M_inv_dev_ receives the
@@ -159,6 +309,10 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
             m_fwd_host_.data()->data())),
         &M_fwd_dev_[0],
         nsites * N2 * sizeof(ComplexD));
+    t_upload_us_ += usecond() - t_upload0;
+    }  // end CPU-build path
+
+  cublas_step:
 
     // 3) Build lex-index table for the RB-Even grid once and cache.
     if (!lex_built_) {
@@ -184,24 +338,29 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       cublas_built_ = true;
       cublas_nsites_ = nsites;
     }
-    t_upload_us_ += usecond() - t_upload0;
 
     auto t_cublas0 = usecond();
     // 5) cuBLAS getrfBatched + getriBatched: invert all 24×24 matrices on GPU.
     //    Eigen layout is column-major, matching cuBLAS expectations directly.
 #ifdef GRID_CUDA
+    GridBLAS::Init();  // idempotent; required for the cuBLAS handle to be valid
     cublasHandle_t handle = GridBLAS::gridblasHandle;
-    // pointer mode device — we passed pivot/info as device pointers.
-    cublasZgetrfBatched(handle, N,
+    cublasStatus_t st1 = cublasZgetrfBatched(handle, N,
                         reinterpret_cast<cuDoubleComplex **>(&Amk_ptrs_[0]),
                         N, &pivots_dev_[0], &info_dev_[0],
                         nsites);
-    cublasZgetriBatched(handle, N,
+    cublasStatus_t st2 = cublasZgetriBatched(handle, N,
                         reinterpret_cast<cuDoubleComplex **>(&Amk_ptrs_[0]),
                         N, &pivots_dev_[0],
                         reinterpret_cast<cuDoubleComplex **>(&Cmk_ptrs_[0]),
                         N, &info_dev_[0],
                         nsites);
+    if (st1 != 0 || st2 != 0) {
+      std::cout << GridLogError
+                << "[TXQCDLogDet::deriv_gpu] cuBLAS error getrf=" << st1
+                << " getri=" << st2 << std::endl;
+      abort();
+    }
 #else
 #  error "Phase J.2 GPU LogDet requires GRID_CUDA"
 #endif
@@ -264,10 +423,11 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
         for (int nu = 0; nu < Nd; ++nu) {
           if (mu == nu) continue;
           int mn = (mu < nu) ? SMU::FmnIndex(mu, nu) : SMU::FmnIndex(nu, mu);
-          LatticeColourMatrix lambda = (mu < nu) ? Sigma_full[mn]
-                                                 : (-1.0) * Sigma_full[mn];
-          force_mu += 0.25 *
-              WilsonCloverHelpers<Impl>::Cmunu(Ulinks, lambda, mu, nu);
+          // σ_νμ = -σ_μν — fold the sign into the scalar so we skip the
+          // redundant `(-1.0) * Sigma_full[mn]` Lattice op (6 such per deriv).
+          RealD sign = (mu < nu) ? 1.0 : -1.0;
+          force_mu += (0.25 * sign) *
+              WilsonCloverHelpers<Impl>::Cmunu(Ulinks, Sigma_full[mn], mu, nu);
         }
         pokeLorentz(clover_force, Ulinks[mu] * force_mu, mu);
       }
@@ -494,10 +654,10 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
         for (int nu = 0; nu < Nd; ++nu) {
           if (mu == nu) continue;
           int mn = (mu < nu) ? SMU::FmnIndex(mu, nu) : SMU::FmnIndex(nu, mu);
-          LatticeColourMatrix lambda = (mu < nu) ? Sigma_full[mn]
-                                                 : (-1.0) * Sigma_full[mn];
-          force_mu += 0.25 *
-              WilsonCloverHelpers<Impl>::Cmunu(Ulinks, lambda, mu, nu);
+          // σ_νμ = -σ_μν — fold sign into scalar (skip 6 redundant Lattice multiplies).
+          RealD sign = (mu < nu) ? 1.0 : -1.0;
+          force_mu += (0.25 * sign) *
+              WilsonCloverHelpers<Impl>::Cmunu(Ulinks, Sigma_full[mn], mu, nu);
         }
         pokeLorentz(clover_force, Ulinks[mu] * force_mu, mu);
       }

@@ -33,6 +33,10 @@
 #include <Grid/Grid.h>
 #include <Grid/qcd/spin/Dirac.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
+#include <Grid/algorithms/blas/BatchedBlas.h>
+#ifdef GRID_CUDA
+#include <cublas_v2.h>
+#endif
 
 ////////////////////////////////////////////
 // Standard Clover
@@ -58,9 +62,133 @@ public:
 
   typedef WilsonCloverHelpers<Impl> Helpers;
 
+  // GPU batched-invert path (Phase J analogue for QCD Clover): builds a
+  // contiguous host buffer of N×N forward matrices (N = Ns*DimRep = 12 for
+  // Wilson SU(3)), uploads to device, runs cublasZgetrfBatched +
+  // cublasZgetriBatched, downloads, vectorizes back.  Eigen column-major
+  // matches cuBLAS column-major directly so the per-site repack matches the
+  // CPU path's layout exactly → bit-identical output (modulo getrf/Eigen
+  // pivoting equivalence in IEEE arithmetic).
+  //
+  // Enabled by WCF_INSTANTIATE_GPU=1.  Default OFF — env-var opt-in.
+#if defined(GRID_CUDA)
+  static void InstantiateGPU(CloverField &CloverTerm, CloverField &CloverTermInv) {
+    GridBase *grid = CloverTerm.Grid();
+    int lvol = grid->lSites();
+    constexpr int N  = Ns * Impl::Dimension;     // 12 for Wilson SU(3)
+    constexpr int N2 = N * N;                    // 144
+
+    typedef typename SiteClover::scalar_object SCsObj;
+    std::vector<SCsObj> ct_lex(lvol), cti_lex(lvol);
+    unvectorizeToLexOrdArray(ct_lex, CloverTerm);
+
+    // Pack to flat host buffer (col-major, N×N per site).
+    std::vector<ComplexD> M_host(lvol * N2);
+    thread_for(site, lvol, {
+      const SCsObj &Qx = ct_lex[site];
+      for (int j = 0; j < Ns; ++j)
+        for (int k = 0; k < Ns; ++k)
+          for (int a = 0; a < Impl::Dimension; ++a)
+            for (int b = 0; b < Impl::Dimension; ++b) {
+              int row = a + j * Impl::Dimension;
+              int col = b + k * Impl::Dimension;
+              M_host[site * N2 + row + col * N] =
+                  ComplexD(Qx()(j, k)(a, b));
+            }
+    });
+
+    // Function-static persistent device buffers — re-grow only if lvol changes.
+    static deviceVector<ComplexD>  M_dev, Mi_dev;
+    static deviceVector<int>       pivot, info;
+    static deviceVector<ComplexD*> Aptrs, Cptrs;
+    static int cached_lvol = -1;
+    if ((int)M_dev.size()  < lvol * N2) M_dev.resize(lvol * N2);
+    if ((int)Mi_dev.size() < lvol * N2) Mi_dev.resize(lvol * N2);
+    if ((int)pivot.size()  < lvol * N)  pivot.resize(lvol * N);
+    if ((int)info.size()   < lvol)      info.resize(lvol);
+    if ((int)Aptrs.size()  < lvol)      Aptrs.resize(lvol);
+    if ((int)Cptrs.size()  < lvol)      Cptrs.resize(lvol);
+    bool rebuild_ptrs = (cached_lvol != lvol);
+    cached_lvol = lvol;
+
+    acceleratorCopyToDevice(M_host.data(), &M_dev[0],
+                            lvol * N2 * sizeof(ComplexD));
+    if (rebuild_ptrs) {
+      ComplexD *MA = &M_dev[0];
+      ComplexD *MC = &Mi_dev[0];
+      ComplexD **Ap = &Aptrs[0];
+      ComplexD **Cp = &Cptrs[0];
+      accelerator_for(i, lvol, 1, {
+        Ap[i] = &MA[i * N2];
+        Cp[i] = &MC[i * N2];
+      });
+    }
+
+    GridBLAS::Init();
+    cublasHandle_t handle = GridBLAS::gridblasHandle;
+    cublasStatus_t st1 = cublasZgetrfBatched(handle, N,
+                        reinterpret_cast<cuDoubleComplex **>(&Aptrs[0]),
+                        N, &pivot[0], &info[0], lvol);
+    cublasStatus_t st2 = cublasZgetriBatched(handle, N,
+                        reinterpret_cast<cuDoubleComplex **>(&Aptrs[0]),
+                        N, &pivot[0],
+                        reinterpret_cast<cuDoubleComplex **>(&Cptrs[0]),
+                        N, &info[0], lvol);
+    if (st1 != 0 || st2 != 0) {
+      std::cout << GridLogError
+                << "[CH::InstantiateGPU] cuBLAS error: getrf=" << st1
+                << " getri=" << st2 << std::endl;
+      abort();
+    }
+
+    acceleratorCopyFromDevice(&Mi_dev[0], M_host.data(),
+                              lvol * N2 * sizeof(ComplexD));
+
+    // Optional: release GPU scratch after use.  Tradeoff: each ImportGauge
+    // call pays a fresh cudaMalloc (~50 ms for ~1 GB at 32³×64/rank) vs
+    // ~2.4 GB persistent footprint that pushes 32³×64 b6.5 over the
+    // managed-memory ceiling.  Default OFF — opt in via WCF_BUFFERS_TRANSIENT=1.
+    static int transient = []() {
+      const char *e = std::getenv("WCF_BUFFERS_TRANSIENT");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (transient) {
+      M_dev.resize(0);  Mi_dev.resize(0);
+      Aptrs.resize(0);  Cptrs.resize(0);
+      pivot.resize(0);  info.resize(0);
+      cached_lvol = -1;
+    }
+
+    // Unpack into per-site scalar objects.
+    thread_for(site, lvol, {
+      SCsObj QxI = Zero();
+      for (int j = 0; j < Ns; ++j)
+        for (int k = 0; k < Ns; ++k)
+          for (int a = 0; a < Impl::Dimension; ++a)
+            for (int b = 0; b < Impl::Dimension; ++b) {
+              int row = a + j * Impl::Dimension;
+              int col = b + k * Impl::Dimension;
+              QxI()(j, k)(a, b) =
+                  M_host[site * N2 + row + col * N];
+            }
+      cti_lex[site] = QxI;
+    });
+
+    vectorizeFromLexOrdArray(cti_lex, CloverTermInv);
+  }
+#endif
+
   static void Instantiate(CloverField& CloverTerm, CloverField& CloverTermInv, RealD csw_t, RealD diag_mass) {
     GridBase *grid = CloverTerm.Grid();
     CloverTerm += diag_mass;
+
+#if defined(GRID_CUDA)
+    static int use_gpu = []() {
+      const char *e = std::getenv("WCF_INSTANTIATE_GPU");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+    }();
+    if (use_gpu) { InstantiateGPU(CloverTerm, CloverTermInv); return; }
+#endif
 
     int lvol = grid->lSites();
     int DimRep = Impl::Dimension;
