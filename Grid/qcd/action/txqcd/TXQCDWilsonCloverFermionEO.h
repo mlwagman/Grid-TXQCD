@@ -246,20 +246,30 @@ class TXQCDWilsonCloverFermionEO {
 
     // (1) SIMD fermion → flat per-site (lex-ordered).
     {
+      constexpr int FlavorBlock = Ns * Nc;  // 12 — per-flavor offset
       ComplexD *fin_ptr = &fin_flat[0];
       int *lex_dev_ptr = &lex_dev[0];
       autoView(in_v0, in.f[0], AcceleratorRead);
       autoView(in_v1, in.f[1], AcceleratorRead);
+#if TXQCD_Nf >= 3
+      autoView(in_v2, in.f[2], AcceleratorRead);
+#endif
       accelerator_for(s, oSites, Nsimd, {
         int simt_lane = static_cast<int>(lane);
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         ComplexD *dst = &fin_ptr[lex * Ncomp];
         auto v0 = in_v0[s];
         auto v1 = in_v1[s];
+#if TXQCD_Nf >= 3
+        auto v2 = in_v2[s];
+#endif
         for (int alpha = 0; alpha < Ns; ++alpha) {
           for (int i = 0; i < Nc; ++i) {
-            dst[0 * 12 + alpha * 3 + i] = getlane(v0()(alpha)(i), simt_lane);
-            dst[1 * 12 + alpha * 3 + i] = getlane(v1()(alpha)(i), simt_lane);
+            dst[0 * FlavorBlock + alpha * Nc + i] = getlane(v0()(alpha)(i), simt_lane);
+            dst[1 * FlavorBlock + alpha * Nc + i] = getlane(v1()(alpha)(i), simt_lane);
+#if TXQCD_Nf >= 3
+            dst[2 * FlavorBlock + alpha * Nc + i] = getlane(v2()(alpha)(i), simt_lane);
+#endif
           }
         }
       });
@@ -282,16 +292,17 @@ class TXQCDWilsonCloverFermionEO {
       ComplexD **Amk_ptr = &Amk_fwd[0];
       ComplexD **Bkn_ptr = &Bkn[0];
       ComplexD **Cmn_ptr = &Cmn[0];
+      constexpr int Nmat = N * N;  // kDim²
       accelerator_for(i, lSites, 1, {
-        Amk_ptr[i] = &Mfwd_ptr[i * 576];
-        Bkn_ptr[i] = &Bin_ptr[i * 24];
-        Cmn_ptr[i] = &Cout_ptr[i * 24];
+        Amk_ptr[i] = &Mfwd_ptr[i * Nmat];
+        Bkn_ptr[i] = &Bin_ptr[i * N];
+        Cmn_ptr[i] = &Cout_ptr[i * N];
       });
       fwd_built = true;
       built_inv = true;  // Bkn/Cmn are now valid for the inverse path too
     }
 
-    // (3) Batched 24×24 × 24×1 matvec via cuBLAS.
+    // (3) Batched kDim×kDim × kDim×1 matvec via cuBLAS.
     GridBLAS blas;
     blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
                      N, 1, N,
@@ -303,18 +314,25 @@ class TXQCDWilsonCloverFermionEO {
     // (4) Flat → SIMD fermion.
     for (int a = 0; a < TxqcdNf; ++a) out.f[a].Checkerboard() = cb;
     {
+      constexpr int FlavorBlock = Ns * Nc;
       ComplexD *fout_ptr = &fout_flat[0];
       int *lex_dev_ptr = &lex_dev[0];
       autoView(out_v0, out.f[0], AcceleratorWrite);
       autoView(out_v1, out.f[1], AcceleratorWrite);
+#if TXQCD_Nf >= 3
+      autoView(out_v2, out.f[2], AcceleratorWrite);
+#endif
       accelerator_for(s, oSites, Nsimd, {
         int simt_lane = static_cast<int>(lane);
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         const ComplexD *src = &fout_ptr[lex * Ncomp];
         for (int alpha = 0; alpha < Ns; ++alpha) {
           for (int i = 0; i < Nc; ++i) {
-            putlane(out_v0[s]()(alpha)(i), src[0 * 12 + alpha * 3 + i], simt_lane);
-            putlane(out_v1[s]()(alpha)(i), src[1 * 12 + alpha * 3 + i], simt_lane);
+            putlane(out_v0[s]()(alpha)(i), src[0 * FlavorBlock + alpha * Nc + i], simt_lane);
+            putlane(out_v1[s]()(alpha)(i), src[1 * FlavorBlock + alpha * Nc + i], simt_lane);
+#if TXQCD_Nf >= 3
+            putlane(out_v2[s]()(alpha)(i), src[2 * FlavorBlock + alpha * Nc + i], simt_lane);
+#endif
           }
         }
       });
@@ -705,18 +723,19 @@ class TXQCDWilsonCloverFermionEO {
       // column-major).  BUILD_GPU already populated Mfwd_dev_e_/o_ device-side.
       uint64_t nsites_e = fwd_even_.size();
       uint64_t nsites_o = fwd_odd_.size();
-      if (Mfwd_dev_e_.size() < nsites_e * 576) Mfwd_dev_e_.resize(nsites_e * 576);
-      if (Mfwd_dev_o_.size() < nsites_o * 576) Mfwd_dev_o_.resize(nsites_o * 576);
+      constexpr uint64_t Nmat = SMU::kDim * SMU::kDim;
+      if (Mfwd_dev_e_.size() < nsites_e * Nmat) Mfwd_dev_e_.resize(nsites_e * Nmat);
+      if (Mfwd_dev_o_.size() < nsites_o * Nmat) Mfwd_dev_o_.resize(nsites_o * Nmat);
       acceleratorCopyToDevice(
           reinterpret_cast<void *>(const_cast<std::complex<double> *>(
               fwd_even_.data()->data())),
           &Mfwd_dev_e_[0],
-          nsites_e * 576 * sizeof(ComplexD));
+          nsites_e * Nmat * sizeof(ComplexD));
       acceleratorCopyToDevice(
           reinterpret_cast<void *>(const_cast<std::complex<double> *>(
               fwd_odd_.data()->data())),
           &Mfwd_dev_o_[0],
-          nsites_o * 576 * sizeof(ComplexD));
+          nsites_o * Nmat * sizeof(ComplexD));
     }
     t_pre_pack_us_ += usecond() - t_pack0;
     t_precompute_us_ += usecond() - t0;
@@ -1088,22 +1107,32 @@ class TXQCDWilsonCloverFermionEO {
     }
 
     // (1) SIMD fermion → flat per-site (lex-ordered).  Per (oSite, lane) thread,
-    // extract this lane's 24 components from the 2 spinor flavors.
+    // extract this lane's kDim components from the TxqcdNf spinor flavors.
     {
+      constexpr int FlavorBlock = Ns * Nc;
       ComplexD *fin_ptr = &fin_flat[0];
       int *lex_dev_ptr = &lex_dev[0];
       autoView(in_v0, in.f[0], AcceleratorRead);
       autoView(in_v1, in.f[1], AcceleratorRead);
+#if TXQCD_Nf >= 3
+      autoView(in_v2, in.f[2], AcceleratorRead);
+#endif
       accelerator_for(s, oSites, Nsimd, {
         int simt_lane = static_cast<int>(lane);
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         ComplexD *dst = &fin_ptr[lex * Ncomp];
         auto v0 = in_v0[s];
         auto v1 = in_v1[s];
+#if TXQCD_Nf >= 3
+        auto v2 = in_v2[s];
+#endif
         for (int alpha = 0; alpha < Ns; ++alpha) {
           for (int i = 0; i < Nc; ++i) {
-            dst[0 * 12 + alpha * 3 + i] = getlane(v0()(alpha)(i), simt_lane);
-            dst[1 * 12 + alpha * 3 + i] = getlane(v1()(alpha)(i), simt_lane);
+            dst[0 * FlavorBlock + alpha * Nc + i] = getlane(v0()(alpha)(i), simt_lane);
+            dst[1 * FlavorBlock + alpha * Nc + i] = getlane(v1()(alpha)(i), simt_lane);
+#if TXQCD_Nf >= 3
+            dst[2 * FlavorBlock + alpha * Nc + i] = getlane(v2()(alpha)(i), simt_lane);
+#endif
           }
         }
       });
@@ -1125,15 +1154,16 @@ class TXQCDWilsonCloverFermionEO {
       ComplexD **Amk_ptr = &Amk[0];
       ComplexD **Bkn_ptr = &Bkn[0];
       ComplexD **Cmn_ptr = &Cmn[0];
+      constexpr int Nmat = N * N;
       accelerator_for(i, lSites, 1, {
-        Amk_ptr[i] = &M_ptr[i * 576];
-        Bkn_ptr[i] = &Bin_ptr[i * 24];
-        Cmn_ptr[i] = &Cout_ptr[i * 24];
+        Amk_ptr[i] = &M_ptr[i * Nmat];
+        Bkn_ptr[i] = &Bin_ptr[i * N];
+        Cmn_ptr[i] = &Cout_ptr[i * N];
       });
       built = true;
     }
 
-    // (3) Batched 24×24 × 24×1 matvec via cuBLAS.  Column-major matrices
+    // (3) Batched kDim×kDim × kDim×1 matvec via cuBLAS.  Column-major matrices
     // (Eigen layout, row index r is fastest) match the cuBLAS convention.
     GridBLAS blas;
     blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
@@ -1146,18 +1176,25 @@ class TXQCDWilsonCloverFermionEO {
     // (4) Flat → SIMD fermion.
     for (int a = 0; a < TxqcdNf; ++a) out.f[a].Checkerboard() = cb;
     {
+      constexpr int FlavorBlock = Ns * Nc;
       ComplexD *fout_ptr = &fout_flat[0];
       int *lex_dev_ptr = &lex_dev[0];
       autoView(out_v0, out.f[0], AcceleratorWrite);
       autoView(out_v1, out.f[1], AcceleratorWrite);
+#if TXQCD_Nf >= 3
+      autoView(out_v2, out.f[2], AcceleratorWrite);
+#endif
       accelerator_for(s, oSites, Nsimd, {
         int simt_lane = static_cast<int>(lane);
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
         const ComplexD *src = &fout_ptr[lex * Ncomp];
         for (int alpha = 0; alpha < Ns; ++alpha) {
           for (int i = 0; i < Nc; ++i) {
-            putlane(out_v0[s]()(alpha)(i), src[0 * 12 + alpha * 3 + i], simt_lane);
-            putlane(out_v1[s]()(alpha)(i), src[1 * 12 + alpha * 3 + i], simt_lane);
+            putlane(out_v0[s]()(alpha)(i), src[0 * FlavorBlock + alpha * Nc + i], simt_lane);
+            putlane(out_v1[s]()(alpha)(i), src[1 * FlavorBlock + alpha * Nc + i], simt_lane);
+#if TXQCD_Nf >= 3
+            putlane(out_v2[s]()(alpha)(i), src[2 * FlavorBlock + alpha * Nc + i], simt_lane);
+#endif
           }
         }
       });
@@ -1230,6 +1267,11 @@ class TXQCDWilsonCloverFermionEO {
     std::vector<LatticeView<vobj>> in_v0_views, in_v1_views, out_v0_views, out_v1_views;
     in_v0_views.reserve(NRHS); in_v1_views.reserve(NRHS);
     out_v0_views.reserve(NRHS); out_v1_views.reserve(NRHS);
+#if TXQCD_Nf >= 3
+    std::vector<vobj*> in_v2_host(NRHS), out_v2_host(NRHS);
+    std::vector<LatticeView<vobj>> in_v2_views, out_v2_views;
+    in_v2_views.reserve(NRHS); out_v2_views.reserve(NRHS);
+#endif
     for (int j = 0; j < NRHS; ++j) {
       in_v0_views.push_back(ins[j].f[0].View(AcceleratorRead));
       in_v1_views.push_back(ins[j].f[1].View(AcceleratorRead));
@@ -1241,6 +1283,13 @@ class TXQCDWilsonCloverFermionEO {
       out_v1_views.push_back(outs[j].f[1].View(AcceleratorWrite));
       out_v0_host[j] = out_v0_views[j].getHostPointer();
       out_v1_host[j] = out_v1_views[j].getHostPointer();
+#if TXQCD_Nf >= 3
+      in_v2_views.push_back(ins[j].f[2].View(AcceleratorRead));
+      in_v2_host[j] = in_v2_views[j].getHostPointer();
+      outs[j].f[2].Checkerboard() = cb;
+      out_v2_views.push_back(outs[j].f[2].View(AcceleratorWrite));
+      out_v2_host[j] = out_v2_views[j].getHostPointer();
+#endif
     }
     deviceVector<vobj*> in_v0_dev(NRHS), in_v1_dev(NRHS),
                         out_v0_dev(NRHS), out_v1_dev(NRHS);
@@ -1248,13 +1297,22 @@ class TXQCDWilsonCloverFermionEO {
     acceleratorCopyToDevice(in_v1_host.data(),  &in_v1_dev[0],  NRHS * sizeof(vobj*));
     acceleratorCopyToDevice(out_v0_host.data(), &out_v0_dev[0], NRHS * sizeof(vobj*));
     acceleratorCopyToDevice(out_v1_host.data(), &out_v1_dev[0], NRHS * sizeof(vobj*));
+#if TXQCD_Nf >= 3
+    deviceVector<vobj*> in_v2_dev(NRHS), out_v2_dev(NRHS);
+    acceleratorCopyToDevice(in_v2_host.data(),  &in_v2_dev[0],  NRHS * sizeof(vobj*));
+    acceleratorCopyToDevice(out_v2_host.data(), &out_v2_dev[0], NRHS * sizeof(vobj*));
+#endif
 
     // (1) Pack: SIMD fermions → flat per-site (lex-ordered, column-major over RHS).
     {
+      constexpr int FlavorBlock = Ns * Nc;
       ComplexD *fin_ptr = &fin_flat[0];
       int *lex_dev_ptr = &lex_dev[0];
       vobj **v0_ptrs = &in_v0_dev[0];
       vobj **v1_ptrs = &in_v1_dev[0];
+#if TXQCD_Nf >= 3
+      vobj **v2_ptrs = &in_v2_dev[0];
+#endif
       accelerator_for(s, oSites, Nsimd, {
         int simt_lane = static_cast<int>(lane);
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
@@ -1263,10 +1321,16 @@ class TXQCDWilsonCloverFermionEO {
           ComplexD *col_dst = &site_dst[j * N];
           auto v0 = v0_ptrs[j][s];
           auto v1 = v1_ptrs[j][s];
+#if TXQCD_Nf >= 3
+          auto v2 = v2_ptrs[j][s];
+#endif
           for (int alpha = 0; alpha < Ns; ++alpha) {
             for (int i = 0; i < Nc; ++i) {
-              col_dst[0 * 12 + alpha * 3 + i] = getlane(v0()(alpha)(i), simt_lane);
-              col_dst[1 * 12 + alpha * 3 + i] = getlane(v1()(alpha)(i), simt_lane);
+              col_dst[0 * FlavorBlock + alpha * Nc + i] = getlane(v0()(alpha)(i), simt_lane);
+              col_dst[1 * FlavorBlock + alpha * Nc + i] = getlane(v1()(alpha)(i), simt_lane);
+#if TXQCD_Nf >= 3
+              col_dst[2 * FlavorBlock + alpha * Nc + i] = getlane(v2()(alpha)(i), simt_lane);
+#endif
             }
           }
         }
@@ -1307,10 +1371,14 @@ class TXQCDWilsonCloverFermionEO {
 
     // (4) Unpack: flat → SIMD fermions.
     {
+      constexpr int FlavorBlock = Ns * Nc;
       ComplexD *fout_ptr = &fout_flat[0];
       int *lex_dev_ptr = &lex_dev[0];
       vobj **v0_ptrs = &out_v0_dev[0];
       vobj **v1_ptrs = &out_v1_dev[0];
+#if TXQCD_Nf >= 3
+      vobj **v2_ptrs = &out_v2_dev[0];
+#endif
       accelerator_for(s, oSites, Nsimd, {
         int simt_lane = static_cast<int>(lane);
         int lex = lex_dev_ptr[s * Nsimd + simt_lane];
@@ -1319,8 +1387,11 @@ class TXQCDWilsonCloverFermionEO {
           const ComplexD *col_src = &site_src[j * N];
           for (int alpha = 0; alpha < Ns; ++alpha) {
             for (int i = 0; i < Nc; ++i) {
-              putlane(v0_ptrs[j][s]()(alpha)(i), col_src[0 * 12 + alpha * 3 + i], simt_lane);
-              putlane(v1_ptrs[j][s]()(alpha)(i), col_src[1 * 12 + alpha * 3 + i], simt_lane);
+              putlane(v0_ptrs[j][s]()(alpha)(i), col_src[0 * FlavorBlock + alpha * Nc + i], simt_lane);
+              putlane(v1_ptrs[j][s]()(alpha)(i), col_src[1 * FlavorBlock + alpha * Nc + i], simt_lane);
+#if TXQCD_Nf >= 3
+              putlane(v2_ptrs[j][s]()(alpha)(i), col_src[2 * FlavorBlock + alpha * Nc + i], simt_lane);
+#endif
             }
           }
         }
@@ -1335,6 +1406,10 @@ class TXQCDWilsonCloverFermionEO {
       in_v1_views[j].ViewClose();
       out_v0_views[j].ViewClose();
       out_v1_views[j].ViewClose();
+#if TXQCD_Nf >= 3
+      in_v2_views[j].ViewClose();
+      out_v2_views[j].ViewClose();
+#endif
     }
   }
 

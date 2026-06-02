@@ -73,6 +73,15 @@ eigspec_diag: eigspec_diag.cc params.h
 eigspec_diag_nf2: eigspec_diag.cc params.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
 
+# Nf=3 variants of the production meas binaries — built for measurement on
+# the gen_txqcd_cfgs (Nf=3) cfgs (e.g. _nf3_weakfield_md10).  Default catch-all
+# below builds the Nf=2 versions of the same sources.
+meas_conn_txqcd_nf3: meas_conn_txqcd.cc params.h meas_helper.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
+
+meas_disco_txqcd_nf3: meas_disco_txqcd.cc params.h meas_helper.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
+
 # Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
 # edits (e.g. EIG_DIAG tuning) force a rebuild of gen_qcd_cfgs* and the
 # meas_* binaries that include them.  (Over-broad for binaries that don't

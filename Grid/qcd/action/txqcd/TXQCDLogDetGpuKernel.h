@@ -81,7 +81,9 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
   accelerator_for(s, oSites, Nsimd, {
     int simt_lane = static_cast<int>(lane);
     int lex = lex_dev[s * Nsimd + simt_lane];
-    const ComplexD *Inv = &M_inv_dev[lex * 576];  // column-major 24×24
+    // Per-site stride is N*N (= kDim²) — was hardcoded 576 (= 24²), silently
+    // wrong at Nf=3 where kDim=36 → 1296.  Fixed 2026-06-02.
+    const ComplexD *Inv = &M_inv_dev[lex * uint64_t(N) * N];  // column-major N×N
 
     // Inv element (row=ra, col=rb) = Inv[rb*24 + ra]
     auto Mij = [&](int ra, int rb) -> ComplexD { return Inv[rb * N + ra]; };

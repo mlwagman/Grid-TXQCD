@@ -39,6 +39,41 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
   LatticeSigmaField G(grid); G = Zero();
   G.Checkerboard() = Y.f[0].Checkerboard();
 
+#if TXQCD_Nf == 3
+  // Nf=3 GPU path — same structure as Nf=2 below with an extra view per side.
+  // Was previously falling back to a slow CPU thread_for with GPU↔CPU view
+  // copies, dominating production wallclock at ~4 s/call.
+  autoView(Gv,  G,       AcceleratorWrite);
+  autoView(Y0v, Y.f[0],  AcceleratorRead);
+  autoView(Y1v, Y.f[1],  AcceleratorRead);
+  autoView(Y2v, Y.f[2],  AcceleratorRead);
+  autoView(X0v, X.f[0],  AcceleratorRead);
+  autoView(X1v, X.f[1],  AcceleratorRead);
+  autoView(X2v, X.f[2],  AcceleratorRead);
+  const int Nsimd = LatticeFermion::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto Y0 = Y0v(ss); auto Y1 = Y1v(ss); auto Y2 = Y2v(ss);
+    auto X0 = X0v(ss); auto X1 = X1v(ss); auto X2 = X2v(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(Gv(ss))>::type>::type SigSitePerLane;
+    SigSitePerLane g_acc;
+    for (int a = 0; a < TxqcdNf; ++a) {
+      auto Y_a = (a == 0) ? Y0 : (a == 1) ? Y1 : Y2;
+      for (int b = 0; b < TxqcdNf; ++b) {
+        auto X_b = (b == 0) ? X0 : (b == 1) ? X1 : X2;
+        decltype(conjugate(Y_a()(0)(0)) * X_b()(0)(0)) acc;
+        zeroit(acc);
+        for (int alpha = 0; alpha < Ns; ++alpha) {
+          for (int i = 0; i < Nc; ++i) {
+            acc = acc + conjugate(Y_a()(alpha)(i)) * X_b()(alpha)(i);
+          }
+        }
+        g_acc()()(a, b) = acc;
+      }
+    }
+    coalescedWrite(Gv[ss], g_acc);
+  });
+  return G;
+#else
   if constexpr (TxqcdNf != 2) {
     // Generic-Nf path: assemble G via per-(a,b) localInnerProduct + per-site
     // poke.  Slower than the Nf=2 SIMD unroll but Nf-agnostic.
@@ -86,6 +121,7 @@ inline LatticeSigmaField FlavorBilinear(const TXQCDFermionNf &Y,
     coalescedWrite(Gv[ss], g_acc);
   });
   return G;
+#endif
 }
 
 // F = -(G^T + G^*) per site, with G the flavor bilinear above. Hermitian.
@@ -130,6 +166,44 @@ inline LatticeSFieldC ColorBilinearSpinOp(const TXQCDFermionNf &Y,
     for (int beta = 0; beta < Ns; ++beta)
       opflat[alpha * Ns + beta] = Op(alpha, beta);
 
+#if TXQCD_Nf == 3
+  // Nf=3 GPU path — same accelerator_for structure as Nf=2 below with an extra
+  // view per side.  Was previously falling back to a slow CPU thread_for with
+  // GPU↔CPU view copies, dominating production wallclock at ~4 s/call.
+  autoView(Gv,  G,       AcceleratorWrite);
+  autoView(Y0v, Y.f[0],  AcceleratorRead);
+  autoView(Y1v, Y.f[1],  AcceleratorRead);
+  autoView(Y2v, Y.f[2],  AcceleratorRead);
+  autoView(X0v, X.f[0],  AcceleratorRead);
+  autoView(X1v, X.f[1],  AcceleratorRead);
+  autoView(X2v, X.f[2],  AcceleratorRead);
+  const int Nsimd = LatticeFermion::vector_object::Nsimd();
+  accelerator_for(ss, grid->oSites(), Nsimd, {
+    auto Y0 = Y0v(ss); auto Y1 = Y1v(ss); auto Y2 = Y2v(ss);
+    auto X0 = X0v(ss); auto X1 = X1v(ss); auto X2 = X2v(ss);
+    typedef typename std::remove_cv<typename std::remove_reference<decltype(Gv(ss))>::type>::type SSitePerLane;
+    SSitePerLane g_acc;
+    for (int i = 0; i < Nc; ++i) {
+      for (int j = 0; j < Nc; ++j) {
+        decltype(conjugate(Y0()(0)(0)) * X0()(0)(0)) acc;
+        zeroit(acc);
+        for (int a = 0; a < TxqcdNf; ++a) {
+          auto Y_a = (a == 0) ? Y0 : (a == 1) ? Y1 : Y2;
+          auto X_a = (a == 0) ? X0 : (a == 1) ? X1 : X2;
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int beta = 0; beta < Ns; ++beta) {
+              ComplexD op_ab = opflat[alpha * Ns + beta];
+              acc = acc + conjugate(Y_a()(alpha)(i)) * op_ab * X_a()(beta)(j);
+            }
+          }
+        }
+        g_acc()()(i, j) = acc;
+      }
+    }
+    coalescedWrite(Gv[ss], g_acc);
+  });
+  return G;
+#else
   if constexpr (TxqcdNf != 2) {
     // Generic-Nf CPU thread_for: per-flavor, per-site, accumulate into G.
     autoView(Gv, G, CpuWrite);
@@ -187,6 +261,7 @@ inline LatticeSFieldC ColorBilinearSpinOp(const TXQCDFermionNf &Y,
     coalescedWrite(Gv[ss], g_acc);
   });
   return G;
+#endif
 }
 
 // F = -(G^T + G^*) on color indices. Hermitian.

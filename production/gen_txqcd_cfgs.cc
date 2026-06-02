@@ -89,6 +89,147 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     std::cout << GridLogMessage << "[TxqcdDiag] traj=" << traj << " plaq=" << pl
               << " vev_sigma=" << vs << " vev_s=" << vc << std::endl;
 
+    // Per-component σ + s breakdown — distinguishes flavor-singlet trace(σ)
+    // from non-singlet σ_ab off-diagonals.  Useful for diagnosing whether the
+    // period-2 oscillation observed in cold-gauge Nf=3 thermalization lives in
+    // the singlet (trace) mode or in non-singlet (off-diagonal flavor) modes.
+    //
+    // Also prints volume std-dev of each component to distinguish within-cfg
+    // cancellation (large std-dev with σ_ab(x) sign-flipping in different
+    // spatial regions) from between-cfg cancellation (coherent σ_ab on one
+    // cfg with sign that varies across cfgs).  For the analytical
+    // ⟨σ_ab⟩=0 (a≠b) to be recovered from a single-cfg volume average that's
+    // ≠0, between-cfg cancellation is required; for a single-cfg volume avg
+    // ≈0, within-cfg cancellation is happening.
+    {
+      std::ostringstream sd;
+      sd << "[TxqcdDiag] traj=" << traj << " sigma_diag";
+      for (int a = 0; a < TxqcdNf; ++a) {
+        LatticeComplex sab(U.Grid());
+        sab = PeekIndex<2>(U.sigma, a, a);
+        ComplexD v = TensorRemove(sum(sab)) / V;
+        sd << "[" << a << "]=" << v.real();
+      }
+      if (TxqcdNf >= 2) {
+        sd << " sigma_offdiag(re,im)";
+        for (int a = 0; a < TxqcdNf; ++a) {
+          for (int b = a + 1; b < TxqcdNf; ++b) {
+            LatticeComplex sab(U.Grid());
+            sab = PeekIndex<2>(U.sigma, a, b);
+            ComplexD v = TensorRemove(sum(sab)) / V;
+            sd << "[" << a << b << "]=(" << v.real() << "," << v.imag() << ")";
+          }
+        }
+      }
+      std::cout << GridLogMessage << sd.str() << std::endl;
+
+      // Six-quantity stats per Hermitian-matrix aux component (σ, π, s, p, t_{01}):
+      //   mean_re = <Re σ>;          var_re = <(Re σ)²> - <Re σ>²
+      //   mean_im = <Im σ>;          var_im = <(Im σ)²> - <Im σ>²
+      //   mean_modsq = <|σ|²>;       var_modsq = <|σ|⁴> - <|σ|²>²
+      // All sum-based (no sqrt).  Identities used:
+      //   <(Re σ)²> = (<|σ|²> + Re<σ²>) / 2
+      //   <(Im σ)²> = (<|σ|²> - Re<σ²>) / 2
+      //   <|σ|⁴>    = sum_x (σ_x σ_x*)²
+      // var_re vs var_im distinguishes flavor-singlet-rotation from amplitude
+      // dynamics; var_modsq probes the amplitude of |σ|² fluctuations.  For an
+      // iid Gaussian Re/Im with mean 0, var_re=var_im=½<|σ|²> and
+      // var_modsq=<|σ|²>².
+      struct CStats {
+        RealD mean_re, mean_im, mean_modsq, var_re, var_im, var_modsq;
+      };
+      auto cstats = [V](const LatticeComplex &sab) -> CStats {
+        ComplexD m = TensorRemove(sum(sab)) / V;
+        RealD m_abs_sq = norm2(sab) / V;
+        RealD re_sq_re = TensorRemove(sum(sab * sab)).real() / V;
+        LatticeComplex modsq(sab.Grid());
+        modsq = sab * conjugate(sab);
+        RealD m_modsq_sq = TensorRemove(sum(modsq * modsq)).real() / V;
+        CStats s;
+        s.mean_re    = m.real();
+        s.mean_im    = m.imag();
+        s.mean_modsq = m_abs_sq;
+        s.var_re     = std::max(RealD(0.5) * (m_abs_sq + re_sq_re)
+                                  - m.real() * m.real(), RealD(0.0));
+        s.var_im     = std::max(RealD(0.5) * (m_abs_sq - re_sq_re)
+                                  - m.imag() * m.imag(), RealD(0.0));
+        s.var_modsq  = std::max(m_modsq_sq - m_abs_sq * m_abs_sq, RealD(0.0));
+        return s;
+      };
+      auto dump_mat = [&cstats, traj](const std::string &name,
+                                       auto &field, int N) {
+        static const char *keys[6] = {
+          "mean_re", "var_re", "mean_im", "var_im", "mean_modsq", "var_modsq"};
+        std::ostringstream out[6];
+        for (int k = 0; k < 6; ++k)
+          out[k] << "[TxqcdDiag] traj=" << traj << " "
+                 << name << "_" << keys[k] << " diag";
+        for (int a = 0; a < N; ++a) {
+          LatticeComplex sab(field.Grid());
+          sab = PeekIndex<2>(field, a, a);
+          CStats s = cstats(sab);
+          out[0] << "[" << a << "]=" << s.mean_re;
+          out[1] << "[" << a << "]=" << s.var_re;
+          out[2] << "[" << a << "]=" << s.mean_im;
+          out[3] << "[" << a << "]=" << s.var_im;
+          out[4] << "[" << a << "]=" << s.mean_modsq;
+          out[5] << "[" << a << "]=" << s.var_modsq;
+        }
+        if (N >= 2) {
+          for (int k = 0; k < 6; ++k) out[k] << " offdiag";
+          for (int a = 0; a < N; ++a) {
+            for (int b = a + 1; b < N; ++b) {
+              LatticeComplex sab(field.Grid());
+              sab = PeekIndex<2>(field, a, b);
+              CStats s = cstats(sab);
+              out[0] << "[" << a << b << "]=" << s.mean_re;
+              out[1] << "[" << a << b << "]=" << s.var_re;
+              out[2] << "[" << a << b << "]=" << s.mean_im;
+              out[3] << "[" << a << b << "]=" << s.var_im;
+              out[4] << "[" << a << b << "]=" << s.mean_modsq;
+              out[5] << "[" << a << b << "]=" << s.var_modsq;
+            }
+          }
+        }
+        for (int k = 0; k < 6; ++k)
+          std::cout << GridLogMessage << out[k].str() << std::endl;
+      };
+      dump_mat("sigma", U.sigma, TxqcdNf);
+      dump_mat("pi",    U.pi,    TxqcdNf);
+      dump_mat("s_color", U.s,   Nc);
+      dump_mat("p_color", U.p,   Nc);
+      {
+        // t_{01}: Lorentz (μ=0, ν=1) slice of the antisymmetric Lorentz +
+        // Hermitian-color tensor.  PeekIndex<1>(U.t, 0, 1) reduces the Lorentz
+        // iMatrix to scalar, leaving a TxqcdSiteColorMatrix-shaped tensor, so we
+        // can reuse the matrix dumper.  Other Lorentz slices behave the same way
+        // by antisymmetry — one representative is sufficient.
+        LatticeSFieldC t01(U.t.Grid());
+        t01 = PeekIndex<1>(U.t, 0, 1);
+        dump_mat("t01", t01, Nc);
+      }
+    }
+    {
+      std::ostringstream sd;
+      sd << "[TxqcdDiag] traj=" << traj << " s_diag";
+      for (int i = 0; i < Nc; ++i) {
+        LatticeComplex sii(U.Grid());
+        sii = PeekIndex<2>(U.s, i, i);
+        ComplexD v = TensorRemove(sum(sii)) / V;
+        sd << "[" << i << "]=" << v.real();
+      }
+      sd << " s_offdiag(re,im)";
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = i + 1; j < Nc; ++j) {
+          LatticeComplex sij(U.Grid());
+          sij = PeekIndex<2>(U.s, i, j);
+          ComplexD v = TensorRemove(sum(sij)) / V;
+          sd << "[" << i << j << "]=(" << v.real() << "," << v.imag() << ")";
+        }
+      }
+      std::cout << GridLogMessage << sd.str() << std::endl;
+    }
+
     int na = (int)actions_.size();
     std::vector<RealD> fa(na), fm(na), fdta(na), fdtm(na);
     for (int i = 0; i < na; ++i) {

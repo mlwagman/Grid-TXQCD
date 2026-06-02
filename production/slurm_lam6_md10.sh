@@ -148,20 +148,21 @@ fi
 #   the basin-of-attraction axis at fixed Nf=3, λ=7.  Same env stack as GPU3.
 #   No NO_METROP burn-in: chroma cfg is QCD-thermalized so Metropolis handles
 #   the σ thermalization transient.
-#   MDS=15 (was 10) to kill the σ period-2 ringing seen at Nf=3 weak — fermion
-#   Fdt_max=1.58 at MDS=10 is over the symplectic stability edge; MDS=15 brings
-#   it to ~1.05 worst-case in transient, ~0.67 steady-state.  Fresh _md15 dir.
-N3C_DIR="cfgs/txqcd_lam7.0000_nf3_fromchroma_md15"
-logfile_n3c="slurm-logs/lam7_nf3_fromchroma_md15.${SLURM_JOB_ID}.out"
+#   MDS=10 — initial MDS=15 bump (vs the σ period-2 ringing at Nf=3) reverted
+#   2026-06-02 after observing the ringing damps naturally at MDS=10 (λ=7 1283916
+#   midpoint stable at 0.094 = Σ_eq/(2λ²) with steady drift toward equilibrium
+#   0.187 = Σ_eq/λ²).  MDS=15 was unnecessary; revert to save 33% wallclock.
+N3C_DIR="cfgs/txqcd_lam7.0000_nf3_fromchroma_md10"
+logfile_n3c="slurm-logs/lam7_nf3_fromchroma_md10.${SLURM_JOB_ID}.out"
 echo "[gpu 2] λ=7 Nf=3 fromchroma dir=$N3C_DIR  IMPORT=$CHROMA_CFG  log=$logfile_n3c"
 CUDA_VISIBLE_DEVICES=2 \
     LAMBDA=7 \
-    SUFFIX="_nf3_fromchroma_md15" \
+    SUFFIX="_nf3_fromchroma_md10" \
     N_TRAJ=$N_TRAJ \
     IMPORT_CFG="$CHROMA_CFG" \
     INTEGRATOR=MinimumNorm2 \
     LAMBDA_MN2=0.1789 \
-    MDSTEPS=15 \
+    MDSTEPS=10 \
     TRAJL=0.353553390593274 \
     GAUGE_MULT=4 \
     GAUGE_INNER_MULT=2 \
@@ -199,24 +200,24 @@ sleep 2
 #   action-S evals under Metropolis.  Combined ≈ −14.6% per traj vs HYBRID+FULL
 #   alone.  WCF_LOGDET_GPU / WCF_LOGDET_DERIV_GPU are QCD-strange paths that
 #   don't apply at Nf=3 (strange embedded in TXQCD); not set.
-#   MDS=15 (was 10) to kill σ period-2 ringing observed in _md10 chain at trajs
-#   1-7 (vev_σ oscillating 0.004↔0.24 cleanly each traj).  Fresh _md15 dir for
-#   side-by-side comparison with the abandoned _md10 chain that 1283916 still
-#   feeds while we wait for the chained successor.
-N3_DIR="cfgs/txqcd_lam7.0000_nf3_weakfield_md15"
+#   MDS=10 — initial MDS=15 bump (vs the σ period-2 ringing in λ=6 reference
+#   1283899) was reverted 2026-06-02 after the λ=7 1283916 chain showed natural
+#   damping at MDS=10: midpoint=Σ_eq/(2λ²) stable, amplitude halving every ~6
+#   trajs.  Continues 1283916's _md10 chain from latest ckpt (cfg 10 saved).
+N3_DIR="cfgs/txqcd_lam7.0000_nf3_weakfield_md10"
 N3_LATEST=$(ls "$N3_DIR"/ckpoint_lat.* 2>/dev/null | grep -oE 'ckpoint_lat\.[0-9]+$' | sed 's/ckpoint_lat\.//' | sort -n | tail -1)
 N3_LATEST=${N3_LATEST:-0}
 N3_NOMETROP=$(( 100 - N3_LATEST ))
 [ "$N3_NOMETROP" -lt 0 ] && N3_NOMETROP=0
-logfile_n3="slurm-logs/lam7_nf3_weakfield_md15.${SLURM_JOB_ID}.out"
+logfile_n3="slurm-logs/lam7_nf3_weakfield_md10.${SLURM_JOB_ID}.out"
 echo "[gpu 3] λ=7 Nf=3 weak-field dir=$N3_DIR  latest_ckpt=$N3_LATEST  NO_METROP=$N3_NOMETROP  log=$logfile_n3"
 CUDA_VISIBLE_DEVICES=3 \
     LAMBDA=7 \
-    SUFFIX="_nf3_weakfield_md15" \
+    SUFFIX="_nf3_weakfield_md10" \
     N_TRAJ=$N_TRAJ \
     INTEGRATOR=MinimumNorm2 \
     LAMBDA_MN2=0.1789 \
-    MDSTEPS=15 \
+    MDSTEPS=10 \
     TRAJL=0.353553390593274 \
     GAUGE_MULT=4 \
     GAUGE_INNER_MULT=2 \
