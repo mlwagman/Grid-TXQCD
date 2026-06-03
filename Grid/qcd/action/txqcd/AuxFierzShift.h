@@ -30,12 +30,13 @@ class AuxFierzShift {
  public:
   // c_X = Z_X / λ²  for each aux field.  Z=0 → no shift on that field.
   AuxFierzShift(RealD lambda, RealD Z_sigma, RealD Z_pi, RealD Z_s,
-                RealD Z_p, RealD Z_t)
+                RealD Z_p, RealD Z_t, RealD sign = -1.0)
       : c_sigma_(Z_sigma / (lambda * lambda)),
         c_pi_   (Z_pi    / (lambda * lambda)),
         c_s_    (Z_s     / (lambda * lambda)),
         c_p_    (Z_p     / (lambda * lambda)),
         c_t_    (Z_t     / (lambda * lambda)),
+        sign_(sign),
         lambda_(lambda),
         Z_sigma_(Z_sigma), Z_pi_(Z_pi), Z_s_(Z_s), Z_p_(Z_p), Z_t_(Z_t) {}
 
@@ -47,6 +48,7 @@ class AuxFierzShift {
   std::string LogParameters() const {
     std::stringstream os;
     os << "[AuxFierzShift] λ=" << lambda_
+       << "  sign=" << (sign_ > 0 ? "+1 (DAMP, empirical)" : "-1 (BOOST, derived)")
        << "  Z(σ,π,s,p,t)=(" << Z_sigma_ << "," << Z_pi_ << "," << Z_s_
        << "," << Z_p_ << "," << Z_t_ << ")"
        << "  c=Z/λ²: (" << c_sigma_ << "," << c_pi_ << "," << c_s_
@@ -54,23 +56,27 @@ class AuxFierzShift {
     return os.str();
   }
 
-  // σ → σ - (Z_σ/λ²)·Lap_code(σ)  for each aux field.
+  // σ → σ + sign·(Z_σ/λ²)·Lap_code(σ)  for each aux field.
+  // sign = -1 (default) matches the COV-derivation result (high-k BOOST in σ).
+  // sign = +1 (TXQCD_FIERZ_LAP_SIGN=+1) is the empirical sign-flipped form
+  // (high-k DAMP in σ).  Set via FromEnv based on TXQCD_FIERZ_LAP_SIGN.
   void Apply(TXQCDField &U) const {
-    if (c_sigma_ != 0.0) U.sigma = U.sigma - c_sigma_ * lap(U.sigma);
-    if (c_pi_    != 0.0) U.pi    = U.pi    - c_pi_    * lap(U.pi);
-    if (c_s_     != 0.0) U.s     = U.s     - c_s_     * lap(U.s);
-    if (c_p_     != 0.0) U.p     = U.p     - c_p_     * lap(U.p);
-    if (c_t_     != 0.0) U.t     = U.t     - c_t_     * lap(U.t);
+    if (c_sigma_ != 0.0) U.sigma = U.sigma + (sign_ * c_sigma_) * lap(U.sigma);
+    if (c_pi_    != 0.0) U.pi    = U.pi    + (sign_ * c_pi_)    * lap(U.pi);
+    if (c_s_     != 0.0) U.s     = U.s     + (sign_ * c_s_)     * lap(U.s);
+    if (c_p_     != 0.0) U.p     = U.p     + (sign_ * c_p_)     * lap(U.p);
+    if (c_t_     != 0.0) U.t     = U.t     + (sign_ * c_t_)     * lap(U.t);
   }
 
-  // Apply the chain rule for the force: F_σ = F_σ_eff - (Z_σ/λ²)·Lap(F_σ_eff).
-  // Same operator as Apply() because Lap_code is self-adjoint.
+  // Apply the chain rule for the force: F_σ = F_σ_eff + sign·(Z_σ/λ²)·Lap(F_σ_eff).
+  // Same sign as Apply() because Lap_code is self-adjoint and the chain rule
+  // is symmetric.
   void ApplyToForce(TXQCDField &dSdU) const {
-    if (c_sigma_ != 0.0) dSdU.sigma = dSdU.sigma - c_sigma_ * lap(dSdU.sigma);
-    if (c_pi_    != 0.0) dSdU.pi    = dSdU.pi    - c_pi_    * lap(dSdU.pi);
-    if (c_s_     != 0.0) dSdU.s     = dSdU.s     - c_s_     * lap(dSdU.s);
-    if (c_p_     != 0.0) dSdU.p     = dSdU.p     - c_p_     * lap(dSdU.p);
-    if (c_t_     != 0.0) dSdU.t     = dSdU.t     - c_t_     * lap(dSdU.t);
+    if (c_sigma_ != 0.0) dSdU.sigma = dSdU.sigma + (sign_ * c_sigma_) * lap(dSdU.sigma);
+    if (c_pi_    != 0.0) dSdU.pi    = dSdU.pi    + (sign_ * c_pi_)    * lap(dSdU.pi);
+    if (c_s_     != 0.0) dSdU.s     = dSdU.s     + (sign_ * c_s_)     * lap(dSdU.s);
+    if (c_p_     != 0.0) dSdU.p     = dSdU.p     + (sign_ * c_p_)     * lap(dSdU.p);
+    if (c_t_     != 0.0) dSdU.t     = dSdU.t     + (sign_ * c_t_)     * lap(dSdU.t);
   }
 
   // Construct from env vars: TXQCD_FIERZ_LAP=1 to enable; reuses
@@ -85,12 +91,17 @@ class AuxFierzShift {
     const char *enabled = std::getenv("TXQCD_FIERZ_LAP");
     bool on = enabled && *enabled && std::atoi(enabled);
     if (!on) return AuxFierzShift(lambda, 0, 0, 0, 0, 0);
+    RealD sign = -1.0;
+    if (const char *s = std::getenv("TXQCD_FIERZ_LAP_SIGN"); s && *s) {
+      sign = (std::atof(s) > 0) ? +1.0 : -1.0;
+    }
     return AuxFierzShift(lambda,
                          readZ("SIGMA_KINETIC_Z"),
                          readZ("PI_KINETIC_Z"),
                          readZ("S_KINETIC_Z"),
                          readZ("P_KINETIC_Z"),
-                         readZ("T_KINETIC_Z"));
+                         readZ("T_KINETIC_Z"),
+                         sign);
   }
 
  private:
@@ -105,6 +116,7 @@ class AuxFierzShift {
   }
 
   RealD c_sigma_, c_pi_, c_s_, c_p_, c_t_;  // Z/λ² for each aux
+  RealD sign_;                                // +1 (damp) or -1 (boost, default)
   RealD lambda_;                              // kept for logging
   RealD Z_sigma_, Z_pi_, Z_s_, Z_p_, Z_t_;   // kept for logging
 };
