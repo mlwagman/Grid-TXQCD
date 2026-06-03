@@ -7,6 +7,7 @@
 #include <Grid/qcd/action/txqcd/AuxGaussianAction.h>
 #include <Grid/qcd/action/txqcd/AuxKineticAction.h>
 #include <Grid/qcd/action/txqcd/AuxKineticFilter.h>
+#include <Grid/qcd/action/txqcd/AuxFierzShift.h>
 #include <Grid/qcd/action/txqcd/GaugeActionAdapter.h>
 #include <Grid/qcd/action/txqcd/TXQCDDeltaOp.h>
 // TXQCDWilsonOp.h depends on WilsonFermion (Fermion.h), which is pulled in
