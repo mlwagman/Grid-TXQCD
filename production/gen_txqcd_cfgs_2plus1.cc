@@ -390,6 +390,18 @@ int main(int argc, char **argv) {
             << " T_KINETIC_Z=" << Z_t_kin
             << (use_aux_kinetic ? " (ACTIVE)" : " (inactive)") << std::endl;
 
+  // Fierz-preserving σ_eff = σ - (Z/λ²)·Lap(σ) inside the Dirac operator.
+  // When the aux kinetic term is active, vanilla TXQCD's σ-mediated 4-fermion
+  // coupling becomes nonlocal 1/(λ²+Z·k̂²) and can no longer be Fierz-reduced
+  // to a local mass shift.  TXQCD_FIERZ_LAP=1 enables a wrapper around the
+  // TXQCD fermion actions that replaces σ with σ_eff inside the Dirac op and
+  // applies the matching Lap chain rule on the force.  See
+  // [[fierz-lap-shift]] memory and fierz_lap_shift.tex for the derivation.
+  AuxFierzShift fierz_shift = AuxFierzShift::FromEnv(lambda_runtime);
+  bool use_fierz_lap = fierz_shift.active();
+  std::cout << GridLogMessage << fierz_shift.LogParameters()
+            << (use_fierz_lap ? " (ACTIVE)" : " (inactive)") << std::endl;
+
   // Hasenbusch mass preconditioning (HASEN_DM env var).  When HASEN_DM > 0,
   // split |det M_light| into |det M_heavy| * |det M_light / M_heavy| with
   // mass_heavy = mass_light + HASEN_DM.  Heavy mass → better-conditioned CG,
@@ -917,19 +929,44 @@ int main(int argc, char **argv) {
             << "  AUX_MULT=" << aux_mult << std::endl;
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
+
+  // Stable storage for FierzShiftedAction wrappers — must outlive L1 since the
+  // ActionLevel holds raw pointers.  Built ONCE per underlying TXQCD action so
+  // L1 and diag_actions share the same instance and report consistent
+  // diagnostics.  Inactive shift returns the underlying pointer unchanged.
+  std::vector<std::unique_ptr<FierzShiftedAction>> fierz_wrappers;
+  auto wrap = [&](Action<TXQCDField> *a) -> Action<TXQCDField> * {
+    if (!use_fierz_lap) return a;
+    fierz_wrappers.emplace_back(std::make_unique<FierzShiftedAction>(*a, fierz_shift));
+    return fierz_wrappers.back().get();
+  };
+
+  // Pre-wrap every TXQCD fermion action exactly once.  QCDActionAdapter actions
+  // (strange) are NOT wrapped because they're pure QCD and don't depend on σ.
+  Action<TXQCDField> *PF_w        = wrap(PF);
+  Action<TXQCDField> *PF_heavy_w  = wrap(&PF_heavy);
+  Action<TXQCDField> *PF_ratio_w  = wrap(&PF_ratio);
+  Action<TXQCDField> *LogDet_w    = wrap(&LogDet);
+  Action<TXQCDField> *ladder_top_w = nullptr;
+  std::vector<Action<TXQCDField> *> ladder_ratio_w;
+  if (use_ladder) {
+    ladder_top_w = wrap(ladder_rational.get());
+    for (auto &r : ladder_ratios) ladder_ratio_w.push_back(wrap(r.get()));
+  }
+
   if (use_ladder) {
     // Heaviest rational first, then ratios in order (light side to heavy side).
-    L1.push_back(ladder_rational.get());
-    for (auto &r : ladder_ratios) L1.push_back(r.get());
+    L1.push_back(ladder_top_w);
+    for (auto *r : ladder_ratio_w) L1.push_back(r);
   } else if (hasen_dm > 0.0) {
-    L1.push_back(&PF_heavy);
-    L1.push_back(&PF_ratio);
+    L1.push_back(PF_heavy_w);
+    L1.push_back(PF_ratio_w);
   } else {
-    L1.push_back(PF);
+    L1.push_back(PF_w);
   }
-  L1.push_back(&LogDet);
-  L1.push_back(&StrangeLogDetAdapter);
-  L1.push_back(&StrangeSchurAdapter);
+  L1.push_back(LogDet_w);
+  L1.push_back(&StrangeLogDetAdapter);   // QCD — no σ dependence
+  L1.push_back(&StrangeSchurAdapter);    // QCD — no σ dependence
   ActionLevel<TXQCDField, Reps> L2(gauge_mult);
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
@@ -984,19 +1021,21 @@ int main(int argc, char **argv) {
   TXQCDCheckpointer ckpt(CPp);
 
   std::vector<TxqcdDiag::ActionRef> diag_actions;
+  // Use the wrapped pointers so per-action force/Fdt diagnostics match what
+  // the integrator actually evaluates.
   if (use_ladder) {
-    diag_actions.push_back({"PseudoFermionLadder_top", ladder_rational.get()});
-    for (size_t i = 0; i < ladder_ratios.size(); ++i) {
+    diag_actions.push_back({"PseudoFermionLadder_top", ladder_top_w});
+    for (size_t i = 0; i < ladder_ratio_w.size(); ++i) {
       diag_actions.push_back(
-          {"PseudoFermionLadder_ratio" + std::to_string(i), ladder_ratios[i].get()});
+          {"PseudoFermionLadder_ratio" + std::to_string(i), ladder_ratio_w[i]});
     }
   } else if (hasen_dm > 0.0) {
-    diag_actions.push_back({"PseudoFermionHeavy", &PF_heavy});
-    diag_actions.push_back({"PseudoFermionRatio", &PF_ratio});
+    diag_actions.push_back({"PseudoFermionHeavy", PF_heavy_w});
+    diag_actions.push_back({"PseudoFermionRatio", PF_ratio_w});
   } else {
-    diag_actions.push_back({"PseudoFermion", PF});
+    diag_actions.push_back({"PseudoFermion", PF_w});
   }
-  diag_actions.push_back({"LogDet", &LogDet});
+  diag_actions.push_back({"LogDet", LogDet_w});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
   if (use_aux_kinetic) diag_actions.push_back({"AuxKinetic", &AuxKinAction});
   diag_actions.push_back({"StrangeLogDet", &StrangeLogDetAdapter});

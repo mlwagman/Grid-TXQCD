@@ -1,19 +1,16 @@
 // FD test for AuxFierzShift + FierzShiftedAction.
 //
-// We wrap AuxiliaryFieldGaussianAction (a known-good aux quadratic) in
-// FierzShiftedAction and verify:
-//   1. At Z=0 the wrapped action reproduces the unwrapped one bit-exactly.
-//   2. At Z>0, S(U+εY) - S(U-εY) / (2ε)  matches the wrapped action's
-//      ⟨deriv(U), Y⟩ inner product (storage / HMC metric) — confirming the
-//      Lap chain rule on the force is consistent with the σ_eff substitution
-//      in the action.
-//   3. Z=0 deriv == Z>0 deriv when Y has no Lap-component (e.g., uniform Y).
-//      [sanity — uniform Y gives Lap(Y)=0]
-//
-// The test only exercises σ; π/s/p/t follow the same code path.
+// Tests:
+//   1. Z=0 wrapped == unwrapped (bit-exact for AuxiliaryFieldGaussianAction).
+//   2. Z>0 FD == ⟨wrapped.deriv, Y⟩ for AuxiliaryFieldGaussianAction
+//      (generic chain-rule validation; underlying action analytical).
+//   3. Z>0 sanity: uniform Y → Lap(Y) = 0 → wrap.deriv == raw.deriv.
+//   4. Z>0 FD == ⟨wrapped.deriv, Y⟩ for TXQCDLogDetCloverEOAction
+//      (validation against a real σ-in-Dirac-op fermion action).
 
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/txqcd/Txqcd.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 
 using namespace Grid;
 
@@ -164,6 +161,42 @@ int main(int argc, char **argv) {
     RealD inner_raw  = HermInner(dS_raw.sigma,  Y.sigma);
     check("Z>0 uniform-Y: <wrap.dσ, Yconst> == <raw.dσ, Yconst>",
           inner_wrap, inner_raw, 1e-9);
+  }
+
+  // ---------- 4. Z>0 FD on TXQCDLogDetCloverEOAction (real fermion action) ----
+  {
+    GridRedBlackCartesian RBGrid(&Grid);
+    const RealD mass = -0.245;
+    const RealD csw  = 1.24930970916466;
+    TXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass, csw);
+    AuxFierzShift shift_on(lambda, Z, Z, Z, Z, Z);
+    FierzShiftedAction wrapped(LogDet, shift_on);
+
+    TXQCDField U(&Grid), Y(&Grid), Up(&Grid), Um(&Grid), dS(&Grid);
+    TXQCDCompositeImpl::HotConfiguration(pRNG, U);
+    TXQCDCompositeImpl::HotConfiguration(pRNG, Y);
+    // Y has no gauge component — only probe σ direction.
+    Y.U = Zero();
+
+    const RealD h = 1e-6;  // tighter h: LogDet S is cubic+ in σ
+    Up = U;
+    Up.sigma = U.sigma + h * Y.sigma;
+    Up.pi    = U.pi    + h * Y.pi;
+    Up.s     = U.s     + h * Y.s;
+    Up.p     = U.p     + h * Y.p;
+    Up.t     = U.t     + h * Y.t;
+    Um = U;
+    Um.sigma = U.sigma - h * Y.sigma;
+    Um.pi    = U.pi    - h * Y.pi;
+    Um.s     = U.s     - h * Y.s;
+    Um.p     = U.p     - h * Y.p;
+    Um.t     = U.t     - h * Y.t;
+
+    RealD num = (wrapped.S(Up) - wrapped.S(Um)) / (2.0 * h);
+    wrapped.deriv(U, dS);
+    RealD ana = CompositeInner(dS, Y);
+
+    check("Z>0: FD == <wrapped.deriv, Y>  [LogDet]", num, ana, 1e-4);
   }
 
   if (exitcode == 0) {
