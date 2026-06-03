@@ -38,23 +38,35 @@ RealD HermInner(LatticeMat &A, LatticeMat &B) {
 }
 
 RealD TensorInner(LatticeTField &A, LatticeTField &B) {
-  autoView(Av, A, CpuRead);
-  autoView(Bv, B, CpuRead);
+  // Sigma_{x, mu<nu} Re Tr(A_{mu,nu} * B_{mu,nu}).  Sigma_x via Grid's
+  // bit-deterministic sum() on a per-site complex scalar field — earlier
+  // `thread_for { RealD total += ... }` had a data race that produced
+  // non-deterministic, fractionally wrong partial sums (was masking the
+  // FD vs <deriv,Y> check at rel ~0.55).  See
+  // memory/reference_aux_t_factor_2_convention.md.
   GridBase *grid = A.Grid();
-  RealD total = 0.0;
-  thread_for(ss, grid->oSites(), {
-    for (int mu = 0; mu < Nd; ++mu) {
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        auto Am = Av[ss]()(mu, nu);
-        auto Bm = Bv[ss]()(mu, nu);
-        for (int i = 0; i < Nc; ++i)
-          for (int j = 0; j < Nc; ++j)
-            total += real(Reduce(Am(i, j) * Bm(j, i)));
+  Lattice<iScalar<iScalar<iScalar<vComplex>>>> site_inner(grid);
+  site_inner = Zero();
+  {
+    autoView(Av, A, CpuRead);
+    autoView(Bv, B, CpuRead);
+    autoView(sv, site_inner, CpuWrite);
+    thread_for(ss, grid->oSites(), {
+      vComplex acc; acc = Zero();
+      for (int mu = 0; mu < Nd; ++mu) {
+        for (int nu = mu + 1; nu < Nd; ++nu) {
+          auto Am = Av[ss]()(mu, nu);
+          auto Bm = Bv[ss]()(mu, nu);
+          for (int i = 0; i < Nc; ++i)
+            for (int j = 0; j < Nc; ++j)
+              acc = acc + Am(i, j) * Bm(j, i);
+        }
       }
-    }
-  });
-  grid->GlobalSum(total);
-  return total;
+      sv[ss]()()() = acc;
+    });
+  }
+  ComplexD total = TensorRemove(sum(site_inner));
+  return real(total);
 }
 
 RealD CompositeInner(TXQCDField &A, TXQCDField &B) {
