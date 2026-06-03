@@ -372,6 +372,31 @@ inline void load_txqcd_field(int traj,
                                   txqcd_cfg_dir() + "/ckpoint_lat",
                                   txqcd_cfg_dir() + "/ckpoint_rng", traj);
   }
+
+  // Fierz-preserving σ_eff = σ - (Z/λ²)·Lap(σ) substitution for the Dirac
+  // operator.  Applied after ALL other aux modifications (FFT filter,
+  // VAR_FRAC, FROZEN_MEAN, AUX_INIT iterations, ckpt load) so the σ that
+  // measurements consume is the corrected one.  Enabled via TXQCD_FIERZ_LAP=1;
+  // Z's come from the AUX_KINETIC_Z_{SIGMA,PI,S,P,T} meas env vars.  No force
+  // chain rule needed for measurements (they only compute propagators, no
+  // S-deriv on σ).  See [[fierz-lap-shift]] memory.
+  if (const char *e = std::getenv("TXQCD_FIERZ_LAP"); e && *e && std::atoi(e)) {
+    auto readZ = [](const char *name) -> RealD {
+      const char *v = std::getenv(name);
+      return (v && *v) ? std::atof(v) : 0.0;
+    };
+    AuxFierzShift shift(lambda,
+                        readZ("AUX_KINETIC_Z_SIGMA"),
+                        readZ("AUX_KINETIC_Z_PI"),
+                        readZ("AUX_KINETIC_Z_S"),
+                        readZ("AUX_KINETIC_Z_P"),
+                        readZ("AUX_KINETIC_Z_T"));
+    if (shift.active()) {
+      std::cout << GridLogMessage << "[meas] " << shift.LogParameters()
+                << " — applying σ_eff to aux fields" << std::endl;
+      shift.Apply(U);
+    }
+  }
 }
 
 }  // namespace TXQCDProduction

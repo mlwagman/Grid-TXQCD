@@ -409,6 +409,14 @@ int main(int argc, char **argv) {
             << " T_KINETIC_Z=" << Z_t_kin
             << (use_aux_kinetic ? " (ACTIVE)" : " (inactive)") << std::endl;
 
+  // Fierz-preserving σ_eff = σ - (Z/λ²)·Lap(σ) inside the Dirac op.  See
+  // [[fierz-lap-shift]] memory and fierz_lap_shift.tex.  Enabled via
+  // TXQCD_FIERZ_LAP=1; reuses the *_KINETIC_Z env vars for the Z values.
+  AuxFierzShift fierz_shift = AuxFierzShift::FromEnv(lambda_runtime);
+  bool use_fierz_lap = fierz_shift.active();
+  std::cout << GridLogMessage << fierz_shift.LogParameters()
+            << (use_fierz_lap ? " (ACTIVE)" : " (inactive)") << std::endl;
+
   // Nf=3 diag mass: {m_l, m_l, m_s}.  All three flavors share aux fields.
   // The TXQCDWilsonCloverRationalEOAction's per-flavor-mass overload takes
   // a std::array<RealD, TxqcdNf> directly; pass {mass_light, mass_light,
@@ -721,8 +729,22 @@ int main(int argc, char **argv) {
             << "  AUX_MULT=" << aux_mult << std::endl;
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  L1.push_back(PF);
-  L1.push_back(&LogDet);
+
+  // Fierz Lap shift wrapping — see gen_txqcd_cfgs_2plus1.cc for the same
+  // pattern.  Inactive shift returns the underlying pointer (bit-exact
+  // pass-through); active shift allocates one wrapper per action and stores
+  // it in fierz_wrappers (must outlive L1 + diag_actions).
+  std::vector<std::unique_ptr<FierzShiftedAction>> fierz_wrappers;
+  auto wrap = [&](Action<TXQCDField> *a) -> Action<TXQCDField> * {
+    if (!use_fierz_lap) return a;
+    fierz_wrappers.emplace_back(std::make_unique<FierzShiftedAction>(*a, fierz_shift));
+    return fierz_wrappers.back().get();
+  };
+  Action<TXQCDField> *PF_w     = wrap(PF);
+  Action<TXQCDField> *LogDet_w = wrap(&LogDet);
+
+  L1.push_back(PF_w);
+  L1.push_back(LogDet_w);
   ActionLevel<TXQCDField, Reps> L2(gauge_mult);
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
@@ -777,8 +799,9 @@ int main(int argc, char **argv) {
   TXQCDCheckpointer ckpt(CPp);
 
   std::vector<TxqcdDiag::ActionRef> diag_actions;
-  diag_actions.push_back({"PseudoFermion", PF});
-  diag_actions.push_back({"LogDet", &LogDet});
+  // Use wrapped pointers so diagnostics match what the integrator evaluates.
+  diag_actions.push_back({"PseudoFermion", PF_w});
+  diag_actions.push_back({"LogDet", LogDet_w});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
   if (use_aux_kinetic) diag_actions.push_back({"AuxKinetic", &AuxKinAction});
   diag_actions.push_back({"Gauge", &GaugeAction});
