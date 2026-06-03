@@ -35,6 +35,7 @@
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/smearing/StoutSmearing.h>
 #include <Grid/qcd/smearing/GaugeConfiguration.h>
+#include <Grid/algorithms/FFT.h>
 #include <cstdio>
 #include <cstring>
 
@@ -150,6 +151,166 @@ inline void load_txqcd_field(int traj,
                 << "  → <σ_aa>=" << Sigma / (lambda * lambda) << std::endl;
     }
     TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma);
+    // AUX_KINETIC_Z_SIGMA / AUX_KINETIC_Z_S: post-hoc kinetic-action filter.
+    // The drawn σ/s have local-Gaussian variance 1/λ².  Map to the
+    // kinetic-action variance 1/(λ²+Z·k̂²) by:
+    //   1. subtract the per-site mean (so the filter only touches fluct);
+    //   2. FFT to k-space;
+    //   3. multiply each mode by h(k) = sqrt(λ²/(λ²+Z·k̂²));
+    //   4. inverse FFT;
+    //   5. add the mean back.
+    // Result: σ-VEV unchanged (Σ/λ²), σ-fluctuations damped at high k̂²
+    // exactly as the kinetic action would in HMC.  Single-shot — does not
+    // need MCMC; valid because the local prior is gaussian + linear filter
+    // → still gaussian with the target covariance.
+    auto apply_kinetic = [&](auto &field, const auto &site_mean, RealD Z) {
+      typedef typename std::remove_reference_t<decltype(field)> FieldT;
+      FieldT mean_lat(field.Grid());
+      mean_lat = site_mean;
+      FieldT delta = field - mean_lat;
+      // FFT_all_dim forward.
+      GridCartesian *gridc = (GridCartesian *)field.Grid();
+      FFT theFFT(gridc);
+      FieldT delta_k(gridc);
+      theFFT.FFT_all_dim(delta_k, delta, FFT::forward);
+      // Filter in-place via accelerator_for.
+      Coordinate Ldim = gridc->_fdimensions;
+      RealD lam2 = lambda * lambda;
+      {
+        autoView(dkv, delta_k, CpuWrite);
+        // Compute h(k) at each site from its global coordinate.  Use site
+        // index → global coord helper.  For multi-SIMD, broadcast scalar.
+        thread_for(o, gridc->oSites(), {
+          // Walk through SIMD lanes; build a per-lane filter and apply.
+          typedef typename FieldT::vector_object::scalar_object Sobj;
+          typedef typename Sobj::scalar_type Stype;
+          const int Nsimd = gridc->iSites();
+          ExtractBuffer<Sobj> buf(Nsimd);
+          extract<typename FieldT::vector_object, Sobj>(dkv[o], buf);
+          for (int lane = 0; lane < Nsimd; ++lane) {
+            Coordinate gcoor;
+            gridc->RankIndexToGlobalCoor(gridc->ThisRank(), o, lane, gcoor);
+            RealD khat2 = 0.0;
+            for (int d = 0; d < Nd; ++d) {
+              RealD theta = M_PI * (RealD)gcoor[d] / (RealD)Ldim[d];
+              RealD s = std::sin(theta);
+              khat2 += 4.0 * s * s;
+            }
+            RealD h = std::sqrt(lam2 / (lam2 + Z * khat2));
+            buf[lane] = h * buf[lane];
+          }
+          merge<typename FieldT::vector_object, Sobj>(dkv[o], buf);
+        });
+      }  // release autoView lock before next FFT writes to delta_k
+      // Inverse FFT.  Grid's FFT_dim backward already includes 1/G per dim
+      // (see Grid/algorithms/FFT.h line ~321), so forward+backward already
+      // round-trips to the input — no extra normalization needed.
+      theFFT.FFT_all_dim(delta, delta_k, FFT::backward);
+      field = mean_lat + delta;
+    };
+    if (const char *zs = std::getenv("AUX_KINETIC_Z_SIGMA"); zs && *zs) {
+      RealD Z = std::atof(zs);
+      std::cout << GridLogMessage << "[AUX_KINETIC_Z_SIGMA] applying kinetic "
+                << "filter to σ with Z = " << Z
+                << " (h(k)=sqrt(λ²/(λ²+Z·k̂²)))" << std::endl;
+      TxqcdSiteSigma sigma_mean;
+      sigma_mean = Zero();
+      RealD sigma_diag = Sigma / (lambda * lambda);
+      for (int a = 0; a < TxqcdNf; ++a) sigma_mean()()(a, a) = sigma_diag;
+      apply_kinetic(U.sigma, sigma_mean, Z);
+    }
+    if (const char *zs = std::getenv("AUX_KINETIC_Z_S"); zs && *zs) {
+      RealD Z = std::atof(zs);
+      std::cout << GridLogMessage << "[AUX_KINETIC_Z_S] applying kinetic "
+                << "filter to s with Z = " << Z << std::endl;
+      TxqcdSiteS s_mean;
+      s_mean = Zero();
+      RealD s_diag = static_cast<RealD>(TxqcdNf) * Sigma /
+                     (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
+      for (int i = 0; i < Nc; ++i) s_mean()()(i, i) = s_diag;
+      apply_kinetic(U.s, s_mean, Z);
+    }
+    // π, p, t have zero mean — just filter with h(k), no mean to add back.
+    if (const char *zs = std::getenv("AUX_KINETIC_Z_PI"); zs && *zs) {
+      RealD Z = std::atof(zs);
+      std::cout << GridLogMessage << "[AUX_KINETIC_Z_PI] applying kinetic "
+                << "filter to π with Z = " << Z << std::endl;
+      typename LatticePiField::vector_object::scalar_object pi_zero;
+      pi_zero = Zero();
+      apply_kinetic(U.pi, pi_zero, Z);
+    }
+    if (const char *zs = std::getenv("AUX_KINETIC_Z_P"); zs && *zs) {
+      RealD Z = std::atof(zs);
+      std::cout << GridLogMessage << "[AUX_KINETIC_Z_P] applying kinetic "
+                << "filter to p with Z = " << Z << std::endl;
+      typename LatticePFieldC::vector_object::scalar_object p_zero;
+      p_zero = Zero();
+      apply_kinetic(U.p, p_zero, Z);
+    }
+    if (const char *zs = std::getenv("AUX_KINETIC_Z_T"); zs && *zs) {
+      RealD Z = std::atof(zs);
+      std::cout << GridLogMessage << "[AUX_KINETIC_Z_T] applying kinetic "
+                << "filter to t with Z = " << Z << std::endl;
+      typename LatticeTField::vector_object::scalar_object t_zero;
+      t_zero = Zero();
+      apply_kinetic(U.t, t_zero, Z);
+    }
+    // AUX_VAR_FRAC=<f>: scale the fluctuation about the mean by sqrt(f).
+    // f<1 reduces variance, f=0 → frozen mean.  Preserves the per-site mean
+    // exactly.  Used for the "mean-field + small noise" probe.  Applied
+    // BEFORE the FROZEN_MEAN reset so FROZEN_MEAN takes precedence.
+    if (const char *vf = std::getenv("AUX_VAR_FRAC"); vf && *vf) {
+      RealD f = std::atof(vf);
+      RealD scale = std::sqrt(std::max(f, 0.0));
+      std::cout << GridLogMessage << "[AUX_VAR_FRAC] scaling aux fluctuations by sqrt("
+                << f << ") = " << scale << " (mean preserved)" << std::endl;
+      // σ_new = σ_mean + scale·(σ_old − σ_mean).
+      // σ mean (per-flavor diagonal):
+      TxqcdSiteSigma sigma_mean;
+      sigma_mean = Zero();
+      RealD sigma_diag = Sigma / (lambda * lambda);
+      for (int a = 0; a < TxqcdNf; ++a) sigma_mean()()(a, a) = sigma_diag;
+      LatticeSigmaField sigma_mean_lat(U.sigma.Grid());
+      sigma_mean_lat = sigma_mean;
+      U.sigma = sigma_mean_lat + scale * (U.sigma - sigma_mean_lat);
+      // s mean (per-color diagonal):
+      TxqcdSiteS s_mean;
+      s_mean = Zero();
+      RealD s_diag = static_cast<RealD>(TxqcdNf) * Sigma /
+                     (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
+      for (int i = 0; i < Nc; ++i) s_mean()()(i, i) = s_diag;
+      LatticeSFieldC s_mean_lat(U.s.Grid());
+      s_mean_lat = s_mean;
+      U.s = s_mean_lat + scale * (U.s - s_mean_lat);
+      // π, p, t have zero mean → just scale.
+      U.pi = scale * U.pi;
+      U.p  = scale * U.p;
+      U.t  = scale * U.t;
+    }
+    // AUX_FROZEN_MEAN=1: replace the drawn (gaussian + mean) aux fields with
+    // their site-constant MEAN values only — no fluctuations.  Used to test
+    // the mean-field picture (σ as a static effective mass shift).
+    if (std::getenv("AUX_FROZEN_MEAN")) {
+      std::cout << GridLogMessage
+                << "[AUX_FROZEN_MEAN] setting σ=Σ/λ²·I, s=Σ/(√2·N_c·λ²)·I, "
+                << "π=p=t=0 at every site (no fluctuations)" << std::endl;
+      U.pi = Zero();
+      U.p  = Zero();
+      U.t  = Zero();
+      // σ: flavor-diagonal constant Σ/λ².
+      TxqcdSiteSigma sigma_mean;
+      sigma_mean = Zero();
+      RealD sigma_diag = Sigma / (lambda * lambda);
+      for (int a = 0; a < TxqcdNf; ++a) sigma_mean()()(a, a) = sigma_diag;
+      U.sigma = sigma_mean;
+      // s: color-diagonal constant N_f·Σ/(√2·N_c·λ²).
+      TxqcdSiteS s_mean;
+      s_mean = Zero();
+      RealD s_diag = static_cast<RealD>(TxqcdNf) * Sigma /
+                     (std::sqrt(2.0) * static_cast<RealD>(Nc) * lambda * lambda);
+      for (int i = 0; i < Nc; ++i) s_mean()()(i, i) = s_diag;
+      U.s = s_mean;
+    }
 
     // Optional self-consistent refinement using the FULL TXQCD operator.
     if (const char *ni = std::getenv("AUX_INIT_ITERATIONS"); ni && *ni) {

@@ -388,6 +388,27 @@ int main(int argc, char **argv) {
 
   AuxiliaryFieldGaussianAction AuxAction(lambda_runtime);
 
+  // Optional kinetic-term action for all 5 aux fields — mirrors the 2+1
+  // driver.  See gen_txqcd_cfgs_2plus1.cc and AuxKineticAction.h for the
+  // Fierz-preserving coefficient convention.
+  RealD Z_sigma_kin = 0.0, Z_pi_kin = 0.0, Z_s_kin = 0.0,
+        Z_p_kin = 0.0, Z_t_kin = 0.0;
+  if (const char *e = std::getenv("SIGMA_KINETIC_Z"); e && *e) Z_sigma_kin = std::atof(e);
+  if (const char *e = std::getenv("PI_KINETIC_Z");    e && *e) Z_pi_kin    = std::atof(e);
+  if (const char *e = std::getenv("S_KINETIC_Z");     e && *e) Z_s_kin     = std::atof(e);
+  if (const char *e = std::getenv("P_KINETIC_Z");     e && *e) Z_p_kin     = std::atof(e);
+  if (const char *e = std::getenv("T_KINETIC_Z");     e && *e) Z_t_kin     = std::atof(e);
+  bool use_aux_kinetic = (Z_sigma_kin != 0.0) || (Z_pi_kin != 0.0) ||
+                         (Z_s_kin != 0.0) || (Z_p_kin != 0.0) || (Z_t_kin != 0.0);
+  AuxiliaryFieldKineticAction AuxKinAction(Z_sigma_kin, Z_pi_kin, Z_s_kin,
+                                            Z_p_kin, Z_t_kin);
+  std::cout << GridLogMessage << "[AuxKineticAction] SIGMA_KINETIC_Z=" << Z_sigma_kin
+            << " PI_KINETIC_Z=" << Z_pi_kin
+            << " S_KINETIC_Z=" << Z_s_kin
+            << " P_KINETIC_Z=" << Z_p_kin
+            << " T_KINETIC_Z=" << Z_t_kin
+            << (use_aux_kinetic ? " (ACTIVE)" : " (inactive)") << std::endl;
+
   // Nf=3 diag mass: {m_l, m_l, m_s}.  All three flavors share aux fields.
   // The TXQCDWilsonCloverRationalEOAction's per-flavor-mass overload takes
   // a std::array<RealD, TxqcdNf> directly; pass {mass_light, mass_light,
@@ -514,6 +535,7 @@ int main(int argc, char **argv) {
                 << std::endl;
     }
     TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+    TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
 
     // Self-consistent iteration: for chroma-cfg starts the bare auto-measure
     // under-shoots the equilibrium aux mean by ~2× (σ-back-reaction on ⟨ψ̄ψ⟩
@@ -573,6 +595,7 @@ int main(int argc, char **argv) {
                   << std::endl;
         TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
       }
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   } else {
     sRNG.SeedFixedIntegers({1 + seed_offset, 2 + seed_offset, 3 + seed_offset,
@@ -672,6 +695,7 @@ int main(int argc, char **argv) {
       }
       // Step 3: fill aux fields (σ, π, s, p, t) using the measured Σ.
       TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   }
 
@@ -703,6 +727,7 @@ int main(int argc, char **argv) {
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
   L3.push_back(&AuxAction);
+  if (use_aux_kinetic) L3.push_back(&AuxKinAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
   Aset.push_back(L2);
@@ -755,6 +780,7 @@ int main(int argc, char **argv) {
   diag_actions.push_back({"PseudoFermion", PF});
   diag_actions.push_back({"LogDet", &LogDet});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
+  if (use_aux_kinetic) diag_actions.push_back({"AuxKinetic", &AuxKinAction});
   diag_actions.push_back({"Gauge", &GaugeAction});
   TxqcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, diag_actions,
                  Smear, Grid, RBGrid, pRNG);

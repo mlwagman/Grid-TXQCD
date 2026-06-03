@@ -364,6 +364,32 @@ int main(int argc, char **argv) {
 
   AuxiliaryFieldGaussianAction AuxAction(lambda_runtime);
 
+  // Optional kinetic-term action for all 5 aux fields (σ, π, s, p, t):
+  //   S_kin = (Z_σ/2) Σ_{x,μ} Tr[(σ(x+μ̂)-σ(x))²]   + same for π, s, p
+  //         +  Z_t    Σ_{x,μ} Tr[(t(x+μ̂)-t(x))²]   (note: 1·Z_t, mirrors quadratic 2·λ²)
+  // Decouples mean from variance: Z>0 damps high-momentum fluctuations of
+  // that field while preserving its VEV (zero for π/p/t, Σ/λ² for σ, etc.).
+  // Coefficients exactly mirror AuxGaussianAction with λ² → Z to preserve
+  // Fierz at finite a.  Env knobs: SIGMA_KINETIC_Z, PI_KINETIC_Z,
+  // S_KINETIC_Z, P_KINETIC_Z, T_KINETIC_Z (default 0 → no kinetic term).
+  RealD Z_sigma_kin = 0.0, Z_pi_kin = 0.0, Z_s_kin = 0.0,
+        Z_p_kin = 0.0, Z_t_kin = 0.0;
+  if (const char *e = std::getenv("SIGMA_KINETIC_Z"); e && *e) Z_sigma_kin = std::atof(e);
+  if (const char *e = std::getenv("PI_KINETIC_Z");    e && *e) Z_pi_kin    = std::atof(e);
+  if (const char *e = std::getenv("S_KINETIC_Z");     e && *e) Z_s_kin     = std::atof(e);
+  if (const char *e = std::getenv("P_KINETIC_Z");     e && *e) Z_p_kin     = std::atof(e);
+  if (const char *e = std::getenv("T_KINETIC_Z");     e && *e) Z_t_kin     = std::atof(e);
+  bool use_aux_kinetic = (Z_sigma_kin != 0.0) || (Z_pi_kin != 0.0) ||
+                         (Z_s_kin != 0.0) || (Z_p_kin != 0.0) || (Z_t_kin != 0.0);
+  AuxiliaryFieldKineticAction AuxKinAction(Z_sigma_kin, Z_pi_kin, Z_s_kin,
+                                            Z_p_kin, Z_t_kin);
+  std::cout << GridLogMessage << "[AuxKineticAction] SIGMA_KINETIC_Z=" << Z_sigma_kin
+            << " PI_KINETIC_Z=" << Z_pi_kin
+            << " S_KINETIC_Z=" << Z_s_kin
+            << " P_KINETIC_Z=" << Z_p_kin
+            << " T_KINETIC_Z=" << Z_t_kin
+            << (use_aux_kinetic ? " (ACTIVE)" : " (inactive)") << std::endl;
+
   // Hasenbusch mass preconditioning (HASEN_DM env var).  When HASEN_DM > 0,
   // split |det M_light| into |det M_heavy| * |det M_light / M_heavy| with
   // mass_heavy = mass_light + HASEN_DM.  Heavy mass → better-conditioned CG,
@@ -548,6 +574,11 @@ int main(int argc, char **argv) {
                 << std::endl;
     }
     TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+    // If a kinetic action is active (any *_KINETIC_Z env > 0), apply the
+    // FFT filter so the initial aux distribution matches the Fierz-correct
+    // joint quadratic+kinetic equilibrium at the chosen (λ, Z) point.  No
+    // extra thermalization needed.
+    TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
 
     // Optional: self-consistent iteration with TXQCD operator on top of the
     // initial Σ guess.  Each iteration refills aux from the previous Σ, then
@@ -607,6 +638,8 @@ int main(int argc, char **argv) {
                   << std::endl;
         TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
       }
+      // Re-apply kinetic filter on the final iteration's aux draw.
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   } else {
     sRNG.SeedFixedIntegers({1 + seed_offset, 2 + seed_offset, 3 + seed_offset,
@@ -707,6 +740,9 @@ int main(int argc, char **argv) {
       }
       // Step 3: fill aux fields (σ, π, s, p, t) using the measured Σ.
       TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+      // Apply kinetic FFT filter so weak-field start lands at the
+      // Fierz-correct (λ, Z) equilibrium distribution from the get-go.
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   }
 
@@ -898,6 +934,7 @@ int main(int argc, char **argv) {
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
   L3.push_back(&AuxAction);
+  if (use_aux_kinetic) L3.push_back(&AuxKinAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
   Aset.push_back(L2);
@@ -961,6 +998,7 @@ int main(int argc, char **argv) {
   }
   diag_actions.push_back({"LogDet", &LogDet});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
+  if (use_aux_kinetic) diag_actions.push_back({"AuxKinetic", &AuxKinAction});
   diag_actions.push_back({"StrangeLogDet", &StrangeLogDetAdapter});
   diag_actions.push_back({"StrangeSchurPF", &StrangeSchurAdapter});
   diag_actions.push_back({"Gauge", &GaugeAction});
