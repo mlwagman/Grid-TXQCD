@@ -1,5 +1,6 @@
 #include "params.h"
 #include "eig_diag.h"
+#include "aux_correlator.h"
 #include <cstdio>
 #include <cstring>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
@@ -61,6 +62,18 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
   // and #modes with |γ5·M|<zero_eps.  These are the sharp det-sign
   // diagnostics — immune to ± near-degenerate-pair relabeling.
   std::vector<RealD> eig_minabs_, eig_nnear_;
+
+  // Per-traj aux wall-wall correlators.  Computed every traj (collective
+  // sliceSum on every rank — see aux_correlator.h); accumulated here and
+  // flushed to h5 inside the rank-0 write block.  Outer dim = traj index
+  // since last write; inner dim already flat per channel (T, Nf²·T, or
+  // NtPairs·T).  Mirrors the schema of meas_aux_txqcd's per-cfg h5 except
+  // with the trajectory axis prepended.
+  std::vector<std::vector<ComplexD>> aux_C_sigma_, aux_C_pi_iso_,
+                                     aux_C_pi_ab_, aux_C_s_, aux_C_p_, aux_C_t_;
+  std::vector<std::vector<ComplexD>> aux_wall_sigma_, aux_wall_pi_tr_,
+                                     aux_wall_pi_ab_, aux_wall_s_,
+                                     aux_wall_p_, aux_wall_t_;
 
   TxqcdDiag(const std::string &prefix, int interval,
             std::vector<ActionRef> actions,
@@ -261,6 +274,24 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
       eig_nnear_.push_back((RealD)eig_nn);
     }
 
+    // Per-traj aux wall-wall correlators (collective: every rank).  Cost ≪1%
+    // of a trajectory.  Accumulated; flushed at meas_skip intervals below.
+    {
+      AuxWallCorrelators awc = ComputeAuxWallCorrelators(U);
+      aux_C_sigma_.push_back(std::move(awc.C_sigma));
+      aux_C_pi_iso_.push_back(std::move(awc.C_pi_iso));
+      aux_C_pi_ab_.push_back(std::move(awc.C_pi_ab_flat));
+      aux_C_s_.push_back(std::move(awc.C_s));
+      aux_C_p_.push_back(std::move(awc.C_p));
+      aux_C_t_.push_back(std::move(awc.C_t_flat));
+      aux_wall_sigma_.push_back(std::move(awc.wall_sigma));
+      aux_wall_pi_tr_.push_back(std::move(awc.wall_pi_tr));
+      aux_wall_pi_ab_.push_back(std::move(awc.wall_pi_ab_flat));
+      aux_wall_s_.push_back(std::move(awc.wall_s));
+      aux_wall_p_.push_back(std::move(awc.wall_p));
+      aux_wall_t_.push_back(std::move(awc.wall_t_flat));
+    }
+
     if (traj % interval_ == 0) {
       // Hdf5Writer is SERIAL — all MPI ranks racing to open the same file
       // throws H5::FileIException under file-locking.  Crashed b6.5 1283314
@@ -282,6 +313,21 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
         write(wr, "eig_g5M", eig_g5M_);
         write(wr, "eig_min_abs_g5M", eig_minabs_);
         write(wr, "eig_n_near_zero", eig_nnear_);
+        // Aux wall-wall correlators accumulated since last write
+        // (one row per trajectory; columns = T, Nf²·T, or NtPairs·T).
+        // Schema matches meas_aux_txqcd's per-cfg h5 with an outer traj axis.
+        write(wr, "aux_C_sigma", aux_C_sigma_);
+        write(wr, "aux_C_pi_iso", aux_C_pi_iso_);
+        write(wr, "aux_C_pi_ab", aux_C_pi_ab_);
+        write(wr, "aux_C_s", aux_C_s_);
+        write(wr, "aux_C_p", aux_C_p_);
+        write(wr, "aux_C_t", aux_C_t_);
+        write(wr, "aux_wall_sigma", aux_wall_sigma_);
+        write(wr, "aux_wall_pi_tr", aux_wall_pi_tr_);
+        write(wr, "aux_wall_pi_ab", aux_wall_pi_ab_);
+        write(wr, "aux_wall_s", aux_wall_s_);
+        write(wr, "aux_wall_p", aux_wall_p_);
+        write(wr, "aux_wall_t", aux_wall_t_);
         std::vector<std::string> names;
         for (auto &a : actions_) names.push_back(a.name);
         write(wr, "action_names", names);
@@ -293,6 +339,11 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
       fdt_avg_.clear(); fdt_max_.clear();
       eig_M2_.clear(); eig_g5M_.clear();
       eig_minabs_.clear(); eig_nnear_.clear();
+      aux_C_sigma_.clear(); aux_C_pi_iso_.clear(); aux_C_pi_ab_.clear();
+      aux_C_s_.clear(); aux_C_p_.clear(); aux_C_t_.clear();
+      aux_wall_sigma_.clear(); aux_wall_pi_tr_.clear();
+      aux_wall_pi_ab_.clear(); aux_wall_s_.clear();
+      aux_wall_p_.clear(); aux_wall_t_.clear();
     }
   }
 };
