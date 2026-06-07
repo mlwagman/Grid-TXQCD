@@ -177,6 +177,8 @@ int main(int argc, char **argv) {
         sfs.emplace_back(&Grid);
         xs.emplace_back(&Grid);
       }
+      static const bool no_gauss_smear =
+          std::getenv("NO_GAUSS_SMEAR") != nullptr;
       int j = 0;
       for (int spin = 0; spin < Ns; ++spin) {
         for (int col = 0; col < Nc; ++col, ++j) {
@@ -184,20 +186,24 @@ int main(int argc, char **argv) {
           SpinColourMatrix kron; kron = 1.0;
           pokeSite(kron, srcP, src);
           PropToFerm<WilsonImplR>(sfs[j], srcP, spin, col);
-          CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, sfs[j],
-                                                           gauss_width, gauss_niter, Nd - 1);
+          if (!no_gauss_smear)
+            CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, sfs[j],
+                                                             gauss_width, gauss_niter, Nd - 1);
         }
       }
       solver.solve_multi(sfs, xs);
       j = 0;
       for (int spin = 0; spin < Ns; ++spin) {
         for (int col = 0; col < Nc; ++col, ++j) {
-          CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, xs[j],
-                                                           gauss_width, gauss_niter, Nd - 1);
+          if (!no_gauss_smear)
+            CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, xs[j],
+                                                             gauss_width, gauss_niter, Nd - 1);
           FermToProp<WilsonImplR>(S, xs[j], spin, col);
         }
       }
     } else {
+      static const bool no_gauss_smear =
+          std::getenv("NO_GAUSS_SMEAR") != nullptr;
       for (int spin = 0; spin < Ns; ++spin) {
         for (int col = 0; col < Nc; ++col) {
           LatticePropagator srcP(&Grid);
@@ -209,16 +215,16 @@ int main(int argc, char **argv) {
           LatticeFermion sf(&Grid), x(&Grid);
           PropToFerm<WilsonImplR>(sf, srcP, spin, col);
 
-          // Gaussian smear source
-          CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, sf,
-                                                           gauss_width, gauss_niter, Nd - 1);
+          if (!no_gauss_smear)
+            CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, sf,
+                                                             gauss_width, gauss_niter, Nd - 1);
 
           x = Zero();
           solver.solve(sf, x);
 
-          // Gaussian smear sink
-          CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, x,
-                                                           gauss_width, gauss_niter, Nd - 1);
+          if (!no_gauss_smear)
+            CovariantSmearing<PeriodicGimplR>::GaussianSmear(U_src_links, x,
+                                                             gauss_width, gauss_niter, Nd - 1);
 
           FermToProp<WilsonImplR>(S, x, spin, col);
         }
@@ -312,6 +318,10 @@ int main(int argc, char **argv) {
   }
 
   std::string outfile = qcd_data_dir() + "/conn_qcd_" + std::to_string(traj) + ".h5";
+  // avgPlaquette is an MPI collective — must be called on ALL ranks before
+  // entering the IsBoss-only h5 write block (otherwise rank 0 deadlocks
+  // waiting for ranks 1..N to join its Allreduce).
+  RealD plaq_for_h5 = WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu);
   if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
     // All averaged correlators are in SOURCE-RELATIVE TIME with APBC sign.
@@ -335,7 +345,7 @@ int main(int argc, char **argv) {
     if (use_time_reversed)
       write(wr, "nucleon_tr_per_src_lat", all_nucleon_tr);
     write(wr, "traj", traj);
-    write(wr, "plaq", WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
+    write(wr, "plaq", plaq_for_h5);
     {
       // Per-cfg source-grid origin shift (see params.h src_grid_origin).
       Coordinate s = src_grid_origin(traj);

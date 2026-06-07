@@ -1,135 +1,7 @@
 #include "params.h"
+#include "aux_correlator.h"
 
 using namespace TXQCDProduction;
-
-// ---- Slice helpers --------------------------------------------------------
-// All return one complex per global timeslice (sliceSum is a Grid collective).
-
-// Σ_{x} (Tr_flavor of a flavor-Hermitian aux at site x), per t.
-static std::vector<ComplexD>
-SliceSumFlavorTrace(const LatticeSigmaField &F) {
-  GridBase *g = F.Grid();
-  LatticeComplex tr(g);
-  tr = trace(F);
-  std::vector<TComplex> sl;
-  sliceSum(tr, sl, Nd - 1);
-  std::vector<ComplexD> out(sl.size());
-  for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
-  return out;
-}
-
-// Σ_{x} (Tr_color of a color-Hermitian aux at site x), per t.
-static std::vector<ComplexD>
-SliceSumColorTrace(const LatticeSFieldC &F) {
-  GridBase *g = F.Grid();
-  LatticeComplex tr(g);
-  tr = trace(F);
-  std::vector<TComplex> sl;
-  sliceSum(tr, sl, Nd - 1);
-  std::vector<ComplexD> out(sl.size());
-  for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
-  return out;
-}
-
-// Σ_{x} π_ab(x) per (a,b,t), shape [Nf²][T] flat (row-major a*Nf+b).
-static std::vector<std::vector<ComplexD>>
-SliceSumPiAll(const LatticePiField &piF) {
-  GridBase *g = piF.Grid();
-  int T = g->GlobalDimensions()[Nd - 1];
-  const int Nf2 = TxqcdNf * TxqcdNf;
-  std::vector<std::vector<ComplexD>> out(Nf2, std::vector<ComplexD>(T));
-  for (int a = 0; a < TxqcdNf; ++a) {
-    for (int b = 0; b < TxqcdNf; ++b) {
-      LatticeComplex piab(g);
-      piab = PeekIndex<2>(piF, a, b);
-      std::vector<TComplex> sl;
-      sliceSum(piab, sl, Nd - 1);
-      for (int t = 0; t < T; ++t)
-        out[a * TxqcdNf + b][t] = TensorRemove(sl[t]);
-    }
-  }
-  return out;
-}
-
-// Σ_{x} Tr_color t_{μν}(x), one channel per antisymmetric (μ,ν) pair, per t.
-// Returns 6 channels for Nd=4 (pairs: 01,02,03,12,13,23) in row-major order.
-static std::vector<std::vector<ComplexD>>
-SliceSumTAll(const LatticeTField &tF) {
-  GridBase *g = tF.Grid();
-  int T = g->GlobalDimensions()[Nd - 1];
-  const int Npairs = Nd * (Nd - 1) / 2;
-  std::vector<std::vector<ComplexD>> out(Npairs, std::vector<ComplexD>(T));
-  int idx = 0;
-  for (int mu = 0; mu < Nd; ++mu) {
-    for (int nu = mu + 1; nu < Nd; ++nu, ++idx) {
-      auto t_munu = PeekIndex<1>(tF, mu, nu);
-      LatticeComplex tr(g);
-      tr = trace(reinterpret_cast<const LatticeColourMatrix &>(t_munu));
-      std::vector<TComplex> sl;
-      sliceSum(tr, sl, Nd - 1);
-      for (int t = 0; t < T; ++t)
-        out[idx][t] = TensorRemove(sl[t]);
-    }
-  }
-  return out;
-}
-
-// ---- Correlator + vacuum subtraction --------------------------------------
-//
-// s[t] = Σ_{spatial x} O(x,t), a spatial volume sum.  Note <s[t]> = V3·<O>.
-// Cross-correlator:
-//   C_AB(τ) ≡ (1/V4)·Σ_{t0} s_A(t0+τ)·s_B(t0)*  -- matches the original code.
-// Vacuum (disconnected) piece:
-//   C_AB_disc = (1/V4)·T·V3²·<O_A>·<O_B>* = V3·<O_A><O_B>*
-//             = (1/V3) · vev_slice_A · conj(vev_slice_B),    V3 = V4/T,
-//   where vev_slice = (1/T)·Σ_t s[t] ≈ V3·<O>.
-// (Per-cfg vac-sub helpers retained for potential reuse but no longer wired
-//  to outputs — per-cfg subtraction is biased; analysis does ensemble-mean
-//  vac-sub from the per-cfg vev_*_slice values saved alongside C_raw.)
-
-static std::vector<ComplexD>
-CorrelatorFromSlice(const std::vector<ComplexD> &sA,
-                    const std::vector<ComplexD> &sB,
-                    RealD V4) {
-  int T = (int)sA.size();
-  std::vector<ComplexD> C(T, 0.0);
-  for (int dt = 0; dt < T; ++dt)
-    for (int t0 = 0; t0 < T; ++t0)
-      C[dt] += sA[(t0 + dt) % T] * conjugate(sB[t0]);
-  for (auto &c : C) c /= V4;
-  return C;
-}
-
-static std::vector<ComplexD>
-CorrelatorFromSlice(const std::vector<ComplexD> &s, RealD V4) {
-  return CorrelatorFromSlice(s, s, V4);
-}
-
-static ComplexD SliceMean(const std::vector<ComplexD> &s) {
-  ComplexD acc = 0.0;
-  for (auto v : s) acc += v;
-  return acc / RealD(s.size());
-}
-
-static std::vector<ComplexD>
-VacSubtractCorrelator(const std::vector<ComplexD> &C_raw,
-                      ComplexD vev_slice_A, ComplexD vev_slice_B,
-                      RealD V3) {
-  std::vector<ComplexD> out = C_raw;
-  ComplexD disc = vev_slice_A * conjugate(vev_slice_B) / V3;
-  for (auto &c : out) c -= disc;
-  return out;
-}
-
-static std::vector<ComplexD>
-VacSubtractCorrelator(const std::vector<ComplexD> &C_raw,
-                      ComplexD vev_slice, RealD V3) {
-  return VacSubtractCorrelator(C_raw, vev_slice, vev_slice, V3);
-}
-
-static void Scale(std::vector<ComplexD> &v, RealD c) {
-  for (auto &x : v) x *= c;
-}
 
 // ---- Main -----------------------------------------------------------------
 
@@ -180,76 +52,10 @@ int main(int argc, char **argv) {
                                 txqcd_cfg_dir() + "/ckpoint_lat",
                                 txqcd_cfg_dir() + "/ckpoint_rng", traj);
 
-  // =====================================================================
-  // Channel computations.
-  //
-  // For each channel, we save 4 quantities:
-  //   <ch>_C_raw     : λ⁴ · C(τ) (raw correlator, includes vacuum disconnected piece)
-  //   <ch>_vev_slice : (1/T)·Σ_t s[t]  ≡  V3·<O>  — saved per cfg so analysis
-  //   <ch>_vev_slice : (1/T)·Σ_t s[t]  ≡  V3·<O> (single complex scalar)
-  //   <ch>_vev_per_site : vev_slice / V3  ≡  <O> (single complex scalar)
-  //
-  // The λ⁴ prefactor matches the original code's convention.  All time
-  // dimensions are length T.
-  // =====================================================================
-
-  // ----- sigma channel (Tr_flavor σ) ---------------------------------------
-  std::vector<ComplexD> sig_tr  = SliceSumFlavorTrace(U.sigma);
-  std::vector<ComplexD> C_sig   = CorrelatorFromSlice(sig_tr, V4);
-  ComplexD              vev_sig = SliceMean(sig_tr);
-  Scale(C_sig, lam4);
-
-  // ----- pi iso-triplet channel (λ⁴ (Σ_ab C_{ab,ab} - C_TrTr)) -----------
-  auto                  pi_all  = SliceSumPiAll(U.pi);
-  std::vector<ComplexD> pi_tr   = SliceSumFlavorTrace(U.pi);
-  std::vector<ComplexD> C_disc  = CorrelatorFromSlice(pi_tr, V4);
-  ComplexD              vev_pi_tr = SliceMean(pi_tr);
-
-  std::vector<ComplexD> C_total_raw(T, 0.0);
-  std::vector<ComplexD> vev_pi_ab(TxqcdNf * TxqcdNf, 0.0);
-  std::vector<std::vector<ComplexD>> C_pi_ab_raw(TxqcdNf * TxqcdNf);
-  for (int ab = 0; ab < TxqcdNf * TxqcdNf; ++ab) {
-    auto C_ab    = CorrelatorFromSlice(pi_all[ab], V4);
-    vev_pi_ab[ab] = SliceMean(pi_all[ab]);
-    for (int t = 0; t < T; ++t) C_total_raw[t] += C_ab[t];
-    C_pi_ab_raw[ab] = std::move(C_ab);
-  }
-  std::vector<ComplexD> C_pi_raw(T);
-  for (int t = 0; t < T; ++t)
-    C_pi_raw[t] = lam4 * (C_total_raw[t] - C_disc[t]);
-  for (int ab = 0; ab < TxqcdNf * TxqcdNf; ++ab)
-    Scale(C_pi_ab_raw[ab], lam4);
-  std::vector<ComplexD> C_pi_ab_raw_flat(TxqcdNf * TxqcdNf * T);
-  for (int ab = 0; ab < TxqcdNf * TxqcdNf; ++ab)
-    for (int t = 0; t < T; ++t)
-      C_pi_ab_raw_flat[ab * T + t] = C_pi_ab_raw[ab][t];
-
-  // ----- s channel (Tr_color s) --------------------------------------------
-  std::vector<ComplexD> s_tr   = SliceSumColorTrace(U.s);
-  std::vector<ComplexD> C_s    = CorrelatorFromSlice(s_tr, V4);
-  ComplexD              vev_s  = SliceMean(s_tr);
-  Scale(C_s, lam4);
-
-  // ----- p channel (Tr_color p) --------------------------------------------
-  std::vector<ComplexD> p_tr   = SliceSumColorTrace(U.p);
-  std::vector<ComplexD> C_p    = CorrelatorFromSlice(p_tr, V4);
-  ComplexD              vev_p  = SliceMean(p_tr);
-  Scale(C_p, lam4);
-
-  // ----- t channels (Tr_color t_{μν}), 6 antisymmetric pairs ---------------
-  auto t_all = SliceSumTAll(U.t);
-  const int NtPairs = (int)t_all.size();
-  std::vector<ComplexD> vev_t(NtPairs);
-  std::vector<std::vector<ComplexD>> C_t_raw(NtPairs);
-  for (int p = 0; p < NtPairs; ++p) {
-    C_t_raw[p] = CorrelatorFromSlice(t_all[p], V4);
-    vev_t[p]   = SliceMean(t_all[p]);
-    Scale(C_t_raw[p], lam4);
-  }
-  std::vector<ComplexD> C_t_raw_flat(NtPairs * T);
-  for (int p = 0; p < NtPairs; ++p)
-    for (int t = 0; t < T; ++t)
-      C_t_raw_flat[p * T + t] = C_t_raw[p][t];
+  // All channels computed via the shared helper (also used by the HMC
+  // diagnostic block in gen_txqcd_cfgs_2plus1.cc).  Slice sums are
+  // collective — must run on every rank.
+  AuxWallCorrelators awc = ComputeAuxWallCorrelators(U);
 
   // ----- Write h5 ----------------------------------------------------------
   std::string outfile = txqcd_data_dir() + "/aux_txqcd_" + std::to_string(traj) + ".h5";
@@ -257,34 +63,21 @@ int main(int argc, char **argv) {
     Hdf5Writer wr(outfile);
 
     // RAW correlators only — no per-cfg vac-sub (biased for zero-mean fields).
-    // Analysis must compute ensemble mean of vev_*_slice across cfgs and
-    // subtract |⟨vev⟩|²/V_3 · λ⁴ from C_raw.
-    // wall_*_slice keys store the per-cfg W(t) = Σ_x f(x,t) for each channel,
-    // length T (or [Nch, T] flattened for multi-component). Analysis computes
-    // ensemble mean ⟨W(t)⟩ across cfgs and forms
-    //   C_clean(τ) = C_raw(τ) - (λ⁴/V₃·T) Σ_t ⟨W(t+τ)⟩·⟨W*(t)⟩
-    // which is the proper ensemble-mean vac-sub.
-    std::vector<ComplexD> pi_ab_slice_flat(TxqcdNf * TxqcdNf * T);
-    for (int ab = 0; ab < TxqcdNf * TxqcdNf; ++ab)
-      for (int t = 0; t < T; ++t)
-        pi_ab_slice_flat[ab * T + t] = pi_all[ab][t];
-    std::vector<ComplexD> t_slice_flat(NtPairs * T);
-    for (int p = 0; p < NtPairs; ++p)
-      for (int t = 0; t < T; ++t)
-        t_slice_flat[p * T + t] = t_all[p][t];
+    // Analysis must compute ensemble mean of wall_*_slice across cfgs and
+    // form C_clean(τ) = C_raw(τ) - (λ⁴/V₃·T) Σ_t ⟨W(t+τ)⟩·⟨W*(t)⟩.
 
-    write(wr, "aux_pi_raw", C_pi_raw);
-    write(wr, "wall_pi_tr_slice", pi_tr);
-    write(wr, "aux_pi_ab_raw", C_pi_ab_raw_flat);
-    write(wr, "wall_pi_ab_slice", pi_ab_slice_flat);
-    write(wr, "aux_sigma_raw", C_sig);
-    write(wr, "wall_sigma_slice", sig_tr);
-    write(wr, "aux_s_raw", C_s);
-    write(wr, "wall_s_slice", s_tr);
-    write(wr, "aux_p_raw", C_p);
-    write(wr, "wall_p_slice", p_tr);
-    write(wr, "aux_t_raw", C_t_raw_flat);
-    write(wr, "wall_t_slice", t_slice_flat);
+    write(wr, "aux_pi_raw", awc.C_pi_iso);
+    write(wr, "wall_pi_tr_slice", awc.wall_pi_tr);
+    write(wr, "aux_pi_ab_raw", awc.C_pi_ab_flat);
+    write(wr, "wall_pi_ab_slice", awc.wall_pi_ab_flat);
+    write(wr, "aux_sigma_raw", awc.C_sigma);
+    write(wr, "wall_sigma_slice", awc.wall_sigma);
+    write(wr, "aux_s_raw", awc.C_s);
+    write(wr, "wall_s_slice", awc.wall_s);
+    write(wr, "aux_p_raw", awc.C_p);
+    write(wr, "wall_p_slice", awc.wall_p);
+    write(wr, "aux_t_raw", awc.C_t_flat);
+    write(wr, "wall_t_slice", awc.wall_t_flat);
 
     // metadata
     write(wr, "traj", traj);
