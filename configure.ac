@@ -927,6 +927,7 @@ AC_CONFIG_FILES(tests/qdpxx/Makefile)
 AC_CONFIG_FILES(tests/testu01/Makefile)
 AC_CONFIG_FILES(tests/sp2n/Makefile)
 AC_CONFIG_FILES(tests/txqcd/Makefile)
+AC_CONFIG_FILES(tests/dtxqcd/Makefile)
 AC_CONFIG_FILES(benchmarks/Makefile)
 AC_CONFIG_FILES(examples/Makefile)
 AC_OUTPUT
