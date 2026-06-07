@@ -1,0 +1,111 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+\title{Fierz-Preserving Aux-Kinetic Modification of the TXQCD Dirac Operator}
+\author{}
+\date{June 2026}
+\begin{document}
+\maketitle
+
+\section*{Setup}
+
+Vanilla TXQCD with a single auxiliary scalar $\sigma$:
+\[
+S_{\text{TXQCD}} = S_g[U] + \bar\psi (D + \sigma) \psi + \tfrac{\lambda^2}{2}\sigma^2 + \text{(other aux + Fierz cancellations)}.
+\]
+The standard claim is that, after integrating out $\sigma$ (and the other four aux fields $\pi, s, p, t$), the Fierz identity
+\[
+\sum_i \bar\psi \Gamma_i \psi\, \bar\psi \Gamma_i \psi \equiv 0
+\qquad\text{(point-wise field identity)}
+\]
+cancels the induced $(\bar\psi\psi)^2$ pieces and the residual theory is QCD with a shifted quark mass.
+
+\medskip
+We now add a kinetic term to each aux field:
+\[
+S_{\text{kin}} = \tfrac{Z}{2} (\partial \sigma)^2 + \text{same for } \pi, s, p, t,
+\]
+with $Z>0$ uniform across all five fields.  Without further modification, the $\sigma$ propagator becomes $1/(\lambda^2 + Z\hat k^2)$ instead of $1/\lambda^2$, the induced four-fermion coupling becomes nonlocal $1/(\lambda^2+Z\hat k^2)\,(\bar\psi\psi)^2$, and Fierz cancellation can no longer reduce it to a local mass shift.
+
+\section*{Modification}
+
+\paragraph{Claim.}  Replace $\sigma$ inside the Dirac operator by
+\[
+\boxed{
+\sigma_{\text{eff}}(x) \;=\; \sigma(x) \;-\; \frac{Z}{\lambda^2}\, \partial^2 \sigma(x)
+}
+\]
+(and analogously for $\pi, s, p, t$ with the \emph{same} $Z$ and $\lambda$), where $\partial^2$ is the scalar lattice Laplacian with eigenvalue $-\hat k^2$.  Then the full kinetic-extended TXQCD path integral is exactly equivalent to QCD (with a shifted mass via the standard mean-field shift) at finite lattice spacing.
+
+\section*{Derivation}
+
+Insert a dummy field with the kinetic action multiplied by its own determinant: trivially unity.  In the dummy's Gaussian, change variables
+\[
+\sigma \;\to\; \sigma - \bar\psi\psi / \lambda^2
+\qquad\text{(exact at finite lattice).}
+\]
+Expanding each piece:
+\begin{align*}
+\tfrac{\lambda^2}{2}\sigma_{\text{new}}^2 &= \tfrac{\lambda^2}{2}\sigma^2 - \sigma\,\bar\psi\psi + \frac{(\bar\psi\psi)^2}{2\lambda^2}, \\
+\tfrac{Z}{2}(\partial\sigma_{\text{new}})^2 &= \tfrac{Z}{2}(\partial\sigma)^2 - \frac{Z}{\lambda^2}\,\partial\sigma\cdot\partial(\bar\psi\psi) + \frac{Z}{2\lambda^4}\big(\partial(\bar\psi\psi)\big)^2.
+\end{align*}
+IBP on the kinetic cross term:
+\[
+-\frac{Z}{\lambda^2}\,\partial\sigma\cdot\partial(\bar\psi\psi) \;=\; +\frac{Z}{\lambda^2}\,(\partial^2\sigma)\,\bar\psi\psi.
+\]
+Combining the linear $\bar\psi\psi$ pieces:
+\[
+-\sigma\,\bar\psi\psi + \frac{Z}{\lambda^2}(\partial^2\sigma)\,\bar\psi\psi
+\;=\; -\Big(\sigma - \tfrac{Z}{\lambda^2}\partial^2\sigma\Big)\,\bar\psi\psi
+\;=\; -\sigma_{\text{eff}}\,\bar\psi\psi.
+\]
+Combining the quadratic $\bar\psi\psi$ pieces (IBP the second):
+\[
+\frac{(\bar\psi\psi)^2}{2\lambda^2} + \frac{Z}{2\lambda^4}\big(\partial(\bar\psi\psi)\big)^2
+\;=\; \frac{1}{2\lambda^2}\,\bar\psi\psi\,\Big(1 - \tfrac{Z}{\lambda^2}\partial^2\Big)\,\bar\psi\psi.
+\]
+Let $K = \lambda^2 - Z\partial^2$ (the $\sigma$ quadratic-form kernel) and $M = K/\lambda^2 = 1 - (Z/\lambda^2)\partial^2$.  The post-COV action is
+\[
+S = S_g + \bar\psi D \psi + \tfrac{1}{2}\sigma\,K\,\sigma - M\sigma\,\bar\psi\psi
++ \frac{1}{2\lambda^2}\bar\psi\psi\,(M)\,\bar\psi\psi.
+\]
+
+\section*{Fierz cancellation}
+
+Marginalizing $\sigma$ (Gaussian integral) gives an induced 4-fermion term
+\[
+-\tfrac{1}{2}\bar\psi\psi\,M^2 K^{-1}\,\bar\psi\psi
+\;=\; -\tfrac{1}{2}\bar\psi\psi\,\frac{K}{\lambda^4}\,\bar\psi\psi
+\;=\; -\frac{1}{2\lambda^2}\bar\psi\psi\,(M)\,\bar\psi\psi,
+\]
+which \emph{exactly cancels} the explicit four-fermion piece from the COV.  Net effect on the fermion action: $S_{\text{ferm}} = \bar\psi D \psi$ with the $\sigma$-mediated four-fermion contribution gone.
+
+Including all five aux fields with the same $Z$ and $\lambda$, this cancellation happens \emph{per aux field independently}.  No nonlocal Fierz combinations are needed: each aux field's induced and explicit four-fermion pieces are individually equal and opposite.
+
+\paragraph{Required conditions.}  Exact cancellation requires
+\begin{itemize}
+\item $\sigma_{\text{eff}}$ used for \emph{every} aux field that participates in the standard TXQCD Fierz identity,
+\item \emph{Same} $Z$ across all five fields (per-field $Z_i$ leaves a residual $\propto \sum_i Z_i\,\partial^2(\bar\psi\Gamma_i\psi)^2$, which is generically nonzero unless the $Z_i$ are equal).
+\end{itemize}
+
+\section*{Implementation notes}
+
+\begin{enumerate}
+\item Apply $\sigma_{\text{eff}}$ in every code path that feeds aux fields to the Dirac operator: \texttt{TXQCDWilsonCloverFermionEO::ImportFields}, \texttt{TXQCDLogDetCloverEOAction}, the QUDA hybrid force path, and all measurement code that loads aux fields.
+\item HMC force chain rule:
+\[
+F_\sigma(y) \;=\; F_{\sigma_{\text{eff}}}(y) \;-\; \frac{Z}{\lambda^2}\,\partial^2 F_{\sigma_{\text{eff}}}(y),
+\]
+since $\partial^2$ is self-adjoint.  Same single $\partial^2$ application as forward.
+\item Cost: one Cshift sum per aux field per \texttt{ImportFields} call — negligible at production scale.
+\item Frozen-aux limit ($Z\!\to\!\infty$, $\sigma$ uniform): $\partial^2\sigma = 0$ so $\sigma_{\text{eff}} = \sigma$; previously measured frozen results remain valid.
+\item At $Z=0$: $\sigma_{\text{eff}} = \sigma$ trivially; reduces to vanilla TXQCD.
+\end{enumerate}
+
+\section*{Comparison with the naive Hubbard--Stratonovich approach}
+
+Asking ``what $\sigma_{\text{eff}} = M\sigma$ makes $M^2 K^{-1} = 1/\lambda^2$ (point-like, $Z$-independent)?''  gives $M = \sqrt{K}/\lambda \approx 1 + (Z/(2\lambda^2))\hat k^2 + \cdots$ — a non-local square-root operator with leading coefficient $Z/(2\lambda^2)$.
+
+This is the \emph{unnecessarily strict} problem.  Fierz cancellation only needs $M^2 K^{-1}$ to factor as $(\text{local operator}) \times (\text{point-like})$, not be itself point-like.  The choice $M = K/\lambda^2$ satisfies this: $M^2 K^{-1} = K/\lambda^4 = (1/\lambda^2)\cdot(1 - (Z/\lambda^2)\partial^2)$ — a local differential operator times the point-like $1/\lambda^2$.  This gives the much cleaner $Z/\lambda^2$ coefficient (no factor of 2), is fully local in position space (single $\partial^2$, no inverse square root), and is exact at all $\hat k^2$.
+
+\end{document}

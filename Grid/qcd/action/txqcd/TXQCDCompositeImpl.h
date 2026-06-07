@@ -249,7 +249,15 @@ class TXQCDCompositeImpl {
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
                                    RealD lambda,
                                    const std::array<RealD, TxqcdNf> &Sigma) {
-    RealD s = 1.0 / lambda;
+    // Variance scale: optional decoupling from saddle scale via env knob.
+    // AUX_FLUCT_LAMBDA=X uses width 1/X for the gaussian fluctuation amplitude
+    // while keeping the saddle at Σ/λ² (set by the lambda argument). Use to
+    // initialize at one λ's mean but another λ's fluctuation magnitude.
+    RealD lambda_var = lambda;
+    if (const char *e = std::getenv("AUX_FLUCT_LAMBDA"); e && *e) {
+      lambda_var = std::atof(e);
+    }
+    RealD s = 1.0 / lambda_var;
     HermitianGaussian(pRNG, U.sigma); U.sigma = s * U.sigma;
     HermitianGaussian(pRNG, U.pi);    U.pi    = s * U.pi;
     HermitianGaussian(pRNG, U.s);     U.s     = s * U.s;

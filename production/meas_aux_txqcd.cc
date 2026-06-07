@@ -1,69 +1,9 @@
 #include "params.h"
+#include "aux_correlator.h"
 
 using namespace TXQCDProduction;
 
-static std::vector<ComplexD> SliceSumTrace(const LatticePiField &piF) {
-  GridBase *g = piF.Grid();
-  LatticeComplex tr(g);
-  tr = trace(piF);
-  std::vector<TComplex> sl;
-  sliceSum(tr, sl, Nd - 1);
-  std::vector<ComplexD> out(sl.size());
-  for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
-  return out;
-}
-
-static std::vector<std::vector<ComplexD>>
-SliceSumPiAll(const LatticePiField &piF) {
-  GridBase *g = piF.Grid();
-  int T = g->GlobalDimensions()[Nd - 1];
-  const int Nf2 = TxqcdNf * TxqcdNf;
-  std::vector<std::vector<ComplexD>> out(Nf2, std::vector<ComplexD>(T));
-  for (int a = 0; a < TxqcdNf; ++a) {
-    for (int b = 0; b < TxqcdNf; ++b) {
-      LatticeComplex piab(g);
-      piab = PeekIndex<2>(piF, a, b);
-      std::vector<TComplex> sl;
-      sliceSum(piab, sl, Nd - 1);
-      for (int t = 0; t < T; ++t)
-        out[a * TxqcdNf + b][t] = TensorRemove(sl[t]);
-    }
-  }
-  return out;
-}
-
-static std::vector<ComplexD> SliceSumSigmaTrace(const LatticeSigmaField &sigF) {
-  GridBase *g = sigF.Grid();
-  LatticeComplex tr(g);
-  tr = trace(sigF);
-  std::vector<TComplex> sl;
-  sliceSum(tr, sl, Nd - 1);
-  std::vector<ComplexD> out(sl.size());
-  for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
-  return out;
-}
-
-static std::vector<ComplexD> SliceSumColorTrace(const LatticeSFieldC &sF) {
-  GridBase *g = sF.Grid();
-  LatticeComplex tr(g);
-  tr = trace(sF);
-  std::vector<TComplex> sl;
-  sliceSum(tr, sl, Nd - 1);
-  std::vector<ComplexD> out(sl.size());
-  for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
-  return out;
-}
-
-static std::vector<ComplexD>
-CorrelatorFromSlice(const std::vector<ComplexD> &s, RealD V4) {
-  int T = (int)s.size();
-  std::vector<ComplexD> C(T, 0.0);
-  for (int dt = 0; dt < T; ++dt)
-    for (int t0 = 0; t0 < T; ++t0)
-      C[dt] += s[(t0 + dt) % T] * conjugate(s[t0]);
-  for (auto &c : C) c /= V4;
-  return C;
-}
+// ---- Main -----------------------------------------------------------------
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
@@ -89,43 +29,65 @@ int main(int argc, char **argv) {
   int T = latt[Nd - 1];
   RealD V4 = 1.0;
   for (int mu = 0; mu < Nd; ++mu) V4 *= latt[mu];
+  RealD V3 = V4 / RealD(T);
   const RealD lam4 = lambda * lambda * lambda * lambda;
+
+  // --- Startup banner ---
+  std::cout << GridLogMessage << "======== meas_aux_txqcd ========" << std::endl;
+  std::cout << GridLogMessage << "  traj    = " << traj << std::endl;
+  std::cout << GridLogMessage << "  lambda  = " << lambda
+            << "    lambda^4 = " << lam4 << std::endl;
+  std::cout << GridLogMessage << "  lattice = " << latt[0] << "x" << latt[1]
+            << "x" << latt[2] << "x" << latt[3]
+            << "    V4 = " << V4 << "    V3 = " << V3
+            << "    T = " << T << std::endl;
+  std::cout << GridLogMessage << "  Nf      = " << TxqcdNf
+            << "    Nc = " << Nc << "    Nd = " << Nd << std::endl;
+  std::cout << GridLogMessage << "  cfg dir = " << txqcd_cfg_dir() << std::endl;
+  std::cout << GridLogMessage << "  out dir = " << txqcd_data_dir() << std::endl;
+  std::cout << GridLogMessage << "================================" << std::endl;
 
   TXQCDField U(&Grid);
   TXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
                                 txqcd_cfg_dir() + "/ckpoint_lat",
                                 txqcd_cfg_dir() + "/ckpoint_rng", traj);
 
-  std::cout << GridLogMessage << "[aux TXQCD] traj=" << traj << std::endl;
+  // All channels computed via the shared helper (also used by the HMC
+  // diagnostic block in gen_txqcd_cfgs_2plus1.cc).  Slice sums are
+  // collective — must run on every rank.
+  AuxWallCorrelators awc = ComputeAuxWallCorrelators(U);
 
-  auto pi_all = SliceSumPiAll(U.pi);
-  auto pi_tr  = SliceSumTrace(U.pi);
-  auto C_disc = CorrelatorFromSlice(pi_tr, V4);
-  std::vector<ComplexD> C_total(T, 0.0);
-  for (const auto &ps : pi_all) {
-    auto Cab = CorrelatorFromSlice(ps, V4);
-    for (int t = 0; t < T; ++t) C_total[t] += Cab[t];
-  }
-  std::vector<ComplexD> C_pi(T);
-  for (int t = 0; t < T; ++t) C_pi[t] = lam4 * (C_total[t] - C_disc[t]);
-
-  auto sig_tr = SliceSumSigmaTrace(U.sigma);
-  auto C_sig  = CorrelatorFromSlice(sig_tr, V4);
-  std::vector<ComplexD> aux_sigma(T);
-  for (int t = 0; t < T; ++t) aux_sigma[t] = lam4 * C_sig[t];
-
-  auto s_tr = SliceSumColorTrace(U.s);
-  auto C_s  = CorrelatorFromSlice(s_tr, V4);
-  std::vector<ComplexD> aux_s(T);
-  for (int t = 0; t < T; ++t) aux_s[t] = lam4 * C_s[t];
-
+  // ----- Write h5 ----------------------------------------------------------
   std::string outfile = txqcd_data_dir() + "/aux_txqcd_" + std::to_string(traj) + ".h5";
-  {
+  if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
-    write(wr, "aux_pi", C_pi);
-    write(wr, "aux_sigma", aux_sigma);
-    write(wr, "aux_s", aux_s);
+
+    // RAW correlators only — no per-cfg vac-sub (biased for zero-mean fields).
+    // Analysis must compute ensemble mean of wall_*_slice across cfgs and
+    // form C_clean(τ) = C_raw(τ) - (λ⁴/V₃·T) Σ_t ⟨W(t+τ)⟩·⟨W*(t)⟩.
+
+    write(wr, "aux_pi_raw", awc.C_pi_iso);
+    write(wr, "wall_pi_tr_slice", awc.wall_pi_tr);
+    write(wr, "aux_pi_ab_raw", awc.C_pi_ab_flat);
+    write(wr, "wall_pi_ab_slice", awc.wall_pi_ab_flat);
+    write(wr, "aux_sigma_raw", awc.C_sigma);
+    write(wr, "wall_sigma_slice", awc.wall_sigma);
+    write(wr, "aux_s_raw", awc.C_s);
+    write(wr, "wall_s_slice", awc.wall_s);
+    write(wr, "aux_p_raw", awc.C_p);
+    write(wr, "wall_p_slice", awc.wall_p);
+    write(wr, "aux_t_raw", awc.C_t_flat);
+    write(wr, "wall_t_slice", awc.wall_t_flat);
+
+    // metadata
     write(wr, "traj", traj);
+    write(wr, "lambda", lambda);
+    write(wr, "Nf", TxqcdNf);
+    write(wr, "Nc", Nc);
+    write(wr, "Nd", Nd);
+    write(wr, "T", T);
+    write(wr, "V3", V3);
+    write(wr, "V4", V4);
   }
 
   std::cout << GridLogMessage << "Written " << outfile << std::endl;

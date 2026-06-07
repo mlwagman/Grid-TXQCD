@@ -28,12 +28,13 @@ ifneq ($(QUDA_PREFIX),)
   endif
 endif
 
-PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
+PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
            meas_conn_txqcd meas_conn_qcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
            meas_aux_txqcd compare compute_plaq compute_vev \
            eigspec_diag eigspec_diag_nf2 \
            test_quda_init test_quda_roundtrip test_quda_inverter \
+           test_quda_clover_mg \
            test_quda_multishift test_quda_propagator \
            bench_dslash bench_clover_oprod bench_qudahermop_dslash \
            test_quda_txqcd_solver
@@ -51,6 +52,11 @@ gen_txqcd_cfgs: gen_txqcd_cfgs.cc params.h eig_diag.h
 gen_txqcd_cfgs_2plus1: gen_txqcd_cfgs_2plus1.cc params.h eig_diag.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
 
+# gen_txqcd_cfgs_nf2: Nf=2 light-only diagnostic — gen_txqcd_cfgs_2plus1 with the
+# strange Nf=1 monomials removed.  Isolates the strange quark's role.  Nf=2.
+gen_txqcd_cfgs_nf2: gen_txqcd_cfgs_nf2.cc params.h eig_diag.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
+
 # meas_conn_weakfield uses TXQCDFermionNf — also Nf=3.
 meas_conn_weakfield: meas_conn_weakfield.cc params.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
@@ -66,6 +72,15 @@ eigspec_diag: eigspec_diag.cc params.h
 # Nf=2 build for the Nf=2+1 vs Nf=3 spectrum comparison.
 eigspec_diag_nf2: eigspec_diag.cc params.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
+
+# Nf=3 variants of the production meas binaries — built for measurement on
+# the gen_txqcd_cfgs (Nf=3) cfgs (e.g. _nf3_weakfield_md10).  Default catch-all
+# below builds the Nf=2 versions of the same sources.
+meas_conn_txqcd_nf3: meas_conn_txqcd.cc params.h meas_helper.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
+
+meas_disco_txqcd_nf3: meas_disco_txqcd.cc params.h meas_helper.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
 
 # Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
 # edits (e.g. EIG_DIAG tuning) force a rebuild of gen_qcd_cfgs* and the

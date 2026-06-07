@@ -14,9 +14,9 @@
 # Sparse hadron-thermalization monitor — HIGH-λ half (λ ≥ 8 plus QCD).
 # Cadence: every 5th saved cfg (50, 100, 150, ...).
 
-cd "$SLURM_SUBMIT_DIR"
+source /lustre2/nplqcd/Grid-TXQCD/env_lq2_grid.sh
+cd "$PRODUCTION_DIR"
 mkdir -p slurm-logs logs
-source ../env_lq2_grid.sh
 
 export OMP_NUM_THREADS=4
 export TXQCD_MULTIRHS_CG=1
@@ -36,16 +36,15 @@ LATT="${LATT:-16.16.16.48}"
 SX=2; ST=6
 MEAS_CG_TOL="${MEAS_CG_TOL:-1e-8}"
 
+# High-λ active streams (audit 2026-05-25 post-disaster).  λ=8 b6.1 and λ=9 dirs
+# never existed at b6.1 (lam=8 is b6.5 only).  qcd `_s702_nf2p1_mdscan_mds30`
+# was wiped in 2026-05-24 cfg loss with no replacement yet.
 STREAMS=(
-  "txqcd 8    _nf2p1_mds10_fork"
-  "txqcd 8    _fromchroma_md20_fork_t50_mds10"
-  "txqcd 9    _fromchroma_md10"
-  "txqcd 10   _nf2p1_mds10_fork"
-  "txqcd 10   _fromchroma_md10"
-  "txqcd 12   _fromchroma_md10"
-  "txqcd 14   _fromchroma_md10"
-  "txqcd 16   _fromchroma_md10"
-  "qcd   -    _s702_nf2p1_mdscan_mds30"
+  "txqcd 10   _nf2p1_mds10_fork"   # nodeA_v2 GPU2  weak-field continuation
+  "txqcd 10   _fromchroma_md10"    # recov_md10L    chroma-pedigree
+  "txqcd 12   _fromchroma_md10"    # recov_md10L
+  "txqcd 14   _fromchroma_md10"    # recov_md10L
+  "txqcd 16   _fromchroma_md10"    # recov_md10L
 )
 
 ALL_DIR="meas_2pt/all_2x6_sparse"
@@ -95,7 +94,8 @@ run_one () {
   fi
 }
 
-CFG_NUMBERS=(50 100 150 200 250 300 350 400)
+CFG_FROM="${CFG_FROM:-10}"; CFG_STEP="${CFG_STEP:-10}"; CFG_TO="${CFG_TO:-2000}"
+CFG_NUMBERS=($(seq "$CFG_FROM" "$CFG_STEP" "$CFG_TO"))   # default=10..2000 every 10 to catch fresh streams from the start
 
 PASS=0
 while true; do

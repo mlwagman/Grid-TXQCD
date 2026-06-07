@@ -266,6 +266,14 @@ inline void FusedTAccumulate(LatticeTField &dst_t_full,
   autoView(Y1v, Y_rb.f[1], AcceleratorRead);
   autoView(X0v, X_rb.f[0], AcceleratorRead);
   autoView(X1v, X_rb.f[1], AcceleratorRead);
+#if TXQCD_Nf >= 3
+  // Silent-corruption fix 2026-06-02: at TxqcdNf=3 the inner loop's ternary
+  // selected Y1/X1 for both flavor a=1 AND a=2, so flavor 2 contributed the
+  // wrong data and the t-force was incorrect.  All Nf=3 production prior to
+  // this fix has been computing an INCORRECT t-force component.
+  autoView(Y2v, Y_rb.f[2], AcceleratorRead);
+  autoView(X2v, X_rb.f[2], AcceleratorRead);
+#endif
   autoView(dst, dst_t_full, AcceleratorWrite);
 
   accelerator_for(ss, oSites_full, Nsimd_T, {
@@ -288,6 +296,10 @@ inline void FusedTAccumulate(LatticeTField &dst_t_full,
     auto Y1 = Y1v(ssh);
     auto X0 = X0v(ssh);
     auto X1 = X1v(ssh);
+#if TXQCD_Nf >= 3
+    auto Y2 = Y2v(ssh);
+    auto X2 = X2v(ssh);
+#endif
     auto d_lane = dst(ss);
 
     // For each of 6 (μ,ν) pairs, compute per-site G_t^{μν}_{ij} bilinear,
@@ -309,8 +321,13 @@ inline void FusedTAccumulate(LatticeTField &dst_t_full,
       for (int i = 0; i < Nc; ++i) {
         for (int j = 0; j < Nc; ++j) {
           for (int a = 0; a < TxqcdNf; ++a) {
+#if TXQCD_Nf >= 3
+            auto &Y_a = (a == 0) ? Y0 : (a == 1) ? Y1 : Y2;
+            auto &X_a = (a == 0) ? X0 : (a == 1) ? X1 : X2;
+#else
             auto &Y_a = (a == 0) ? Y0 : Y1;
             auto &X_a = (a == 0) ? X0 : X1;
+#endif
             for (int alpha = 0; alpha < Ns; ++alpha) {
               for (int beta = 0; beta < Ns; ++beta) {
                 ComplexD op_ab = opp[alpha * Ns + beta];

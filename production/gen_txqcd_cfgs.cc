@@ -4,6 +4,7 @@
 #include <cstring>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOActionQudaPrimitive.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverHasenbuschAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDSmearedConfiguration.h>
@@ -17,6 +18,20 @@
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
 
 using namespace TXQCDProduction;
+
+// Boolean env-var helper: treat unset, "", "0", "false", "no" as false; any
+// other value as true.  Mirrors gen_txqcd_cfgs_2plus1.cc so `export FOO=0`
+// reliably disables (vs the older getenv()!=nullptr pattern which would treat
+// "0" as enabled).
+static inline bool env_enabled(const char *name) {
+  const char *v = std::getenv(name);
+  if (!v || !*v) return false;
+  if (v[0] == '0' && v[1] == '\0') return false;
+  if (std::strcmp(v, "false") == 0 || std::strcmp(v, "False") == 0 ||
+      std::strcmp(v, "FALSE") == 0 || std::strcmp(v, "no") == 0 ||
+      std::strcmp(v, "No") == 0    || std::strcmp(v, "NO") == 0) return false;
+  return true;
+}
 
 // This driver is now compiled at TXQCD_Nf=3 with diag mass {m_l, m_l, m_s}.
 // The previous Nf=2 (light) + Nf=1 (strange QCD-wrap) structure had two
@@ -73,6 +88,147 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     vev_s_.push_back(vc);
     std::cout << GridLogMessage << "[TxqcdDiag] traj=" << traj << " plaq=" << pl
               << " vev_sigma=" << vs << " vev_s=" << vc << std::endl;
+
+    // Per-component σ + s breakdown — distinguishes flavor-singlet trace(σ)
+    // from non-singlet σ_ab off-diagonals.  Useful for diagnosing whether the
+    // period-2 oscillation observed in cold-gauge Nf=3 thermalization lives in
+    // the singlet (trace) mode or in non-singlet (off-diagonal flavor) modes.
+    //
+    // Also prints volume std-dev of each component to distinguish within-cfg
+    // cancellation (large std-dev with σ_ab(x) sign-flipping in different
+    // spatial regions) from between-cfg cancellation (coherent σ_ab on one
+    // cfg with sign that varies across cfgs).  For the analytical
+    // ⟨σ_ab⟩=0 (a≠b) to be recovered from a single-cfg volume average that's
+    // ≠0, between-cfg cancellation is required; for a single-cfg volume avg
+    // ≈0, within-cfg cancellation is happening.
+    {
+      std::ostringstream sd;
+      sd << "[TxqcdDiag] traj=" << traj << " sigma_diag";
+      for (int a = 0; a < TxqcdNf; ++a) {
+        LatticeComplex sab(U.Grid());
+        sab = PeekIndex<2>(U.sigma, a, a);
+        ComplexD v = TensorRemove(sum(sab)) / V;
+        sd << "[" << a << "]=" << v.real();
+      }
+      if (TxqcdNf >= 2) {
+        sd << " sigma_offdiag(re,im)";
+        for (int a = 0; a < TxqcdNf; ++a) {
+          for (int b = a + 1; b < TxqcdNf; ++b) {
+            LatticeComplex sab(U.Grid());
+            sab = PeekIndex<2>(U.sigma, a, b);
+            ComplexD v = TensorRemove(sum(sab)) / V;
+            sd << "[" << a << b << "]=(" << v.real() << "," << v.imag() << ")";
+          }
+        }
+      }
+      std::cout << GridLogMessage << sd.str() << std::endl;
+
+      // Six-quantity stats per Hermitian-matrix aux component (σ, π, s, p, t_{01}):
+      //   mean_re = <Re σ>;          var_re = <(Re σ)²> - <Re σ>²
+      //   mean_im = <Im σ>;          var_im = <(Im σ)²> - <Im σ>²
+      //   mean_modsq = <|σ|²>;       var_modsq = <|σ|⁴> - <|σ|²>²
+      // All sum-based (no sqrt).  Identities used:
+      //   <(Re σ)²> = (<|σ|²> + Re<σ²>) / 2
+      //   <(Im σ)²> = (<|σ|²> - Re<σ²>) / 2
+      //   <|σ|⁴>    = sum_x (σ_x σ_x*)²
+      // var_re vs var_im distinguishes flavor-singlet-rotation from amplitude
+      // dynamics; var_modsq probes the amplitude of |σ|² fluctuations.  For an
+      // iid Gaussian Re/Im with mean 0, var_re=var_im=½<|σ|²> and
+      // var_modsq=<|σ|²>².
+      struct CStats {
+        RealD mean_re, mean_im, mean_modsq, var_re, var_im, var_modsq;
+      };
+      auto cstats = [V](const LatticeComplex &sab) -> CStats {
+        ComplexD m = TensorRemove(sum(sab)) / V;
+        RealD m_abs_sq = norm2(sab) / V;
+        RealD re_sq_re = TensorRemove(sum(sab * sab)).real() / V;
+        LatticeComplex modsq(sab.Grid());
+        modsq = sab * conjugate(sab);
+        RealD m_modsq_sq = TensorRemove(sum(modsq * modsq)).real() / V;
+        CStats s;
+        s.mean_re    = m.real();
+        s.mean_im    = m.imag();
+        s.mean_modsq = m_abs_sq;
+        s.var_re     = std::max(RealD(0.5) * (m_abs_sq + re_sq_re)
+                                  - m.real() * m.real(), RealD(0.0));
+        s.var_im     = std::max(RealD(0.5) * (m_abs_sq - re_sq_re)
+                                  - m.imag() * m.imag(), RealD(0.0));
+        s.var_modsq  = std::max(m_modsq_sq - m_abs_sq * m_abs_sq, RealD(0.0));
+        return s;
+      };
+      auto dump_mat = [&cstats, traj](const std::string &name,
+                                       auto &field, int N) {
+        static const char *keys[6] = {
+          "mean_re", "var_re", "mean_im", "var_im", "mean_modsq", "var_modsq"};
+        std::ostringstream out[6];
+        for (int k = 0; k < 6; ++k)
+          out[k] << "[TxqcdDiag] traj=" << traj << " "
+                 << name << "_" << keys[k] << " diag";
+        for (int a = 0; a < N; ++a) {
+          LatticeComplex sab(field.Grid());
+          sab = PeekIndex<2>(field, a, a);
+          CStats s = cstats(sab);
+          out[0] << "[" << a << "]=" << s.mean_re;
+          out[1] << "[" << a << "]=" << s.var_re;
+          out[2] << "[" << a << "]=" << s.mean_im;
+          out[3] << "[" << a << "]=" << s.var_im;
+          out[4] << "[" << a << "]=" << s.mean_modsq;
+          out[5] << "[" << a << "]=" << s.var_modsq;
+        }
+        if (N >= 2) {
+          for (int k = 0; k < 6; ++k) out[k] << " offdiag";
+          for (int a = 0; a < N; ++a) {
+            for (int b = a + 1; b < N; ++b) {
+              LatticeComplex sab(field.Grid());
+              sab = PeekIndex<2>(field, a, b);
+              CStats s = cstats(sab);
+              out[0] << "[" << a << b << "]=" << s.mean_re;
+              out[1] << "[" << a << b << "]=" << s.var_re;
+              out[2] << "[" << a << b << "]=" << s.mean_im;
+              out[3] << "[" << a << b << "]=" << s.var_im;
+              out[4] << "[" << a << b << "]=" << s.mean_modsq;
+              out[5] << "[" << a << b << "]=" << s.var_modsq;
+            }
+          }
+        }
+        for (int k = 0; k < 6; ++k)
+          std::cout << GridLogMessage << out[k].str() << std::endl;
+      };
+      dump_mat("sigma", U.sigma, TxqcdNf);
+      dump_mat("pi",    U.pi,    TxqcdNf);
+      dump_mat("s_color", U.s,   Nc);
+      dump_mat("p_color", U.p,   Nc);
+      {
+        // t_{01}: Lorentz (μ=0, ν=1) slice of the antisymmetric Lorentz +
+        // Hermitian-color tensor.  PeekIndex<1>(U.t, 0, 1) reduces the Lorentz
+        // iMatrix to scalar, leaving a TxqcdSiteColorMatrix-shaped tensor, so we
+        // can reuse the matrix dumper.  Other Lorentz slices behave the same way
+        // by antisymmetry — one representative is sufficient.
+        LatticeSFieldC t01(U.t.Grid());
+        t01 = PeekIndex<1>(U.t, 0, 1);
+        dump_mat("t01", t01, Nc);
+      }
+    }
+    {
+      std::ostringstream sd;
+      sd << "[TxqcdDiag] traj=" << traj << " s_diag";
+      for (int i = 0; i < Nc; ++i) {
+        LatticeComplex sii(U.Grid());
+        sii = PeekIndex<2>(U.s, i, i);
+        ComplexD v = TensorRemove(sum(sii)) / V;
+        sd << "[" << i << "]=" << v.real();
+      }
+      sd << " s_offdiag(re,im)";
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = i + 1; j < Nc; ++j) {
+          LatticeComplex sij(U.Grid());
+          sij = PeekIndex<2>(U.s, i, j);
+          ComplexD v = TensorRemove(sum(sij)) / V;
+          sd << "[" << i << j << "]=(" << v.real() << "," << v.imag() << ")";
+        }
+      }
+      std::cout << GridLogMessage << sd.str() << std::endl;
+    }
 
     int na = (int)actions_.size();
     std::vector<RealD> fa(na), fm(na), fdta(na), fdtm(na);
@@ -133,31 +289,35 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
     }
 
     if (traj % interval_ == 0) {
-      std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
-      Hdf5Writer wr(fname);
-      write(wr, "traj", traj_);
-      write(wr, "plaq", plaq_);
-      write(wr, "vev_sigma", vev_sigma_);
-      write(wr, "vev_s", vev_s_);
-      write(wr, "vev_trminv", vev_trminv_);
-      write(wr, "force_avg", force_avg_);
-      write(wr, "force_max", force_max_);
-      write(wr, "fdt_avg", fdt_avg_);
-      write(wr, "fdt_max", fdt_max_);
-      write(wr, "eig_M2", eig_M2_);
-      write(wr, "eig_g5M", eig_g5M_);
-      write(wr, "eig_min_abs_g5M", eig_minabs_);
-      write(wr, "eig_n_near_zero", eig_nnear_);
-      std::vector<std::string> names;
-      for (auto &a : actions_) names.push_back(a.name);
-      write(wr, "action_names", names);
+      // See gen_txqcd_cfgs_2plus1.cc: Hdf5Writer is SERIAL; all ranks racing
+      // throws H5::FileIException. Guard with rank 0; clear on all ranks.
+      if (grid_.IsBoss()) {
+        std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
+        Hdf5Writer wr(fname);
+        write(wr, "traj", traj_);
+        write(wr, "plaq", plaq_);
+        write(wr, "vev_sigma", vev_sigma_);
+        write(wr, "vev_s", vev_s_);
+        write(wr, "vev_trminv", vev_trminv_);
+        write(wr, "force_avg", force_avg_);
+        write(wr, "force_max", force_max_);
+        write(wr, "fdt_avg", fdt_avg_);
+        write(wr, "fdt_max", fdt_max_);
+        write(wr, "eig_M2", eig_M2_);
+        write(wr, "eig_g5M", eig_g5M_);
+        write(wr, "eig_min_abs_g5M", eig_minabs_);
+        write(wr, "eig_n_near_zero", eig_nnear_);
+        std::vector<std::string> names;
+        for (auto &a : actions_) names.push_back(a.name);
+        write(wr, "action_names", names);
+        std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
+      }
       traj_.clear(); plaq_.clear();
       vev_sigma_.clear(); vev_s_.clear(); vev_trminv_.clear();
       force_avg_.clear(); force_max_.clear();
       fdt_avg_.clear(); fdt_max_.clear();
       eig_M2_.clear(); eig_g5M_.clear();
       eig_minabs_.clear(); eig_nnear_.clear();
-      std::cout << GridLogMessage << "Diagnostics written to " << fname << std::endl;
     }
   }
 };
@@ -228,6 +388,35 @@ int main(int argc, char **argv) {
 
   AuxiliaryFieldGaussianAction AuxAction(lambda_runtime);
 
+  // Optional kinetic-term action for all 5 aux fields — mirrors the 2+1
+  // driver.  See gen_txqcd_cfgs_2plus1.cc and AuxKineticAction.h for the
+  // Fierz-preserving coefficient convention.
+  RealD Z_sigma_kin = 0.0, Z_pi_kin = 0.0, Z_s_kin = 0.0,
+        Z_p_kin = 0.0, Z_t_kin = 0.0;
+  if (const char *e = std::getenv("SIGMA_KINETIC_Z"); e && *e) Z_sigma_kin = std::atof(e);
+  if (const char *e = std::getenv("PI_KINETIC_Z");    e && *e) Z_pi_kin    = std::atof(e);
+  if (const char *e = std::getenv("S_KINETIC_Z");     e && *e) Z_s_kin     = std::atof(e);
+  if (const char *e = std::getenv("P_KINETIC_Z");     e && *e) Z_p_kin     = std::atof(e);
+  if (const char *e = std::getenv("T_KINETIC_Z");     e && *e) Z_t_kin     = std::atof(e);
+  bool use_aux_kinetic = (Z_sigma_kin != 0.0) || (Z_pi_kin != 0.0) ||
+                         (Z_s_kin != 0.0) || (Z_p_kin != 0.0) || (Z_t_kin != 0.0);
+  AuxiliaryFieldKineticAction AuxKinAction(Z_sigma_kin, Z_pi_kin, Z_s_kin,
+                                            Z_p_kin, Z_t_kin);
+  std::cout << GridLogMessage << "[AuxKineticAction] SIGMA_KINETIC_Z=" << Z_sigma_kin
+            << " PI_KINETIC_Z=" << Z_pi_kin
+            << " S_KINETIC_Z=" << Z_s_kin
+            << " P_KINETIC_Z=" << Z_p_kin
+            << " T_KINETIC_Z=" << Z_t_kin
+            << (use_aux_kinetic ? " (ACTIVE)" : " (inactive)") << std::endl;
+
+  // Fierz-preserving σ_eff = σ - (Z/λ²)·Lap(σ) inside the Dirac op.  See
+  // [[fierz-lap-shift]] memory and fierz_lap_shift.tex.  Enabled via
+  // TXQCD_FIERZ_LAP=1; reuses the *_KINETIC_Z env vars for the Z values.
+  AuxFierzShift fierz_shift = AuxFierzShift::FromEnv(lambda_runtime);
+  bool use_fierz_lap = fierz_shift.active();
+  std::cout << GridLogMessage << fierz_shift.LogParameters()
+            << (use_fierz_lap ? " (ACTIVE)" : " (inactive)") << std::endl;
+
   // Nf=3 diag mass: {m_l, m_l, m_s}.  All three flavors share aux fields.
   // The TXQCDWilsonCloverRationalEOAction's per-flavor-mass overload takes
   // a std::array<RealD, TxqcdNf> directly; pass {mass_light, mass_light,
@@ -248,8 +437,40 @@ int main(int argc, char **argv) {
 
   // ONE rational pseudofermion per flavor (3 total) with the diag mass array.
   // Each carries its own pseudofermion field; refresh independently.
-  TXQCDWilsonCloverRationalEOAction PF(Grid, RBGrid, mass_arr, rat_params, csw);
-  PF.is_smeared = true;
+  // TXQCD_QUDA_HYBRID=1 swaps in the QUDA σ-piece hybrid action (Phase H).
+  // Masses must be degenerate for the hybrid path (single κ inside QUDA) —
+  // safe here because params.h defaults mass_strange = mass_light, and all
+  // production b6.1/b6.5 setups override both to the same value.
+  bool tx_quda_hybrid = env_enabled("TXQCD_QUDA_HYBRID");
+  if (tx_quda_hybrid) {
+    bool degenerate = true;
+    for (int a = 1; a < TxqcdNf; ++a)
+      if (std::abs(mass_arr[a] - mass_arr[0]) > 1e-12) degenerate = false;
+    if (!degenerate) {
+      std::cerr << "ERROR: TXQCD_QUDA_HYBRID requires degenerate masses; got {";
+      for (int a = 0; a < TxqcdNf; ++a)
+        std::cerr << mass_arr[a] << (a + 1 < TxqcdNf ? ", " : "");
+      std::cerr << "}\n";
+      std::exit(1);
+    }
+  }
+  std::unique_ptr<TXQCDWilsonCloverRationalEOAction>            PF_grid_holder;
+  std::unique_ptr<TXQCDWilsonCloverRationalEOActionQudaPrimitive> PF_quda_holder;
+  Action<TXQCDField> *PF = nullptr;
+  if (tx_quda_hybrid) {
+    PF_quda_holder = std::make_unique<TXQCDWilsonCloverRationalEOActionQudaPrimitive>(
+        Grid, RBGrid, mass_arr, rat_params, csw);
+    PF_quda_holder->is_smeared = true;
+    PF = PF_quda_holder.get();
+    std::cout << GridLogMessage
+              << "[TXQCD Nf=" << TxqcdNf << "] using QUDA σ-piece hybrid action"
+              << std::endl;
+  } else {
+    PF_grid_holder = std::make_unique<TXQCDWilsonCloverRationalEOAction>(
+        Grid, RBGrid, mass_arr, rat_params, csw);
+    PF_grid_holder->is_smeared = true;
+    PF = PF_grid_holder.get();
+  }
 
   TXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass_arr, csw);
   LogDet.is_smeared = true;
@@ -322,6 +543,7 @@ int main(int argc, char **argv) {
                 << std::endl;
     }
     TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+    TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
 
     // Self-consistent iteration: for chroma-cfg starts the bare auto-measure
     // under-shoots the equilibrium aux mean by ~2× (σ-back-reaction on ⟨ψ̄ψ⟩
@@ -381,6 +603,7 @@ int main(int argc, char **argv) {
                   << std::endl;
         TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
       }
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   } else {
     sRNG.SeedFixedIntegers({1 + seed_offset, 2 + seed_offset, 3 + seed_offset,
@@ -480,6 +703,7 @@ int main(int argc, char **argv) {
       }
       // Step 3: fill aux fields (σ, π, s, p, t) using the measured Σ.
       TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   }
 
@@ -505,12 +729,27 @@ int main(int argc, char **argv) {
             << "  AUX_MULT=" << aux_mult << std::endl;
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  L1.push_back(&PF);
-  L1.push_back(&LogDet);
+
+  // Fierz Lap shift wrapping — see gen_txqcd_cfgs_2plus1.cc for the same
+  // pattern.  Inactive shift returns the underlying pointer (bit-exact
+  // pass-through); active shift allocates one wrapper per action and stores
+  // it in fierz_wrappers (must outlive L1 + diag_actions).
+  std::vector<std::unique_ptr<FierzShiftedAction>> fierz_wrappers;
+  auto wrap = [&](Action<TXQCDField> *a) -> Action<TXQCDField> * {
+    if (!use_fierz_lap) return a;
+    fierz_wrappers.emplace_back(std::make_unique<FierzShiftedAction>(*a, fierz_shift));
+    return fierz_wrappers.back().get();
+  };
+  Action<TXQCDField> *PF_w     = wrap(PF);
+  Action<TXQCDField> *LogDet_w = wrap(&LogDet);
+
+  L1.push_back(PF_w);
+  L1.push_back(LogDet_w);
   ActionLevel<TXQCDField, Reps> L2(gauge_mult);
   L2.push_back(&GaugeAction);
   ActionLevel<TXQCDField, Reps> L3(aux_mult);
   L3.push_back(&AuxAction);
+  if (use_aux_kinetic) L3.push_back(&AuxKinAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
   Aset.push_back(L2);
@@ -560,9 +799,11 @@ int main(int argc, char **argv) {
   TXQCDCheckpointer ckpt(CPp);
 
   std::vector<TxqcdDiag::ActionRef> diag_actions;
-  diag_actions.push_back({"PseudoFermion", &PF});
-  diag_actions.push_back({"LogDet", &LogDet});
+  // Use wrapped pointers so diagnostics match what the integrator evaluates.
+  diag_actions.push_back({"PseudoFermion", PF_w});
+  diag_actions.push_back({"LogDet", LogDet_w});
   diag_actions.push_back({"AuxGaussian", &AuxAction});
+  if (use_aux_kinetic) diag_actions.push_back({"AuxKinetic", &AuxKinAction});
   diag_actions.push_back({"Gauge", &GaugeAction});
   TxqcdDiag diag(cfg_dir + "/hmc_diagnostics", meas_skip, diag_actions,
                  Smear, Grid, RBGrid, pRNG);

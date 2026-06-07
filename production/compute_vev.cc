@@ -13,7 +13,10 @@
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
+#include <Grid/util/QudaInit.h>
+#include <Grid/algorithms/iterative/QudaCloverInverter.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 using namespace Grid;
@@ -43,11 +46,17 @@ int main(int argc, char **argv) {
   int rng_seed = 1234567;
   RealD weakfield_scale = 0.0;  // if > 0, generate weak-field cfg in-place
   int weakfield_seed_offset = 0;
+  // Optional overrides of action params (default = production β=6.1 from params.h).
+  // For finer lattices (β=6.5 etc.) pass --mass and --csw to match that ensemble.
+  RealD mass_override = mass_light;
+  RealD csw_override  = csw;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--n-noise") { n_noise = std::atoi(argv[++i]); continue; }
     if (a == "--cg-tol")  { cg_tolerance = std::atof(argv[++i]); continue; }
     if (a == "--seed")    { rng_seed = std::atoi(argv[++i]); continue; }
+    if (a == "--mass")    { mass_override = std::atof(argv[++i]); continue; }
+    if (a == "--csw")     { csw_override  = std::atof(argv[++i]); continue; }
     if (a == "--weakfield") {
       weakfield_scale = std::atof(argv[++i]);
       continue;
@@ -86,7 +95,7 @@ int main(int argc, char **argv) {
   RealD V = (RealD)grid_.gSites();
 
   std::cout << GridLogMessage
-            << "compute_vev: mass=" << mass_light << " csw=" << csw
+            << "compute_vev: mass=" << mass_override << " csw=" << csw_override
             << " stout rho=" << stout_rho_inv << " n=" << stout_nsmear_inv
             << " n_noise=" << n_noise << " cg_tol=" << cg_tolerance
             << " seed=" << rng_seed << std::endl;
@@ -135,18 +144,56 @@ int main(int argc, char **argv) {
     WilsonImplParams impl_p;
     impl_p.boundary_phases.resize(Nd, 1.0);
     impl_p.boundary_phases[Nd - 1] = -1.0;
-    WCF Dw(Usm, grid_, rbgrid_, mass_light, csw, csw,
+    WCF Dw(Usm, grid_, rbgrid_, mass_override, csw_override, csw_override,
            WilsonAnisotropyCoefficients(), impl_p);
     MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
+
+    // --- Optional MG solver (USE_QUDA_MG=1) ---
+    // When enabled, QUDA's MG-preconditioned GCR replaces Grid's CG.  Setup
+    // is paid once per cfg and amortized over n_noise solves — the big win
+    // is at light mass on smeared gauge where vanilla CG can need 10k+
+    // iters but MG converges in ~10.
+    const char *use_mg_env = std::getenv("USE_QUDA_MG");
+    bool use_mg = use_mg_env && (std::atoi(use_mg_env) != 0);
+    std::unique_ptr<QudaCloverInverter> mg_inv;
+    if (use_mg) {
+      static bool quda_inited = false;
+      if (!quda_inited) { Quda::initialize(); quda_inited = true; }
+      QudaCloverParams qp;
+      qp.mass = mass_override;
+      qp.csw = csw_override;
+      qp.anti_periodic_t = true;
+      qp.tol = cg_tolerance;
+      qp.max_iter = cg_max;
+      qp.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+      qp.use_multigrid = true;
+      // 3-level MG with NPLQCD invert_test-style block sizes (good for 48^3).
+      qp.mg.n_level = 3;
+      qp.mg.geo_block_size = { {4,4,4,4}, {1,2,2,2} };
+      qp.mg.n_vec = 24;
+      qp.mg.run_verify = false;
+      qp.mg.verbosity = QUDA_SUMMARIZE;
+      mg_inv.reset(new QudaCloverInverter(&grid_, qp));
+      mg_inv->SetGauge(Usm);
+      std::cout << GridLogMessage
+                << "compute_vev: USE_QUDA_MG=1 — MG preconditioner active"
+                << std::endl;
+    }
     ConjugateGradient<LatticeFermion> CG(cg_tolerance, cg_max);
 
     RealD acc = 0.0;
     for (int h = 0; h < n_noise; ++h) {
       LatticeFermion eta(&grid_), b(&grid_), x(&grid_);
       gaussian(pRNG, eta);
-      Dw.Mdag(eta, b);
       x = Zero();
-      CG(HermOp, b, x);
+      if (use_mg) {
+        // QudaCloverInverter solves M x = eta directly (full-volume, EO
+        // preconditioned internally).  No need to pre-multiply by M†.
+        (*mg_inv)(HermOp, eta, x);
+      } else {
+        Dw.Mdag(eta, b);
+        CG(HermOp, b, x);
+      }
       acc += innerProduct(eta, x).real() / (2.0 * V);
     }
     RealD vev = acc / n_noise;

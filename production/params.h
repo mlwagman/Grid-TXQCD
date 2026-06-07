@@ -1,6 +1,7 @@
 #pragma once
 #include <Grid/Grid.h>
 #include <cstdlib>
+#include <random>
 
 using namespace Grid;
 
@@ -71,7 +72,38 @@ inline int time_src_per_dim_runtime() {
 }
 constexpr int space_src_per_dim = 4;   // kept for BWC; runtime accessor preferred
 constexpr int time_src_per_dim  = 12;
-inline Coordinate src_grid_origin() { return Coordinate(std::vector<int>{0, 0, 0, 0}); }
+// Per-cfg deterministic source-grid origin shift (active cfg >= 1000 to keep
+// older data matched).  Reduces connected measurement autocorrelation by
+// breaking the fixed-source-pattern noise component that locks in across
+// consecutive cfgs.  At λ=5 16³×48, measured ρ(1) reduction ~50% on the
+// connected pion (from per-src vs cfg-avg ρ(1) split).  Shift is deterministic:
+// seeded by cfg number so reruns are reproducible.  Written to HDF5 in conn
+// as 'src_shift' (4-element int vector).  Disco does not use this — its Z2
+// noise sources are translation-invariant in expectation.  For cfg < 1000
+// returns the legacy (0,0,0,0) origin.
+inline Coordinate src_grid_origin(int traj) {
+  Coordinate latt = lattice_size();
+  // SHIFT_ALL_CFGS=1 forces deterministic per-cfg translation averaging for
+  // every cfg regardless of cfg number — used for ensembles like b6.5 whose
+  // cfg numbering starts low (~10) but where we still want translation
+  // averaging from the start.  Default: legacy gate on traj < 1000.
+  bool shift_all = false;
+  if (const char *e = std::getenv("SHIFT_ALL_CFGS");
+      e && *e && !(e[0] == '0' && e[1] == '\0'))
+    shift_all = true;
+  if (!shift_all && traj < 1000) {
+    return Coordinate(std::vector<int>{0, 0, 0, 0});
+  }
+  // Deterministic per-cfg shift, seeded by cfg number.
+  std::mt19937_64 rng(static_cast<uint64_t>(traj));
+  rng.discard(8);  // burn in
+  Coordinate s(Nd);
+  for (int d = 0; d < Nd; ++d) {
+    std::uniform_int_distribution<int> dist(0, latt[d] - 1);
+    s[d] = dist(rng);
+  }
+  return s;
+}
 
 // ===== VEV monitoring =====
 constexpr int n_vev_noise = 8;
@@ -82,7 +114,11 @@ constexpr int n_noise_disco = 32;
 // ===== HMC =====
 constexpr int n_therm = 100;
 constexpr int n_prod = 1000;
-constexpr int meas_skip = 10;
+// meas_skip is the checkpoint-save cadence (used in gen_*_cfgs.cc via
+// CheckpointerParameters::saveInterval).  Env-overridable as N_SKIP so
+// short runs can save every traj (N_SKIP=1).  Default 10 for production.
+inline int meas_skip_runtime() { return detail::env_int("N_SKIP", 10); }
+#define meas_skip (TXQCDProduction::meas_skip_runtime())
 
 // ===== Solver =====
 // Default tol 1e-8; override at runtime with MEAS_CG_TOL for sloppy/refined runs.

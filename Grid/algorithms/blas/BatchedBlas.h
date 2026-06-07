@@ -81,11 +81,16 @@ public:
 #ifdef GRID_CUDA
       std::cout << "cublasCreate"<<std::endl;
       cublasCreate(&gridblasHandle);
-      cublasSetPointerMode(gridblasHandle, CUBLAS_POINTER_MODE_DEVICE);
+      // CUBLAS_POINTER_MODE_HOST: alpha/beta passed as host pointers; cuBLAS
+      // handles them internally (no cudaMemcpy needed).  Switched from _DEVICE
+      // 2026-05-27 after profiling revealed 5M+ tiny HtoD alpha/beta copies
+      // per traj.  See [[batchedblas-alphabeta-cudamemcpy-storm]].
+      cublasSetPointerMode(gridblasHandle, CUBLAS_POINTER_MODE_HOST);
 #endif
 #ifdef GRID_HIP
       std::cout << "hipblasCreate"<<std::endl;
       hipblasCreate(&gridblasHandle);
+      hipblasSetPointerMode(gridblasHandle, HIPBLAS_POINTER_MODE_HOST);
 #endif
 #ifdef GRID_SYCL
       gridblasHandle = theGridAccelerator;
@@ -240,11 +245,8 @@ public:
     if(OpB!=GridBLAS_OP_N)
       ldb = n;
     
-    static deviceVector<ComplexD> alpha_p(1);
-    static deviceVector<ComplexD> beta_p(1);
-    // can prestore the 1 and the zero on device
-    acceleratorCopyToDevice((void *)&alpha,(void *)&alpha_p[0],sizeof(ComplexD));
-    acceleratorCopyToDevice((void *)&beta ,(void *)&beta_p[0],sizeof(ComplexD));
+    // HOST pointer mode (set at handle init): pass &alpha, &beta as host
+    // pointers; cuBLAS reads them internally with no cudaMemcpy needed.
     RealD t0=usecond();
     //    std::cout << "ZgemmBatched mnk  "<<m<<","<<n<<","<<k<<" count "<<batchCount<<std::endl;
 #ifdef GRID_HIP
@@ -261,10 +263,10 @@ public:
 				   hOpA,
 				   hOpB,
 				   m,n,k,
-				   (hipDoubleComplex *) &alpha_p[0],
+				   (hipDoubleComplex *) &alpha,
 				   (hipDoubleComplex **)&Amk[0], lda,
 				   (hipDoubleComplex **)&Bkn[0], ldb,
-				   (hipDoubleComplex *) &beta_p[0],
+				   (hipDoubleComplex *) &beta,
 				   (hipDoubleComplex **)&Cmn[0], ldc,
 				   batchCount);
 #else
@@ -272,10 +274,10 @@ public:
                                    hOpA,
                                    hOpB,
                                    m,n,k,
-                                   (hipblasDoubleComplex *) &alpha_p[0],
+                                   (hipblasDoubleComplex *) &alpha,
                                    (hipblasDoubleComplex **)&Amk[0], lda,
                                    (hipblasDoubleComplex **)&Bkn[0], ldb,
-                                   (hipblasDoubleComplex *) &beta_p[0],
+                                   (hipblasDoubleComplex *) &beta,
                                    (hipblasDoubleComplex **)&Cmn[0], ldc,
                                    batchCount);
 #endif
@@ -295,10 +297,10 @@ public:
 				  hOpA,
 				  hOpB,
 				  m,n,k,
-				  (cuDoubleComplex *) &alpha_p[0],
+				  (cuDoubleComplex *) &alpha,
 				  (cuDoubleComplex **)&Amk[0], lda,
 				  (cuDoubleComplex **)&Bkn[0], ldb,
-				  (cuDoubleComplex *) &beta_p[0],
+				  (cuDoubleComplex *) &beta,
 				  (cuDoubleComplex **)&Cmn[0], ldc,
 				  batchCount);
     GRID_ASSERT(err==CUBLAS_STATUS_SUCCESS);
@@ -326,10 +328,10 @@ public:
 						  &iOpA,
 						  &iOpB,
 						  &m64,&n64,&k64,
-						  (ComplexD *) &alpha_p[0],
+						  (ComplexD *) &alpha,
 						  (const ComplexD **)&Amk[0], (const int64_t *)&lda64,
 						  (const ComplexD **)&Bkn[0], (const int64_t *)&ldb64,
-						  (ComplexD *) &beta_p[0],
+						  (ComplexD *) &beta,
 						  (ComplexD **)&Cmn[0], (const int64_t *)&ldc64,
 						  (int64_t)1,&batchCount64,std::vector<sycl::event>());
       synchronise();
@@ -498,11 +500,7 @@ public:
       lda = k;
     if(OpB!=GridBLAS_OP_N)
       ldb = n;
-    static deviceVector<ComplexF> alpha_p(1);
-    static deviceVector<ComplexF> beta_p(1);
-    // can prestore the 1 and the zero on device
-    acceleratorCopyToDevice((void *)&alpha,(void *)&alpha_p[0],sizeof(ComplexF));
-    acceleratorCopyToDevice((void *)&beta ,(void *)&beta_p[0],sizeof(ComplexF));
+    // HOST pointer mode: pass &alpha, &beta as host pointers; no cudaMemcpy.
     RealD t0=usecond();
 
     GRID_ASSERT(Bkn.size()==batchCount);
@@ -522,10 +520,10 @@ public:
 				   hOpA,
 				   hOpB,
 				   m,n,k,
-				   (hipComplex *) &alpha_p[0],
+				   (hipComplex *) &alpha,
 				   (hipComplex **)&Amk[0], lda,
 				   (hipComplex **)&Bkn[0], ldb,
-				   (hipComplex *) &beta_p[0],
+				   (hipComplex *) &beta,
 				   (hipComplex **)&Cmn[0], ldc,
 				   batchCount);
 #else
@@ -533,10 +531,10 @@ public:
                                    hOpA,
                                    hOpB,
                                    m,n,k,
-                                   (hipblasComplex *) &alpha_p[0],
+                                   (hipblasComplex *) &alpha,
                                    (hipblasComplex **)&Amk[0], lda,
                                    (hipblasComplex **)&Bkn[0], ldb,
-                                   (hipblasComplex *) &beta_p[0],
+                                   (hipblasComplex *) &beta,
                                    (hipblasComplex **)&Cmn[0], ldc,
                                    batchCount);
 
@@ -558,10 +556,10 @@ public:
 			       hOpA,
 			       hOpB,
 			       m,n,k,
-			       (cuComplex *) &alpha_p[0],
+			       (cuComplex *) &alpha,
 			       (cuComplex **)&Amk[0], lda,
 			       (cuComplex **)&Bkn[0], ldb,
-			       (cuComplex *) &beta_p[0],
+			       (cuComplex *) &beta,
 			       (cuComplex **)&Cmn[0], ldc,
 			       batchCount);
     } else {
@@ -570,10 +568,10 @@ public:
 				hOpA,
 				hOpB,
 				m,n,k,
-				(void *) &alpha_p[0],
+				(void *) &alpha,
 				(void **)&Amk[0], CUDA_C_32F, lda,
 				(void **)&Bkn[0], CUDA_C_32F, ldb,
-				(void *) &beta_p[0],
+				(void *) &beta,
 				(void **)&Cmn[0], CUDA_C_32F, ldc,
 				batchCount, compute_precision, CUBLAS_GEMM_DEFAULT);
     }
@@ -603,10 +601,10 @@ public:
 						&iOpA,
 						&iOpB,
 						&m64,&n64,&k64,
-						(ComplexF *) &alpha_p[0],
+						(ComplexF *) &alpha,
 						(const ComplexF **)&Amk[0], (const int64_t *)&lda64,
 						(const ComplexF **)&Bkn[0], (const int64_t *)&ldb64,
-						(ComplexF *) &beta_p[0],
+						(ComplexF *) &beta,
 						(ComplexF **)&Cmn[0], (const int64_t *)&ldc64,
 						(int64_t)1,&batchCount64,std::vector<sycl::event>());
     synchronise();
@@ -719,11 +717,7 @@ public:
       lda = k;
     if(OpB!=GridBLAS_OP_N)
       ldb = n;
-    static deviceVector<RealF> alpha_p(1);
-    static deviceVector<RealF> beta_p(1);
-    // can prestore the 1 and the zero on device
-    acceleratorCopyToDevice((void *)&alpha,(void *)&alpha_p[0],sizeof(RealF));
-    acceleratorCopyToDevice((void *)&beta ,(void *)&beta_p[0],sizeof(RealF));
+    // HOST pointer mode: pass &alpha, &beta as host pointers; no cudaMemcpy.
     RealD t0=usecond();
 
     GRID_ASSERT(Bkn.size()==batchCount);
@@ -741,10 +735,10 @@ public:
 				   hOpA,
 				   hOpB,
 				   m,n,k,
-				   (float *) &alpha_p[0],
+				   (float *) &alpha,
 				   (float **)&Amk[0], lda,
 				   (float **)&Bkn[0], ldb,
-				   (float *) &beta_p[0],
+				   (float *) &beta,
 				   (float **)&Cmn[0], ldc,
 				   batchCount);
     GRID_ASSERT(err==HIPBLAS_STATUS_SUCCESS);
@@ -762,10 +756,10 @@ public:
 				  hOpA,
 				  hOpB,
 				  m,n,k,
-				  (float *) &alpha_p[0],
+				  (float *) &alpha,
 				  (float **)&Amk[0], lda,
 				  (float **)&Bkn[0], ldb,
-				  (float *) &beta_p[0],
+				  (float *) &beta,
 				  (float **)&Cmn[0], ldc,
 				  batchCount);
     GRID_ASSERT(err==CUBLAS_STATUS_SUCCESS);
@@ -793,10 +787,10 @@ public:
 						  &iOpA,
 						  &iOpB,
 						  &m64,&n64,&k64,
-						  (float *) &alpha_p[0],
+						  (float *) &alpha,
 						  (const float **)&Amk[0], (const int64_t *)&lda64,
 						  (const float **)&Bkn[0], (const int64_t *)&ldb64,
-						  (float *) &beta_p[0],
+						  (float *) &beta,
 						  (float **)&Cmn[0], (const int64_t *)&ldc64,
 						  (int64_t)1,&batchCount64,std::vector<sycl::event>());
       synchronise();
@@ -879,11 +873,7 @@ public:
     if(OpB!=GridBLAS_OP_N)
       ldb = n;
     
-    static deviceVector<RealD> alpha_p(1);
-    static deviceVector<RealD> beta_p(1);
-    // can prestore the 1 and the zero on device
-    acceleratorCopyToDevice((void *)&alpha,(void *)&alpha_p[0],sizeof(RealD));
-    acceleratorCopyToDevice((void *)&beta ,(void *)&beta_p[0],sizeof(RealD));
+    // HOST pointer mode: pass &alpha, &beta as host pointers; no cudaMemcpy.
     RealD t0=usecond();
 
     GRID_ASSERT(Bkn.size()==batchCount);
@@ -901,10 +891,10 @@ public:
 				   HIPBLAS_OP_N,
 				   HIPBLAS_OP_N,
 				   m,n,k,
-				   (double *) &alpha_p[0],
+				   (double *) &alpha,
 				   (double **)&Amk[0], lda,
 				   (double **)&Bkn[0], ldb,
-				   (double *) &beta_p[0],
+				   (double *) &beta,
 				   (double **)&Cmn[0], ldc,
 				   batchCount);
     GRID_ASSERT(err==HIPBLAS_STATUS_SUCCESS);
@@ -922,10 +912,10 @@ public:
 				  hOpA,
 				  hOpB,
 				  m,n,k,
-				  (double *) &alpha_p[0],
+				  (double *) &alpha,
 				  (double **)&Amk[0], lda,
 				  (double **)&Bkn[0], ldb,
-				  (double *) &beta_p[0],
+				  (double *) &beta,
 				  (double **)&Cmn[0], ldc,
 				  batchCount);
     GRID_ASSERT(err==CUBLAS_STATUS_SUCCESS);
@@ -953,10 +943,10 @@ public:
 						  &iOpA,
 						  &iOpB,
 						  &m64,&n64,&k64,
-						  (double *) &alpha_p[0],
+						  (double *) &alpha,
 						  (const double **)&Amk[0], (const int64_t *)&lda64,
 						  (const double **)&Bkn[0], (const int64_t *)&ldb64,
-						  (double *) &beta_p[0],
+						  (double *) &beta,
 						  (double **)&Cmn[0], (const int64_t *)&ldc64,
 						  (int64_t)1,&batchCount64,std::vector<sycl::event>());
       synchronise();

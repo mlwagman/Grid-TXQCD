@@ -226,8 +226,8 @@ BaryonAabCorrelatorPosNeg(const LatticePropagator &S_aa,
   return {contract_proj(+1), contract_proj(-1)};
 }
 
-static std::vector<Coordinate> SourceGrid(const Coordinate &latt) {
-  Coordinate origin = src_grid_origin();
+static std::vector<Coordinate> SourceGrid(const Coordinate &latt, int traj) {
+  Coordinate origin = src_grid_origin(traj);
   const int sx = space_src_per_dim_runtime();
   const int st = time_src_per_dim_runtime();
   std::vector<Coordinate> sites;
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
   }
 
   int T = latt[Nd - 1];
-  auto sources = SourceGrid(latt);
+  auto sources = SourceGrid(latt, traj);
   int nsrc = (int)sources.size();
 
   std::vector<std::vector<RealD>>    all_pion;
@@ -500,6 +500,8 @@ int main(int argc, char **argv) {
     }
   }
 
+  std::cout << GridLogMessage << "[teardown-diag] per-src loop done" << std::endl;
+
   // Per-source SHIFT to source-relative time (Δt = t-t_s mod T).  For pion
   // (no APBC sensitivity), simple shift.  For baryon FORWARD correlator,
   // apply APBC sign: when t_eff + t_s >= T the shifted slice corresponds
@@ -625,9 +627,16 @@ int main(int argc, char **argv) {
       nucl_iso_fb_chroma_avg[t] = 0.5 * (p_fb_chroma_avg[t] + n_fb_chroma_avg[t]);
   }
 
+  // Compute plaq on ALL ranks first — avgPlaquette is an MPI collective,
+  // it must be called outside the IsBoss() guard or rank 0 deadlocks waiting
+  // for ranks 1..N to join its Allreduce.
+  RealD plaq_for_h5 = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
+
   std::string outfile = txqcd_data_dir() + "/conn_txqcd_" + std::to_string(traj) + ".h5";
-  {
+  std::cout << GridLogMessage << "[teardown-diag] entering h5 write (rank 0 only)" << std::endl;
+  if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
+    std::cout << GridLogMessage << "[teardown-diag] Hdf5Writer opened" << std::endl;
     // All averaged correlators are in SOURCE-RELATIVE TIME (Δt = t - t_s mod T)
     // with APBC sign already applied for baryons.  index 0 = source contact,
     // index t > 0 = source-sink separation.
@@ -682,12 +691,24 @@ int main(int argc, char **argv) {
       write(wr, "neutron_tr_per_src_lat", all_n_tr);
     }
     write(wr, "traj", traj);
-    write(wr, "plaq", WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U));
+    write(wr, "plaq", plaq_for_h5);
+    {
+      // Per-cfg source-grid origin shift (zero for cfg<1000, deterministic
+      // mt19937 shift for cfg>=1000; see params.h src_grid_origin).
+      Coordinate s = src_grid_origin(traj);
+      std::vector<int> sv(Nd);
+      for (int d = 0; d < Nd; ++d) sv[d] = s[d];
+      write(wr, "src_shift", sv);
+    }
+    std::cout << GridLogMessage << "[teardown-diag] all writes queued; Hdf5Writer dtor next" << std::endl;
   }
 
+  std::cout << GridLogMessage << "[teardown-diag] Hdf5Writer block exited" << std::endl;
   std::cout << GridLogMessage << "Written " << outfile << std::endl;
 #ifdef GRID_HAVE_QUDA
+  std::cout << GridLogMessage << "[teardown-diag] calling Quda::finalize" << std::endl;
   Grid::Quda::finalize();
+  std::cout << GridLogMessage << "[teardown-diag] Quda::finalize returned" << std::endl;
 #endif
   Grid_finalize();
   return 0;
