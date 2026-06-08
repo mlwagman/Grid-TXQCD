@@ -1,7 +1,11 @@
-GRID_CONFIG = ../build-gpu/grid-config
+# Default to build-gpu (production cluster); local laptop builds typically
+# live in ../build instead.  Override on the command line:
+#   make GRID_BUILD_DIR=../build gen_dtxqcd_cfgs
+GRID_BUILD_DIR ?= ../build-gpu
+GRID_CONFIG = $(GRID_BUILD_DIR)/grid-config
 CXX      = $(shell $(GRID_CONFIG) --cxx)
-CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I../build-gpu/Grid
-LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L../build-gpu/Grid
+CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I$(GRID_BUILD_DIR)/Grid
+LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L$(GRID_BUILD_DIR)/Grid
 LIBS     = $(shell $(GRID_CONFIG) --libs)
 
 # QUDA backend.  Enabled by default — all HMC and measurement binaries link
@@ -28,7 +32,7 @@ ifneq ($(QUDA_PREFIX),)
   endif
 endif
 
-PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
+PROGRAMS = gen_dtxqcd_cfgs gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
            meas_conn_txqcd meas_conn_qcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
            meas_aux_txqcd compare compute_plaq compute_vev \

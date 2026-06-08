@@ -145,6 +145,29 @@ inline std::string txqcd_data_dir() { return "meas_2pt/txqcd_" + lambda_tag() + 
 inline std::string qcd_cfg_dir()    { return "cfgs/qcd" + qcd_suffix_tag(); }
 inline std::string qcd_data_dir()   { return "meas_2pt/qcd" + qcd_suffix_tag(); }
 
+// ===== DTXQCD-specific knobs =====
+// Diquark-tensor variant runs in parallel with TXQCD on the same gauge
+// parameters; override DTXQCD-only physics here.  By default DTXQCD shares
+// MASS_LIGHT / CSW / BETA with TXQCD; if you want to scan dtxqcd's lambda
+// independently set LAMBDA_DTXQCD without touching LAMBDA.
+inline const RealD lambda_dtxqcd   = detail::env_real("LAMBDA_DTXQCD",  lambda);
+inline const RealD mass_light_dtxqcd = detail::env_real("MASS_LIGHT_DTXQCD", mass_light);
+inline std::string lambda_dtxqcd_tag() {
+  std::ostringstream ss;
+  ss << std::fixed << std::setprecision(4) << lambda_dtxqcd;
+  return "lam" + ss.str();
+}
+inline std::string dtxqcd_suffix_tag() {
+  if (const char *s = std::getenv("DTXQCD_SUFFIX"); s && *s) return std::string(s);
+  return "";
+}
+inline std::string dtxqcd_cfg_dir()  {
+  return "cfgs/dtxqcd_" + lambda_dtxqcd_tag() + dtxqcd_suffix_tag();
+}
+inline std::string dtxqcd_data_dir() {
+  return "meas_2pt/dtxqcd_" + lambda_dtxqcd_tag() + dtxqcd_suffix_tag();
+}
+
 // ===== Measurement trajectories =====
 inline std::vector<int> meas_trajs() {
   std::vector<int> v;
