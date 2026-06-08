@@ -154,14 +154,44 @@ struct DtxqcdSiteAux {
   }
 };
 
+// Site-local clover field strength values: 6 (mu<nu) color matrices F_{mu,nu}
+// extracted from a std::vector<LatticeColourMatrix> of size 6 (Grid clover
+// convention: anti-Hermitian color matrix per pair).  Built by peeking the
+// per-pair lattice at a single coordinate.
+struct DtxqcdSiteClover {
+  std::array<Eigen::Matrix3cd, 6> F_munu;
+
+  static DtxqcdSiteClover Extract(
+      const std::vector<LatticeColourMatrix> &FS,
+      const Coordinate &coord) {
+    DtxqcdSiteClover out;
+    typedef typename LatticeColourMatrix::vector_object::scalar_object SiteCM;
+    for (int p = 0; p < 6; ++p) {
+      SiteCM f_s;
+      peekSite(f_s, FS[p], coord);
+      out.F_munu[p] = Eigen::Matrix3cd::Zero();
+      for (int i = 0; i < Nc; ++i)
+        for (int j = 0; j < Nc; ++j)
+          out.F_munu[p](i, j) = ComplexD(TensorRemove(f_s()()(i, j)));
+    }
+    return out;
+  }
+};
+
 // ---------- Block builders ----------
 
 // Diagonal-block builder: M_diag = mass * I_24 + Delta_diag (sigma^A, pi^A,
 // t^A) using the Pauli flavor structure v^A_{a,b} = tau^A_{a,b}.
+// tensor_sign = +1 for the upper diagonal block (standard), -1 for the
+// lower diagonal block — matches the Cstar M_22 = C^T X^T C construction
+// where the tensor piece of X picks up a sign flip from
+// C^T sigma_{mu,nu}^T C = -sigma_{mu,nu} (sigma and pi pieces are
+// invariant under that operation; see DTXQCDDeltaOp.h).
 inline void DtxqcdBuildDiagBlock24(double mass,
                                     const DtxqcdSiteAux& aux,
                                     const DtxqcdSpinMatrices& spin,
-                                    Eigen::MatrixXcd& M) {
+                                    Eigen::MatrixXcd& M,
+                                    double tensor_sign = +1.0) {
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int row = 0; row < kDtxqcdSiteDim24; ++row) M(row, row) = ComplexD(mass, 0);
 
@@ -188,9 +218,11 @@ inline void DtxqcdBuildDiagBlock24(double mass,
             }
           }
         }
-        // tensor: sum mu<nu of i t^A_{mu,nu} sigma_{mu,nu} diagonal-in-color
+        // tensor: sum mu<nu of tensor_sign * i * t^A_{mu,nu} sigma_{mu,nu}
+        // diagonal-in-color.  tensor_sign = +1 for upper block, -1 for lower.
+        const ComplexD ci_signed = ComplexD(0.0, tensor_sign);
         for (int p_idx = 0; p_idx < 6; ++p_idx) {
-          ComplexD coef_t = ci * aux.t[p_idx][A] * tab;
+          ComplexD coef_t = ci_signed * aux.t[p_idx][A] * tab;
           for (int alpha = 0; alpha < Ns; ++alpha) {
             for (int beta = 0; beta < Ns; ++beta) {
               ComplexD smn_ab = spin.sigma_munu[p_idx](alpha, beta);
@@ -207,21 +239,65 @@ inline void DtxqcdBuildDiagBlock24(double mass,
   }
 }
 
-// Upper / lower diagonal blocks.  v1: identical (site-local QCD piece has no
-// C-conjugation distinction without clover).  Function names already
-// distinguished so DTXQCDDeltaCloverOp can plug into BuildLowerBlock24
-// later with C (clover) C^T.
+// Add the clover contribution to a 24x24 diagonal block:
+//   upper:  M += -(csw/2) sum_{mu<nu} F_{mu,nu} sigma_{mu,nu}_Grid  (delta in flavor)
+//   lower:  M += +(csw/2) sum_{mu<nu} F^T_{mu,nu} sigma_{mu,nu}_Grid
+// Color matrix F (or F^T for lower) acts on color indices (i,j); sigma_munu
+// acts on spin (alpha,beta); identity in flavor (a == a').
+// lower_block = true selects the +csw/2 prefactor and color-transposed F.
+inline void DtxqcdAddCloverToDiagBlock24(
+    double csw,
+    const DtxqcdSiteClover &clover,
+    const DtxqcdSpinMatrices &spin,
+    Eigen::MatrixXcd &M,
+    bool lower_block = false) {
+  if (csw == 0.0) return;
+  const double prefactor = lower_block ? +0.5 * csw : -0.5 * csw;
+  for (int p = 0; p < 6; ++p) {
+    Eigen::Matrix3cd F = lower_block
+                              ? Eigen::Matrix3cd(clover.F_munu[p].transpose())
+                              : clover.F_munu[p];
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int alpha = 0; alpha < Ns; ++alpha) {
+        for (int beta = 0; beta < Ns; ++beta) {
+          ComplexD smn_ab = spin.sigma_munu[p](alpha, beta);
+          for (int i = 0; i < Nc; ++i) {
+            for (int j = 0; j < Nc; ++j) {
+              int row = DtxqcdSiteIdx24(a, alpha, i);
+              int col = DtxqcdSiteIdx24(a, beta, j);
+              M(row, col) += prefactor * F(i, j) * smn_ab;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Upper / lower diagonal blocks.  Differ by:
+//   (a) tensor piece sign in Delta_diag (C^T sigma^T C = -sigma)
+//   (b) clover prefactor sign and color-transposed F (Cstar M_22 = C^T D^T C)
+// Clover is added only when (csw != 0 && clover != nullptr) — defaults give
+// the no-clover behavior so existing callers continue to work.
 inline void DtxqcdBuildUpperBlock24(double mass,
-                                    const DtxqcdSiteAux& aux,
-                                    const DtxqcdSpinMatrices& spin,
-                                    Eigen::MatrixXcd& M) {
-  DtxqcdBuildDiagBlock24(mass, aux, spin, M);
+                                    const DtxqcdSiteAux &aux,
+                                    const DtxqcdSpinMatrices &spin,
+                                    Eigen::MatrixXcd &M,
+                                    double csw = 0.0,
+                                    const DtxqcdSiteClover *clover = nullptr) {
+  DtxqcdBuildDiagBlock24(mass, aux, spin, M, +1.0);
+  if (csw != 0.0 && clover != nullptr)
+    DtxqcdAddCloverToDiagBlock24(csw, *clover, spin, M, /*lower_block=*/false);
 }
 inline void DtxqcdBuildLowerBlock24(double mass,
-                                    const DtxqcdSiteAux& aux,
-                                    const DtxqcdSpinMatrices& spin,
-                                    Eigen::MatrixXcd& M) {
-  DtxqcdBuildDiagBlock24(mass, aux, spin, M);
+                                    const DtxqcdSiteAux &aux,
+                                    const DtxqcdSpinMatrices &spin,
+                                    Eigen::MatrixXcd &M,
+                                    double csw = 0.0,
+                                    const DtxqcdSiteClover *clover = nullptr) {
+  DtxqcdBuildDiagBlock24(mass, aux, spin, M, -1.0);
+  if (csw != 0.0 && clover != nullptr)
+    DtxqcdAddCloverToDiagBlock24(csw, *clover, spin, M, /*lower_block=*/true);
 }
 
 // Off-diagonal block: 2 d gamma5 + 2 n.  Identity in flavor; color matrix

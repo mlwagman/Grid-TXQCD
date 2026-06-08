@@ -13,12 +13,16 @@
 // Off-diagonal d, n cross-term (DtxqcdApplyDnCross): identity in flavor;
 // color matrix d, n; gamma5 in spin (for d) or identity in spin (for n).
 //
-// v1 caveat: M_lower's QCD diagonal is m * I_color (same as upper); will
-// diverge once Delta_clover is added in C clover C^T form.  Until then the
-// site-local QCD pieces are identical and we apply Delta_diag to both
-// upper and lower with the same code path.
+// Lower-block Delta_diag follows the Cstar M_22 = C^T X^T C construction:
+// sigma and pi pieces unchanged (C^T (.)^T C is identity on Hermitian
+// spinless and gamma_5 spin structures), tensor piece sign-flipped
+// (C^T sigma^T C = -sigma).  Mass and d, n cross-coupling are identical
+// upper/lower.  Clover contribution (where upper -> -(csw/2) F sigma and
+// lower -> +(csw/2) F^T sigma) is added when DTXQCDDeltaCloverOp is wired
+// into the Mooee path with a per-site F_{mu,nu}.
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDDeltaOp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDDeltaCloverOp.h>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -55,24 +59,36 @@ inline void DtxqcdApplyDnCross(const LatticeDtxqcdD &d,
 
 // Full doubled M_ee application:
 //   out_upper = mass * in_upper + Delta_diag(in_upper) + (2 d g5 + 2 n) in_lower
-//   out_lower = mass * in_lower + Delta_diag(in_lower) + (2 d g5 + 2 n) in_upper
-inline void DtxqcdApplyMooeeDoubled(double mass,
-                                    const LatticeDtxqcdSigma &sigma,
-                                    const LatticeDtxqcdPi &pi,
-                                    const LatticeDtxqcdT &t,
-                                    const LatticeDtxqcdD &d,
-                                    const LatticeDtxqcdN &n,
-                                    const DTXQCDFermionNf &in_upper,
-                                    const DTXQCDFermionNf &in_lower,
-                                    DTXQCDFermionNf &out_upper,
-                                    DTXQCDFermionNf &out_lower) {
+//                + (csw && FS ? -(csw/2) F sigma in_upper : 0)
+//   out_lower = mass * in_lower + Delta_diag_lower(in_lower) + (2 d g5 + 2 n) in_upper
+//                + (csw && FS ? +(csw/2) F^T sigma in_lower : 0)
+//
+// Clover is optional: pass csw = 0 (default) or FS = nullptr to skip the
+// clover contribution.  When csw != 0 && FS != nullptr, FS is a 6-entry
+// vector of LatticeColourMatrix holding the (mu<nu) anti-Hermitian field
+// strength in Grid/TXQCD convention.
+inline void DtxqcdApplyMooeeDoubled(
+    double mass,
+    const LatticeDtxqcdSigma &sigma,
+    const LatticeDtxqcdPi &pi,
+    const LatticeDtxqcdT &t,
+    const LatticeDtxqcdD &d,
+    const LatticeDtxqcdN &n,
+    const DTXQCDFermionNf &in_upper,
+    const DTXQCDFermionNf &in_lower,
+    DTXQCDFermionNf &out_upper,
+    DTXQCDFermionNf &out_lower,
+    double csw = 0.0,
+    const std::vector<LatticeColourMatrix> *FS = nullptr) {
   GridBase *grid = in_upper.Grid();
   int cb = in_upper.f[0].Checkerboard();
 
-  // Diagonal: Delta_diag piece for upper and lower.
+  // Diagonal: Delta_diag piece for upper and lower.  Lower-block uses
+  // DtxqcdApplyDeltaDiagLower (Cstar M_22 = C^T X^T C: sigma and pi pieces
+  // unchanged, tensor piece sign-flipped).
   DTXQCDFermionNf diag_upper(grid), diag_lower(grid);
   DtxqcdApplyDeltaDiag(sigma, pi, t, in_upper, diag_upper);
-  DtxqcdApplyDeltaDiag(sigma, pi, t, in_lower, diag_lower);
+  DtxqcdApplyDeltaDiagLower(sigma, pi, t, in_lower, diag_lower);
 
   // Off-diagonal: (2 d g5 + 2 n) cross-term.
   DTXQCDFermionNf off_upper(grid), off_lower(grid);
@@ -89,6 +105,17 @@ inline void DtxqcdApplyMooeeDoubled(double mass,
                    + diag_lower.f[a]
                    + off_lower.f[a];
     out_lower.f[a].Checkerboard() = cb;
+  }
+
+  // Optional clover contribution: upper -(csw/2) F sigma, lower +(csw/2) F^T sigma.
+  if (csw != 0.0 && FS != nullptr) {
+    DTXQCDFermionNf clov_upper(grid), clov_lower(grid);
+    DtxqcdApplyCloverUpper(csw, *FS, in_upper, clov_upper);
+    DtxqcdApplyCloverLower(csw, *FS, in_lower, clov_lower);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      out_upper.f[a] = out_upper.f[a] + clov_upper.f[a];
+      out_lower.f[a] = out_lower.f[a] + clov_lower.f[a];
+    }
   }
 }
 

@@ -143,7 +143,14 @@ inline void DtxqcdApplyDeltaSigmaPi(const LatticeDtxqcdSigma &sigma,
 }
 
 // Apply the t^A_{mu,nu} tensor piece of Delta_diag (OVERWRITE semantics):
-//   out[a] = sum_{A,b,mu<nu} t^A_{mu,nu} tau^A_{a,b} sigma_{mu,nu} in[b]
+//   out[a] = block_sign * sum_{A,b,mu<nu} t^A_{mu,nu} tau^A_{a,b} sigma_{mu,nu} in[b]
+//
+// block_sign is +1 for the upper-block insertion (default) and -1 for the
+// lower block: the Cstar doubled construction M_22 = C^T X^T C transforms
+// the tensor piece of X via C^T sigma^T C = -sigma, so the tensor
+// contribution sign-flips between upper and lower diagonals.  The sigma and
+// pi pieces are invariant under C^T (.)^T C and have no upper/lower
+// distinction (so DtxqcdApplyDeltaSigmaPi has no block parameter).
 //
 // The (1/2) prefactor on the formula sum_{mu,nu} t^A sigma_{mu,nu} becomes 1
 // when restricted to mu<nu via the joint antisymmetry of t and sigma.
@@ -153,7 +160,8 @@ inline void DtxqcdApplyDeltaSigmaPi(const LatticeDtxqcdSigma &sigma,
 // extract each (mu,nu, A) scalar as a LatticeComplex slice; accumulate.
 inline void DtxqcdApplyDeltaTensor(const LatticeDtxqcdT &t,
                                    const DTXQCDFermionNf &in,
-                                   DTXQCDFermionNf &out) {
+                                   DTXQCDFermionNf &out,
+                                   double block_sign = +1.0) {
   GridBase *grid = in.Grid();
   int cb = in.f[0].Checkerboard();
 
@@ -196,7 +204,7 @@ inline void DtxqcdApplyDeltaTensor(const LatticeDtxqcdT &t,
   // the conventional i factor — and is anti-Hermitian.  Multiplying by i
   // gives the Hermitian sigma_{mu,nu} = (i/2)[gamma_mu, gamma_nu] the formula
   // calls for.  (TXQCDDeltaOp does the same; see Test_dtxqcd_delta_herm.)
-  const ComplexD ci(0.0, 1.0);
+  const ComplexD ci_signed(0.0, block_sign);  // block_sign * i for upper(+1)/lower(-1)
   for (int a = 0; a < DtxqcdNf; ++a) {
     LatticeFermion acc(grid);
     acc.Checkerboard() = cb;
@@ -209,7 +217,7 @@ inline void DtxqcdApplyDeltaTensor(const LatticeDtxqcdT &t,
           for (int A = 0; A < DtxqcdNTriplet; ++A) {
             ComplexD tau_ab = DtxqcdPauli::tau(A, a, b);
             if (tau_ab == ComplexD(0.0, 0.0)) continue;
-            acc = acc + (ci * tau_ab) * (tA_munu[k][A] * smn_in[k][b]);
+            acc = acc + (ci_signed * tau_ab) * (tA_munu[k][A] * smn_in[k][b]);
           }
         }
         ++k;
@@ -220,8 +228,8 @@ inline void DtxqcdApplyDeltaTensor(const LatticeDtxqcdT &t,
   }
 }
 
-// Apply the full Delta_diag = (sigma^A, pi^A) + tensor pieces.  out is
-// overwritten with the sum.
+// Apply the full Delta_diag = (sigma^A, pi^A) + tensor pieces (upper-block
+// convention).  out is overwritten with the sum.
 inline void DtxqcdApplyDeltaDiag(const LatticeDtxqcdSigma &sigma,
                                  const LatticeDtxqcdPi    &pi,
                                  const LatticeDtxqcdT     &t,
@@ -229,7 +237,20 @@ inline void DtxqcdApplyDeltaDiag(const LatticeDtxqcdSigma &sigma,
                                  DTXQCDFermionNf &out) {
   DTXQCDFermionNf tmp(in.Grid());
   DtxqcdApplyDeltaSigmaPi(sigma, pi, in, out);
-  DtxqcdApplyDeltaTensor(t, in, tmp);
+  DtxqcdApplyDeltaTensor(t, in, tmp, +1.0);
+  for (int a = 0; a < DtxqcdNf; ++a) out.f[a] = out.f[a] + tmp.f[a];
+}
+
+// Apply the lower-block Delta_diag insertion (Cstar M_22 = C^T X^T C):
+// sigma and pi pieces unchanged; tensor piece sign-flipped (block_sign = -1).
+inline void DtxqcdApplyDeltaDiagLower(const LatticeDtxqcdSigma &sigma,
+                                       const LatticeDtxqcdPi    &pi,
+                                       const LatticeDtxqcdT     &t,
+                                       const DTXQCDFermionNf &in,
+                                       DTXQCDFermionNf &out) {
+  DTXQCDFermionNf tmp(in.Grid());
+  DtxqcdApplyDeltaSigmaPi(sigma, pi, in, out);
+  DtxqcdApplyDeltaTensor(t, in, tmp, -1.0);
   for (int a = 0; a < DtxqcdNf; ++a) out.f[a] = out.f[a] + tmp.f[a];
 }
 

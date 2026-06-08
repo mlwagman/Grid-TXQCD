@@ -68,10 +68,33 @@ int main(int argc, char** argv) {
 
   check("M_upper Hermiticity (rel)",
         (M_upper - M_upper.adjoint()).norm() / M_upper.norm(), 1e-12);
+  check("M_lower Hermiticity (rel)",
+        (M_lower - M_lower.adjoint()).norm() / M_lower.norm(), 1e-12);
   check("offdiag(d=n=0) norm", M_offdiag_zero.norm(), 1e-14);
   check("M_off Hermiticity (rel)",
         (M_offdiag_full - M_offdiag_full.adjoint()).norm()
             / std::max(M_offdiag_full.norm(), 1.0), 1e-12);
+
+  // Validate that aux fields alone (no clover) produce distinct upper/lower
+  // diagonal blocks: the tensor piece of Delta_diag sign-flips under the
+  // Cstar M_22 = C^T X^T C construction (C^T sigma^T C = -sigma), giving
+  // M_upper - M_lower = 2 * Delta_tensor.  This must be substantially
+  // nonzero or the lower-block tensor sign-flip has been silently lost.
+  RealD upper_lower_rel = (M_upper - M_lower).norm()
+                        / std::max(M_upper.norm(), 1.0);
+  std::cout << GridLogMessage << "||M_upper - M_lower|| / ||M_upper|| = "
+            << upper_lower_rel
+            << "  (= 2 ||Delta_tensor|| / ||M_upper||)" << std::endl;
+  if (upper_lower_rel < 1e-6) {
+    std::cout << GridLogError
+              << "[FAIL] M_upper and M_lower agree to 1e-6 from aux alone — "
+              << "the lower-block tensor sign-flip may be lost" << std::endl;
+    exitcode = 1;
+  } else {
+    std::cout << GridLogMessage
+              << "[ok] aux fields alone produce distinct upper/lower blocks"
+              << std::endl;
+  }
 
   MatrixXcd M48_with_dn, M48_no_dn;
   DtxqcdAssembleDoubled48(M_upper, M_lower, M_offdiag_full, M48_with_dn);

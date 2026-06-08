@@ -1,13 +1,17 @@
-// Test_dtxqcd_mooee_consistency: verify that fermion-level application of the
-// doubled M_ee operator (DTXQCDMooeeOp.h) gives the same result, site by site,
-// as multiplication by the dense 48x48 SiteMatrix (DTXQCDSiteMatrix.h).
+// Test_dtxqcd_mooee_clover_consistency: verify that the fermion-level
+// doubled M_ee operator (DtxqcdApplyMooeeDoubled with clover enabled) and
+// the dense 48x48 SiteMatrix (DTXQCDSiteMatrix.h with clover enabled)
+// produce bit-identical results, site by site, when csw != 0 and a random
+// anti-Hermitian F_{mu,nu} field strength is supplied.
 //
-// This catches indexing bugs in either path: if BuildUpperBlock24 packs
-// (flavor, spin, color) in one order and DtxqcdApplyDeltaDiag in another, the
-// two will diverge.  Agreement to ~1e-12 across every site of a 4^4 lattice
-// validates that the EO operator can use either representation interchangeably.
+// Together with the non-clover Test_dtxqcd_mooee_consistency, this nails
+// down that the clover wiring (DTXQCDDeltaCloverOp + DtxqcdAddCloverToDiagBlock24)
+// implements the same math in both representations.  Also prints
+// ||M_upper - M_lower|| at a sample site to make explicit that the Cstar
+// construction does produce distinct diagonal blocks (now both from the
+// tensor-sign flip and from the clover F vs F^T transformation).
 //
-// Run: ./tests/dtxqcd/Test_dtxqcd_mooee_consistency --grid 4.4.4.4 --mpi 1.1.1.1
+// Run: ./tests/dtxqcd/Test_dtxqcd_mooee_clover_consistency --grid 4.4.4.4 --mpi 1.1.1.1
 
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
@@ -25,12 +29,13 @@ int main(int argc, char **argv) {
   Coordinate mpi  = GridDefaultMpi();
   GridCartesian Grid(latt, simd, mpi);
   GridParallelRNG pRNG(&Grid);
-  pRNG.SeedFixedIntegers({7, 11, 13, 17});
+  pRNG.SeedFixedIntegers({81, 82, 83, 84});
 
   int exitcode = 0;
 
   DtxqcdSpinMatrices spin(Grid);
 
+  // Aux fields.
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
   LatticeDtxqcdT     t(&Grid);
@@ -42,6 +47,18 @@ int main(int argc, char **argv) {
   DtxqcdHermitianGaussian(pRNG, d);
   DtxqcdHermitianGaussian(pRNG, n);
 
+  // Random anti-Hermitian field strength F_{mu,nu} per (mu<nu) pair.
+  std::vector<LatticeColourMatrix> FS;
+  FS.reserve(6);
+  for (int k = 0; k < 6; ++k) {
+    LatticeColourMatrix X(&Grid);
+    gaussian(pRNG, X);
+    LatticeColourMatrix F(&Grid);
+    F = X - adj(X);
+    FS.push_back(std::move(F));
+  }
+
+  // Random doubled fermion input.
   DTXQCDFermionNf in_upper(&Grid), in_lower(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {
     gaussian(pRNG, in_upper.f[a]);
@@ -49,15 +66,16 @@ int main(int argc, char **argv) {
   }
 
   const double mass = 0.4;
+  const double csw  = 1.25;
 
-  // Operator-level application.
+  // Operator-level apply (with clover).
   DTXQCDFermionNf out_upper_op(&Grid), out_lower_op(&Grid);
   DtxqcdApplyMooeeDoubled(mass, sigma, pi, t, d, n,
                           in_upper, in_lower,
-                          out_upper_op, out_lower_op);
+                          out_upper_op, out_lower_op,
+                          csw, &FS);
 
-  // SiteMatrix-level reference: site by site, build 48x48, multiply by the
-  // packed 48-component input fermion site value, unpack into out_ref.
+  // SiteMatrix-level reference, site by site (with clover).
   DTXQCDFermionNf out_upper_ref(&Grid), out_lower_ref(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {
     out_upper_ref.f[a] = Zero();
@@ -67,10 +85,6 @@ int main(int argc, char **argv) {
   typedef typename LatticeFermion::vector_object::scalar_object SiteFerm;
 
   RealD worst_resid = 0.0;
-  RealD worst_norm  = 0.0;
-  // Track upper-vs-lower diagonal-block distinction at the origin (no clover
-  // in this test — distinction comes purely from the tensor sign-flip in
-  // the aux insertion, via the Cstar M_22 = C^T X^T C construction).
   RealD upper_lower_diff_at_origin = 0.0;
   RealD upper_norm_at_origin       = 0.0;
   Coordinate gd(Grid.GlobalDimensions());
@@ -81,21 +95,21 @@ int main(int argc, char **argv) {
           Coordinate coord(std::vector<int>{x, y, z, tt});
 
           DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, t, d, n, coord);
+          DtxqcdSiteClover clover = DtxqcdSiteClover::Extract(FS, coord);
+
           MatrixXcd M_upper, M_lower, M_off, M48;
-          DtxqcdBuildUpperBlock24(mass, aux, spin, M_upper);
-          DtxqcdBuildLowerBlock24(mass, aux, spin, M_lower);
+          DtxqcdBuildUpperBlock24(mass, aux, spin, M_upper, csw, &clover);
+          DtxqcdBuildLowerBlock24(mass, aux, spin, M_lower, csw, &clover);
           DtxqcdBuildOffDiagBlock24(aux, spin, M_off);
           DtxqcdAssembleDoubled48(M_upper, M_lower, M_off, M48);
 
-          // Sanity at the origin: M_upper and M_lower should already differ
-          // from the tensor sign-flip alone (no clover in this test).
+          // Sanity print at the origin: how different are upper and lower now?
           if (x == 0 && y == 0 && z == 0 && tt == 0) {
             upper_lower_diff_at_origin = (M_upper - M_lower).norm();
             upper_norm_at_origin       = M_upper.norm();
           }
 
-          // Pack input doubled fermion at this site into a 48-vector.
-          // Layout: [upper(a, alpha, color)... | lower(a, alpha, color)...]
+          // Pack input fermion at this site into the 48-vector.
           VectorXcd in_vec(kDtxqcdSiteDim48);
           for (int a = 0; a < DtxqcdNf; ++a) {
             SiteFerm su, sl;
@@ -110,11 +124,7 @@ int main(int argc, char **argv) {
               }
             }
           }
-
-          // Apply M48.
           VectorXcd out_vec = M48 * in_vec;
-
-          // Unpack and poke back into out_upper_ref / out_lower_ref.
           for (int a = 0; a < DtxqcdNf; ++a) {
             SiteFerm su, sl;
             su = Zero();
@@ -131,9 +141,7 @@ int main(int argc, char **argv) {
             pokeSite(sl, out_lower_ref.f[a], coord);
           }
 
-          // Per-site residual: ||op_at_site - ref_at_site||^2 contribution.
-          // (Aggregate full-lattice residual after the loop is cleaner; this
-          // local accumulator is just for the worst-site monitor.)
+          // Per-site worst residual monitor.
           for (int a = 0; a < DtxqcdNf; ++a) {
             SiteFerm su_op, sl_op, su_ref, sl_ref;
             peekSite(su_op,  out_upper_op.f[a],  coord);
@@ -150,10 +158,6 @@ int main(int argc, char **argv) {
                   - ComplexD(TensorRemove(sl_ref()(alpha)(i)));
                 worst_resid = std::max(worst_resid, std::abs(du));
                 worst_resid = std::max(worst_resid, std::abs(dl));
-                worst_norm  = std::max(worst_norm,
-                    std::abs(ComplexD(TensorRemove(su_ref()(alpha)(i)))));
-                worst_norm  = std::max(worst_norm,
-                    std::abs(ComplexD(TensorRemove(sl_ref()(alpha)(i)))));
               }
             }
           }
@@ -180,29 +184,21 @@ int main(int argc, char **argv) {
   };
 
   std::cout << GridLogMessage
-            << "ref output L2 norm = " << std::sqrt(ref_sq)
-            << "  worst |out| = " << worst_norm << std::endl;
-
-  // Aux-only upper-vs-lower distinction at the origin.
-  std::cout << GridLogMessage
-            << "M_upper, M_lower @ origin (aux only): ||M_upper|| = "
-            << upper_norm_at_origin
+            << "M_upper, M_lower @ origin: ||M_upper|| = " << upper_norm_at_origin
             << "  ||M_upper - M_lower|| = " << upper_lower_diff_at_origin
             << "  rel = "
             << (upper_lower_diff_at_origin / std::max(upper_norm_at_origin, 1.0))
             << std::endl;
-  if (upper_lower_diff_at_origin <
-      1e-6 * std::max(upper_norm_at_origin, 1.0)) {
+  if (upper_lower_diff_at_origin < 1e-8 * std::max(upper_norm_at_origin, 1.0)) {
     std::cout << GridLogError
-              << "[FAIL] M_upper = M_lower from aux alone — tensor sign-flip"
-              << " in DtxqcdBuildLowerBlock24 has been lost" << std::endl;
+              << "[FAIL] M_upper and M_lower agree to 1e-8 — clover or tensor"
+              << " distinction may be lost" << std::endl;
     exitcode = 1;
   } else {
     std::cout << GridLogMessage
-              << "[ok] aux fields alone produce distinct upper/lower blocks"
+              << "[ok] M_upper != M_lower (Cstar construction is active)"
               << std::endl;
   }
-
   check("op vs SiteMatrix worst per-component residual", worst_resid, 1e-11);
   check("op vs SiteMatrix full-lattice relative L2",     rel_l2,      1e-12);
 
