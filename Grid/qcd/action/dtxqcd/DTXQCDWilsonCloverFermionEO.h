@@ -103,26 +103,37 @@ class DTXQCDWilsonCloverFermionEO {
 
   // Mooee psi: site-local diagonal block of M on the input checkerboard.
   // Adds mass*in + Delta_diag (upper) / Delta_diag_lower (lower) + d, n cross
-  // + clover.  No hopping.
+  // + clover.  No hopping.  When the input lives on rbgrid_ (CB lattice),
+  // dispatches to SiteWiseApply since the aux fields live on grid_ (full)
+  // and the lattice-wide DtxqcdApplyMooeeDoubled path conformability-asserts.
   void Mooee(const Field &in, Field &out) {
-    DtxqcdApplyMooeeDoubled(mass_, sigma_, pi_, t_, d_, n_,
-                            in.upper, in.lower, out.upper, out.lower,
-                            csw_, (csw_ != 0.0 ? &FS_ : nullptr));
+    if (in.upper.f[0].Grid() == &rbgrid_) {
+      SiteWiseApply(in, out, /*dag=*/false);
+    } else {
+      DtxqcdApplyMooeeDoubled(mass_, sigma_, pi_, t_, d_, n_,
+                              in.upper, in.lower, out.upper, out.lower,
+                              csw_, (csw_ != 0.0 ? &FS_ : nullptr));
+    }
   }
 
-  // MooeeDag psi via gamma_5 Mooee gamma_5 (same trick as Mdag; Mooee is
-  // itself gamma_5-Hermitian by the per-block analysis).
+  // MooeeDag psi.  For full-grid input we use the gamma_5 Mooee gamma_5 trick;
+  // for CB input we go through SiteWiseApply with the dag flag (avoids a
+  // double-gamma_5 wrap that would still leave us with a CB input).
   void MooeeDag(const Field &in, Field &out) {
-    Gamma g5(Gamma::Algebra::Gamma5);
-    Field g5_in(in.Grid()), tmp(in.Grid());
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      g5_in.upper.f[a] = g5 * in.upper.f[a];
-      g5_in.lower.f[a] = g5 * in.lower.f[a];
-    }
-    Mooee(g5_in, tmp);
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      out.upper.f[a] = g5 * tmp.upper.f[a];
-      out.lower.f[a] = g5 * tmp.lower.f[a];
+    if (in.upper.f[0].Grid() == &rbgrid_) {
+      SiteWiseApply(in, out, /*dag=*/true);
+    } else {
+      Gamma g5(Gamma::Algebra::Gamma5);
+      Field g5_in(in.Grid()), tmp(in.Grid());
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        g5_in.upper.f[a] = g5 * in.upper.f[a];
+        g5_in.lower.f[a] = g5 * in.lower.f[a];
+      }
+      Mooee(g5_in, tmp);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        out.upper.f[a] = g5 * tmp.upper.f[a];
+        out.lower.f[a] = g5 * tmp.lower.f[a];
+      }
     }
   }
 
@@ -205,15 +216,24 @@ class DTXQCDWilsonCloverFermionEO {
   // lattice site, builds the doubled site matrix M48 from the aux + clover
   // values at that site, packs the input doubled fermion into a 48-vector,
   // solves M48 x = b (or M48^dag x = b for dag), unpacks back.
-  void SiteWiseSolve(const Field &in, Field &out, bool dag) {
+  // Per-site forward apply of M_ee_48 (no inversion).  Used by Mooee /
+  // MooeeDag when the input lives on rbgrid_ (CB).  Same per-site assembly
+  // as SiteWiseSolve, just `xv = M48 * b` instead of `solve`.  Skips sites
+  // whose parity doesn't match the input CB tag.
+  void SiteWiseApply(const Field &in, Field &out, bool dag) {
     typedef typename LatticeFermion::vector_object::scalar_object SiteFerm;
     Coordinate gd(grid_.GlobalDimensions());
     Coordinate coord(Nd, 0);
+    const bool in_is_cb = (in.upper.f[0].Grid() == &rbgrid_);
+    const int  in_cb    = in.upper.f[0].Checkerboard();
 
-    // Initialize out to zero (we'll pokeSite into the right CB sites).
     for (int a = 0; a < DtxqcdNf; ++a) {
       out.upper.f[a] = Zero();
       out.lower.f[a] = Zero();
+      if (in_is_cb) {
+        out.upper.f[a].Checkerboard() = in_cb;
+        out.lower.f[a].Checkerboard() = in_cb;
+      }
     }
 
     for (int x = 0; x < gd[0]; ++x) {
@@ -221,6 +241,97 @@ class DTXQCDWilsonCloverFermionEO {
         for (int z = 0; z < gd[2]; ++z) {
           for (int s = 0; s < gd[3]; ++s) {
             coord = Coordinate(std::vector<int>{x, y, z, s});
+            if (in_is_cb) {
+              int site_parity = ((x + y + z + s) & 1);
+              if (site_parity != in_cb) continue;
+            }
+            DtxqcdSiteAux aux =
+                DtxqcdSiteAux::Extract(sigma_, pi_, t_, d_, n_, coord);
+            Eigen::MatrixXcd M_upper, M_lower, M_off, M48;
+            if (csw_ != 0.0) {
+              DtxqcdSiteClover clover = DtxqcdSiteClover::Extract(FS_, coord);
+              DtxqcdBuildUpperBlock24(mass_, aux, spin_, M_upper, csw_, &clover);
+              DtxqcdBuildLowerBlock24(mass_, aux, spin_, M_lower, csw_, &clover);
+            } else {
+              DtxqcdBuildUpperBlock24(mass_, aux, spin_, M_upper);
+              DtxqcdBuildLowerBlock24(mass_, aux, spin_, M_lower);
+            }
+            DtxqcdBuildOffDiagBlock24(aux, spin_, M_off);
+            DtxqcdAssembleDoubled48(M_upper, M_lower, M_off, M48);
+
+            Eigen::VectorXcd b(kDtxqcdSiteDim48);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              SiteFerm su, sl;
+              peekSite(su, in.upper.f[a], coord);
+              peekSite(sl, in.lower.f[a], coord);
+              for (int alpha = 0; alpha < Ns; ++alpha)
+                for (int i = 0; i < Nc; ++i) {
+                  int iu = DtxqcdSiteIdx24(a, alpha, i);
+                  int il = kDtxqcdSiteDim24 + iu;
+                  b(iu) = ComplexD(TensorRemove(su()(alpha)(i)));
+                  b(il) = ComplexD(TensorRemove(sl()(alpha)(i)));
+                }
+            }
+            Eigen::VectorXcd xv;
+            if (dag) {
+              Eigen::MatrixXcd M48d = M48.adjoint();
+              xv = M48d * b;
+            } else {
+              xv = M48 * b;
+            }
+
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              SiteFerm su, sl;
+              su = Zero();
+              sl = Zero();
+              for (int alpha = 0; alpha < Ns; ++alpha)
+                for (int i = 0; i < Nc; ++i) {
+                  int iu = DtxqcdSiteIdx24(a, alpha, i);
+                  int il = kDtxqcdSiteDim24 + iu;
+                  su()(alpha)(i) = xv(iu);
+                  sl()(alpha)(i) = xv(il);
+                }
+              pokeSite(su, out.upper.f[a], coord);
+              pokeSite(sl, out.lower.f[a], coord);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  void SiteWiseSolve(const Field &in, Field &out, bool dag) {
+    typedef typename LatticeFermion::vector_object::scalar_object SiteFerm;
+    Coordinate gd(grid_.GlobalDimensions());
+    Coordinate coord(Nd, 0);
+
+    // Detect CB of input.  When called on an rbgrid_ lattice, in's
+    // Checkerboard() returns Even or Odd; only sites of that parity may be
+    // peeked / poked.  When called on a full grid (e.g. via the full-volume
+    // M()), every site is valid.
+    const bool in_is_cb = (in.upper.f[0].Grid() == &rbgrid_);
+    const int  in_cb    = in.upper.f[0].Checkerboard();
+
+    // Initialize out to zero (we'll pokeSite into the right CB sites).
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      out.upper.f[a] = Zero();
+      out.lower.f[a] = Zero();
+      if (in_is_cb) {
+        out.upper.f[a].Checkerboard() = in_cb;
+        out.lower.f[a].Checkerboard() = in_cb;
+      }
+    }
+
+    for (int x = 0; x < gd[0]; ++x) {
+      for (int y = 0; y < gd[1]; ++y) {
+        for (int z = 0; z < gd[2]; ++z) {
+          for (int s = 0; s < gd[3]; ++s) {
+            coord = Coordinate(std::vector<int>{x, y, z, s});
+            // Skip sites whose CB doesn't match the input lattice's tag.
+            if (in_is_cb) {
+              int site_parity = ((x + y + z + s) & 1);
+              if (site_parity != in_cb) continue;
+            }
 
             DtxqcdSiteAux aux =
                 DtxqcdSiteAux::Extract(sigma_, pi_, t_, d_, n_, coord);

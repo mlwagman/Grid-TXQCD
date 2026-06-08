@@ -2,8 +2,15 @@
 // Log-determinant action for the even-site diagonal block of the
 // EO-preconditioned DTXQCD doubled Wilson-Clover operator.
 //
-//   det(M) = det(Mee) * det(Mpc), so when using Mpc for the pseudofermion
-//   action we need S_logdet = -ln |det(Mee_48)| as a separate action term.
+// For the Pfaffian weight  |Pf(D_doubled)| = |det(D_doubled)|^{1/2}
+// (paper Eq. 321: Pf(D) = det(D^2)^{1/4}), the total fermion action is
+//   S = -log|Pf(D)| = -(1/2) log|det(D)|
+//                  = -(1/2) [log|det(M_ee)| + log|det(Mpc)|]
+// so this LogDet action contributes
+//   S_LD = -(1/2) sum_{x even} log|det(M_ee_48(x))|
+// The complementary 1/2 factor goes into the RHMC pseudofermion action on
+// Mpc via the x^{-1/4} (action) and x^{+1/8} (heatbath) rational exponents,
+// so each block contributes |det|^{1/2} to the path-integral weight.
 //
 // Each per-site M_ee is the 48x48 doubled site matrix from DTXQCDSiteMatrix:
 //   upper block:  m I + Delta_diag (sigma^A, pi^A, t^A) + (optional) -(csw/2) F sigma
@@ -29,6 +36,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDField.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCompositeImpl.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 #include <Grid/qcd/action/fermion/WilsonImpl.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -56,7 +64,8 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
   void refresh(const DTXQCDField &U, GridSerialRNG &, GridParallelRNG &) override {}
 
   // ------------------------------------------------------------------
-  //  S(U) = -sum_{x in EVEN} log |det(M_ee_48(x))|
+  //  S(U) = -(1/2) sum_{x in EVEN} log |det(M_ee_48(x))|
+  //  (1/2 factor for the Pfaffian weight; see header.)
   // ------------------------------------------------------------------
   RealD S(const DTXQCDField &U) override {
     auto FS = BuildFS(U);
@@ -74,7 +83,7 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
             logdet += std::log(std::abs(det));
           }
     grid_.GlobalSum(logdet);
-    RealD action = -logdet;
+    RealD action = -0.5 * logdet;
     std::cout << GridLogMessage << "[" << action_name() << "] S = " << action
               << std::endl;
     return action;
@@ -88,15 +97,11 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
     auto FS = BuildFS(U);
     Coordinate gd(grid_.GlobalDimensions());
 
-    typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
-    typedef typename LatticeDtxqcdPi::vector_object::scalar_object    PiSobj;
-    typedef typename LatticeDtxqcdT::vector_object::scalar_object     TSobj;
-    typedef typename LatticeDtxqcdD::vector_object::scalar_object     DSobj;
-    typedef typename LatticeDtxqcdN::vector_object::scalar_object     NSobj;
-    typedef typename LatticeColourMatrix::vector_object::scalar_object CMsobj;
-
-    const auto &tau = DtxqcdPauliEigen();
-    const ComplexD inv_sqrt2(1.0 / std::sqrt(2.0), 0.0);
+    using DtxqcdSiteForceKernel::SigSobj;
+    using DtxqcdSiteForceKernel::PiSobj;
+    using DtxqcdSiteForceKernel::TSobj;
+    using DtxqcdSiteForceKernel::DSobj;
+    using DtxqcdSiteForceKernel::NSobj;
 
     // clover_sigma_full[mn] holds dS/dF_{mu,nu, (i, j)} per (mu<nu) pair as a
     // LatticeColourMatrix, evaluated only on EVEN sites (zero on odd).  Fed
@@ -122,207 +127,29 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
             BuildSiteMatrix48(U, FS, coord, M48);
             Inv = M48.inverse();
 
-            // Aux-field forces at this even site.
-            SigSobj sig_force; sig_force = Zero();
-            PiSobj  pi_force;  pi_force  = Zero();
-            TSobj   t_force;   t_force   = Zero();
-            DSobj   d_force;   d_force   = Zero();
-            NSobj   n_force;   n_force   = Zero();
+            // Aux-field forces at this even site (kernel writes per-site sobj
+            // values; the LogDet trace formula is folded into the kernel's
+            // -(1/sqrt 2) / -2 / -i prefactors).  See DTXQCDSiteForceKernel.h.
+            SigSobj sig_force;
+            PiSobj  pi_force;
+            TSobj   t_force;
+            DSobj   d_force;
+            NSobj   n_force;
+            auto InvLookup =
+                [&Inv](int r, int c) -> ComplexD { return Inv(r, c); };
+            DtxqcdSiteForceKernel::AuxForceAt(InvLookup, spin_, sig_force,
+                                              pi_force, t_force, d_force,
+                                              n_force);
 
-            // ---- sigma^A force ----------------------------------------
-            // dS/dsigma^A = -Tr(M^{-1} dM/dsigma^A) where the trace sums
-            //   Sigma_{R,K} M^{-1}[R,K] dM[K,R]   (Tr(AB) = sum A[i,j] B[j,i])
-            // dM/dsigma^A nonzero at (K=(a,alpha,i), R=(b,alpha,i)) with value
-            //   (1/sqrt 2) tau^A_{ab} for both upper and lower diagonal blocks
-            // (sigma piece unchanged under Cstar), so
-            //   dS/dsigma^A = -(1/sqrt 2) sum_{a,b,alpha,i} tau^A_{ab}
-            //                   * [Inv[U(b,alpha,i), U(a,alpha,i)]
-            //                    + Inv[L(b,alpha,i), L(a,alpha,i)]]
-            // Note: M^{-1}[R, K] with R-index from b, K-index from a -- the
-            // (a, b) trace-formula transposition is what makes this match the
-            // FD for imaginary Pauli (tau^2); a naive Inv[(a,...), (b,...)]
-            // would be the Hermitian conjugate and disagree in sign for tau^2.
-            for (int A = 0; A < DtxqcdNTriplet; ++A) {
-              ComplexD val(0, 0);
-              for (int a = 0; a < DtxqcdNf; ++a)
-                for (int b = 0; b < DtxqcdNf; ++b) {
-                  ComplexD tab = tau[A](a, b);
-                  if (tab == ComplexD(0, 0)) continue;
-                  ComplexD s(0, 0);
-                  for (int alpha = 0; alpha < Ns; ++alpha)
-                    for (int i = 0; i < Nc; ++i) {
-                      int row_b = DtxqcdSiteIdx24(b, alpha, i);  // M^{-1} row
-                      int col_a = DtxqcdSiteIdx24(a, alpha, i);  // M^{-1} col
-                      s += Inv(row_b, col_a)
-                         + Inv(kDim24 + row_b, kDim24 + col_a);
-                    }
-                  val += tab * s;
-                }
-              sig_force()()(A) = -inv_sqrt2 * val;
-            }
-
-            // ---- pi^A force ---------------------------------------------
-            // dM/dpi^A nonzero at (K=(a,alpha,i), R=(b,beta,i)) with value
-            //   (1/sqrt 2) tau^A_{ab} gamma5(alpha, beta).
-            // Tr formula: M^{-1}[R=(b,beta,i), K=(a,alpha,i)] * tau^A_{ab} gamma5(alpha,beta).
-            //   dS/dpi^A = -(1/sqrt 2) sum tau^A_{ab} gamma5(alpha, beta)
-            //                * [Inv[U(b,beta,i), U(a,alpha,i)]
-            //                 + Inv[L(b,beta,i), L(a,alpha,i)]]
-            for (int A = 0; A < DtxqcdNTriplet; ++A) {
-              ComplexD val(0, 0);
-              for (int a = 0; a < DtxqcdNf; ++a)
-                for (int b = 0; b < DtxqcdNf; ++b) {
-                  ComplexD tab = tau[A](a, b);
-                  if (tab == ComplexD(0, 0)) continue;
-                  ComplexD inner(0, 0);
-                  for (int alpha = 0; alpha < Ns; ++alpha)
-                    for (int beta = 0; beta < Ns; ++beta) {
-                      ComplexD g5 = spin_.gamma5(alpha, beta);
-                      if (g5 == ComplexD(0, 0)) continue;
-                      for (int i = 0; i < Nc; ++i) {
-                        int row_b_beta = DtxqcdSiteIdx24(b, beta,  i);
-                        int col_a_alpha = DtxqcdSiteIdx24(a, alpha, i);
-                        inner += g5 * (Inv(row_b_beta, col_a_alpha)
-                                     + Inv(kDim24 + row_b_beta,
-                                           kDim24 + col_a_alpha));
-                      }
-                    }
-                  val += tab * inner;
-                }
-              pi_force()()(A) = -inv_sqrt2 * val;
-            }
-
-            // ---- t^A_{mu,nu} force --------------------------------------
-            // dM/dt^A_{mu,nu} is (+i) tau^A sigma_munu in upper, (-i) in lower.
-            //   t_force(mu,nu, A) = -(i) sum tau^A sigma_munu * (Inv_U - Inv_L)
-            // Antisymmetrize at the end: t(nu,mu,A) = -t(mu,nu,A).
-            const ComplexD ci(0.0, 1.0);
-            for (int mu = 0; mu < Nd; ++mu) {
-              for (int nu = mu + 1; nu < Nd; ++nu) {
-                int p_idx = -1;
-                {
-                  int k = 0;
-                  for (int m2 = 0; m2 < Nd; ++m2)
-                    for (int n2 = m2 + 1; n2 < Nd; ++n2) {
-                      if (m2 == mu && n2 == nu) p_idx = k;
-                      ++k;
-                    }
-                }
-                // dM/dt^A_{mu,nu} = +i tau^A sigma_munu in upper, -i in lower.
-                // Tr formula uses M^{-1}[R=(b,beta,i), K=(a,alpha,i)]
-                // with coefficient tau^A_{ab} sigma_munu(alpha, beta).
-                for (int A = 0; A < DtxqcdNTriplet; ++A) {
-                  ComplexD val(0, 0);
-                  for (int a = 0; a < DtxqcdNf; ++a)
-                    for (int b = 0; b < DtxqcdNf; ++b) {
-                      ComplexD tab = tau[A](a, b);
-                      if (tab == ComplexD(0, 0)) continue;
-                      ComplexD inner(0, 0);
-                      for (int alpha = 0; alpha < Ns; ++alpha)
-                        for (int beta = 0; beta < Ns; ++beta) {
-                          ComplexD smn = spin_.sigma_munu[p_idx](alpha, beta);
-                          if (smn == ComplexD(0, 0)) continue;
-                          for (int i = 0; i < Nc; ++i) {
-                            int row_b_beta = DtxqcdSiteIdx24(b, beta, i);
-                            int col_a_alpha = DtxqcdSiteIdx24(a, alpha, i);
-                            inner += smn * (Inv(row_b_beta, col_a_alpha)
-                                          - Inv(kDim24 + row_b_beta,
-                                                kDim24 + col_a_alpha));
-                          }
-                        }
-                      val += tab * inner;
-                    }
-                  ComplexD t_A = -ci * val;
-                  t_force()(mu, nu)(A) =  t_A;
-                  t_force()(nu, mu)(A) = -t_A;
-                }
-              }
-            }
-
-            // ---- d^{ij} force (off-diagonal block, +2 gamma5) -----------
-            // dM/dd^{ij}_{kl} = 2 gamma5 in (upper-row=(a,alpha,k), col=(lower,a,beta,l))
-            //                  and (lower-row=(a,alpha,k), col=(upper,a,beta,l)).
-            //   d_force(k,l) = -2 sum_{a,alpha,beta} gamma5(alpha,beta)
-            //                  * [Inv[L(a,beta,l), U(a,alpha,k)]
-            //                   + Inv[U(a,beta,l), L(a,alpha,k)]]
-            for (int k = 0; k < Nc; ++k) {
-              for (int l = 0; l < Nc; ++l) {
-                ComplexD val(0, 0);
-                for (int a = 0; a < DtxqcdNf; ++a)
-                  for (int alpha = 0; alpha < Ns; ++alpha)
-                    for (int beta = 0; beta < Ns; ++beta) {
-                      ComplexD g5 = spin_.gamma5(alpha, beta);
-                      if (g5 == ComplexD(0, 0)) continue;
-                      int u_a_alpha_k = DtxqcdSiteIdx24(a, alpha, k);
-                      int u_a_beta_l  = DtxqcdSiteIdx24(a, beta,  l);
-                      val += g5 * (Inv(kDim24 + u_a_beta_l, u_a_alpha_k)
-                                 + Inv(u_a_beta_l, kDim24 + u_a_alpha_k));
-                    }
-                d_force()()(k, l) = ComplexD(-2.0, 0.0) * val;
-              }
-            }
-
-            // ---- n^{ij} force (off-diagonal, +2 identity) ---------------
-            //   n_force(k,l) = -2 sum_{a,alpha}
-            //                  * [Inv[L(a,alpha,l), U(a,alpha,k)]
-            //                   + Inv[U(a,alpha,l), L(a,alpha,k)]]
-            for (int k = 0; k < Nc; ++k) {
-              for (int l = 0; l < Nc; ++l) {
-                ComplexD val(0, 0);
-                for (int a = 0; a < DtxqcdNf; ++a)
-                  for (int alpha = 0; alpha < Ns; ++alpha) {
-                    int u_a_alpha_k = DtxqcdSiteIdx24(a, alpha, k);
-                    int u_a_alpha_l = DtxqcdSiteIdx24(a, alpha, l);
-                    val += Inv(kDim24 + u_a_alpha_l, u_a_alpha_k)
-                         + Inv(u_a_alpha_l, kDim24 + u_a_alpha_k);
-                  }
-                n_force()()(k, l) = ComplexD(-2.0, 0.0) * val;
-              }
-            }
-
-            // ---- Clover Sigma per (mu<nu) ------------------------------
-            // Build clover_sigma[mn](i, j) = dS/dF_{mu,nu, (i, j)}(x) for the
-            // Cmunu chain rule below.  From the trace formula:
-            //
-            //   upper:   M_clover += -(csw/2) F sigma_{Grid}
-            //     dS/dF (upper) = +(csw/2) sum sigma(alpha, beta)
-            //                      * M_inv_uu[(a, beta, j), (a, alpha, i)]
-            //   lower:   M_clover += +(csw/2) F^T sigma_{Grid}
-            //     dS/dF (lower) = -(csw/2) sum sigma(alpha, beta)
-            //                      * M_inv_ll[(a, beta, i), (a, alpha, j)]
-            //
-            // Note: lower contribution uses indices swapped (i <-> j in the
-            // M_inv rows/cols) because F^T's (k, l) entry is F's (l, k).
+            // ---- Clover Sigma per (mu<nu) -------------------------------
+            // dS/dF_{mu,nu, (i, j)}(x) at site x for the Cmunu chain rule.
+            // Both upper (-(csw/2) F sigma) and lower (+(csw/2) F^T sigma)
+            // contributions are folded in by CloverSigmaAt.
             if (csw_ != 0.0) {
-              for (int p_idx = 0; p_idx < 6; ++p_idx) {
-                CMsobj cs;
-                cs = Zero();
-                for (int i_c = 0; i_c < Nc; ++i_c) {
-                  for (int j_c = 0; j_c < Nc; ++j_c) {
-                    ComplexD val(0, 0);
-                    for (int a = 0; a < DtxqcdNf; ++a) {
-                      for (int alpha = 0; alpha < Ns; ++alpha) {
-                        for (int beta = 0; beta < Ns; ++beta) {
-                          ComplexD smn = spin_.sigma_munu[p_idx](alpha, beta);
-                          if (smn == ComplexD(0, 0)) continue;
-                          int row_u = DtxqcdSiteIdx24(a, beta,  j_c);
-                          int col_u = DtxqcdSiteIdx24(a, alpha, i_c);
-                          int row_l = DtxqcdSiteIdx24(a, beta,  i_c);
-                          int col_l = DtxqcdSiteIdx24(a, alpha, j_c);
-                          val += smn * Inv(row_u, col_u);
-                          val -= smn * Inv(kDim24 + row_l, kDim24 + col_l);
-                        }
-                      }
-                    }
-                    // Cmunu expects TXQCD's convention, which for anti-Hermitian
-                    // sigma_Grid is -conj(natural-Wirtinger dS/dF).  The minus
-                    // comes from sigma_Grid(beta, alpha) = -conj(sigma_Grid(alpha, beta))
-                    // for anti-Hermitian sigma_Grid.
-                    cs()()(i_c, j_c) = ComplexD(-0.5 * csw_, 0.0) * std::conj(val);
-                  }
-                }
-                pokeSite(cs, clover_sigma_full[p_idx], coord);
-              }
+              std::array<DtxqcdSiteForceKernel::CMsobj, 6> cs_arr;
+              DtxqcdSiteForceKernel::CloverSigmaAt(InvLookup, spin_, csw_, cs_arr);
+              for (int p_idx = 0; p_idx < 6; ++p_idx)
+                pokeSite(cs_arr[p_idx], clover_sigma_full[p_idx], coord);
             }
 
             // Poke per-site forces into the full-volume lattice slots.
@@ -380,6 +207,15 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
       }
       dSdU.U = ComplexD(-0.5, 0.0) * clover_force;
     }
+
+    // Overall Pfaffian factor: S = -(1/2) log|det(M_ee)|, so scale all
+    // contributions (aux + gauge) by 1/2.  See header comment.
+    dSdU.sigma = ComplexD(0.5, 0.0) * dSdU.sigma;
+    dSdU.pi    = ComplexD(0.5, 0.0) * dSdU.pi;
+    dSdU.t     = ComplexD(0.5, 0.0) * dSdU.t;
+    dSdU.d     = ComplexD(0.5, 0.0) * dSdU.d;
+    dSdU.n     = ComplexD(0.5, 0.0) * dSdU.n;
+    dSdU.U     = ComplexD(0.5, 0.0) * dSdU.U;
   }
 
  private:
