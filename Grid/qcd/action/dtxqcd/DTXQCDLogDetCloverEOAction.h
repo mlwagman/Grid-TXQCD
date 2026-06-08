@@ -90,7 +90,10 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
   }
 
   // ------------------------------------------------------------------
-  //  deriv(U, dSdU): aux-field forces.  Gauge force is zero (TODO: clover).
+  //  deriv(U, dSdU): aux-field forces + gauge clover force (csw != 0).
+  //  Aux: per-site -Tr(M_ee^{-1} dM_ee/dX) via DTXQCDSiteForceKernel.
+  //  Gauge: per-site clover_sigma fed to WilsonCloverHelpers::Cmunu, both
+  //  upper (-(csw/2) F sigma) and lower (+(csw/2) F^T sigma) contributions.
   // ------------------------------------------------------------------
   void deriv(const DTXQCDField &U, DTXQCDField &dSdU) override {
     dSdU = Zero();

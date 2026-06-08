@@ -2,8 +2,9 @@
 // Fermion-level application of the DTXQCD M_ee (site-local) operator on a
 // doubled fermion (upper, lower) pair of DTXQCDFermionNf.
 //
-// M_ee | upper   = | (mass * I + Delta_diag) upper + (2 d gamma5 + 2 n) lower |
-//      | lower     | (2 d gamma5 + 2 n) upper + (mass * I + Delta_diag) lower |
+// M_ee | upper   = | ((mass + 4) * I + Delta_diag) upper + (2 d gamma5 + 2 n) lower |
+//      | lower     | (2 d gamma5 + 2 n) upper + ((mass + 4) * I + Delta_diag) lower |
+// (the "+ 4" is Grid's WilsonFermion convention; see DtxqcdApplyMooeeDoubled body.)
 //
 // Delta_diag(x) = (1/sqrt 2) sigma^A tau^A
 //               + (1/sqrt 2) pi^A    tau^A gamma5
@@ -58,9 +59,9 @@ inline void DtxqcdApplyDnCross(const LatticeDtxqcdD &d,
 }
 
 // Full doubled M_ee application:
-//   out_upper = mass * in_upper + Delta_diag(in_upper) + (2 d g5 + 2 n) in_lower
+//   out_upper = (mass + 4) * in_upper + Delta_diag(in_upper) + (2 d g5 + 2 n) in_lower
 //                + (csw && FS ? -(csw/2) F sigma in_upper : 0)
-//   out_lower = mass * in_lower + Delta_diag_lower(in_lower) + (2 d g5 + 2 n) in_upper
+//   out_lower = (mass + 4) * in_lower + Delta_diag_lower(in_lower) + (2 d g5 + 2 n) in_upper
 //                + (csw && FS ? +(csw/2) F^T sigma in_lower : 0)
 //
 // Clover is optional: pass csw = 0 (default) or FS = nullptr to skip the

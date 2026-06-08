@@ -13,10 +13,13 @@
 //   ⇒  heatbath:  Phi = (Mpc^dag Mpc)^{+1/8} eta,   eta ~ exp(-eta^dag eta)
 //
 // Rational approximations needed:
-//   x^{1/4}  (PowerQuarter)    -- not used directly, kept for completeness
-//   x^{-1/4} (PowerNegQuarter) -- used by deriv() multishift CG (poles σ_k)
-//   x^{+1/8} (PowerEighth)     -- used by refresh() to generate Phi
-//   x^{-1/8} (PowerNegEighth)  -- used by S() to compute ||Y||^2 = S
+//   x^{-1/4} (PowerNegQuarter) -- used by S() AND deriv() multishift CG
+//                                  (poles σ_k of the same rational so that
+//                                   the FD on S exactly matches deriv()'s
+//                                   analytic chain-rule formula).
+//   x^{+1/8} (PowerEighth)     -- used by refresh() to generate Phi from eta:
+//                                  Phi = (Mpc^dag Mpc)^{+1/8} eta gives
+//                                  <Phi^dag (Mpc^dag Mpc)^{-1/4} Phi> = <eta^dag eta>.
 //
 // Force structure mirrors TXQCDWilsonCloverRationalEOAction with two changes:
 //   1. fermion field is DTXQCDFermionDoubled (upper, lower) × per-flavor;
@@ -33,11 +36,13 @@
 // "-2 Re" of the RHMC chain rule together with the kernel's intrinsic -1 sign
 // (kernel returns -Y^dag dM X for the RHMC case; -2 alpha_k * (-1) = +2 alpha_k).
 //
-// v1 implementation:
-//   - Aux + clover gauge forces analytic via per-site kernel.
-//   - Hopping gauge force deferred (TODO; csw=0 gauge FD will fail until
-//     hopping force is added).  Aux FD on csw=0 and csw!=0, plus clover gauge
-//     FD on csw!=0 (aux-only U fixed), are the v1 validation targets.
+// Force coverage (all validated by Test_dtxqcd_rational_aux_force FD checks):
+//   - Aux forces (sigma^A, pi^A, t^A, d, n) via per-site
+//     DTXQCDSiteForceKernel::AuxForceAt.
+//   - Gauge hopping force via AccumulateHoppingForce: 4 MoeDeriv/MeoDeriv
+//     calls per flavor per fermion block; lower block on Dw_lower (Wilson
+//     on U_conj) is chain-ruled to dS/dU by entry-wise conjugate().
+//   - Gauge clover force via per-site CloverSigmaAt + WilsonCloverHelpers::Cmunu.
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDCompositeImpl.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDField.h>
@@ -68,16 +73,14 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     AlgRemez remez(param_.lo, param_.hi, param_.precision);
     std::cout << GridLogMessage
               << "[DTXQCDWilsonRationalEO] degree " << param_.degree
-              << " rational for x^(1/4)" << std::endl;
+              << " rational for x^(-1/4)" << std::endl;
     remez.generateApprox(param_.degree, 1, 4);
-    PowerQuarter.Init(remez, param_.tolerance, false);
     PowerNegQuarter.Init(remez, param_.tolerance, true);
     std::cout << GridLogMessage
               << "[DTXQCDWilsonRationalEO] degree " << param_.degree
-              << " rational for x^(1/8)" << std::endl;
+              << " rational for x^(+1/8)" << std::endl;
     remez.generateApprox(param_.degree, 1, 8);
     PowerEighth.Init(remez, param_.tolerance, false);
-    PowerNegEighth.Init(remez, param_.tolerance, true);
   }
 
   std::string action_name() override {
@@ -553,10 +556,8 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   RealD                  mass_;
   RealD                  csw_;
   Params                &param_;
-  MultiShiftFunction     PowerQuarter;
-  MultiShiftFunction     PowerNegQuarter;
-  MultiShiftFunction     PowerEighth;
-  MultiShiftFunction     PowerNegEighth;
+  MultiShiftFunction     PowerNegQuarter;   // x^{-1/4}: S() + deriv() multishift
+  MultiShiftFunction     PowerEighth;       // x^{+1/8}: refresh()
   DTXQCDFermionDoubled   Phi_;
   DtxqcdSpinMatrices     spin_;
 };

@@ -15,11 +15,11 @@
 //                 + sum_{mu<nu} i t^A_{mu,nu}(x) tau^A Grid_Sigma_{mu,nu} I_color
 //   M_offdiag(x) = 2 d^{ij}(x) gamma5 + 2 n^{ij}(x)        (flavor identity)
 //
-// v1 simplification: M_lower = M_upper.  At the M_ee (site-local) level with
-// no clover or hopping the QCD piece is just m * I_color, and C (m I) C^T =
-// m I, so upper and lower agree.  When clover (-c_sw/4 F_{mu,nu} sigma_{mu,nu})
-// is added the lower-block clover gets a C ... C^T sandwich and the two
-// diverge — to be implemented when DTXQCDDeltaCloverOp is added.
+// M_upper and M_lower differ by the Cstar M_22 = C^T D^T C^T rotation:
+// (a) the tensor piece i t^A sigma_munu picks up a sign flip in the lower
+// block (C^T sigma_munu^T C = -sigma_munu); (b) the clover piece flips its
+// prefactor sign AND uses F^T (C^T F sigma C = -F^T sigma).  Encoded by
+// DtxqcdBuildLowerBlock24 with tensor_sign = -1.0 and lower_block = true.
 //
 // Eigen 4x4 / 2x2 / 3x3 are used for the gamma / Pauli / color sub-blocks.
 // Per-site 48x48 matrices use MatrixXcd (heap-allocated) for v1 simplicity;
@@ -180,7 +180,7 @@ struct DtxqcdSiteClover {
 
 // ---------- Block builders ----------
 
-// Diagonal-block builder: M_diag = mass * I_24 + Delta_diag (sigma^A, pi^A,
+// Diagonal-block builder: M_diag = (mass + 4) * I_24 + Delta_diag (sigma^A, pi^A,
 // t^A) using the Pauli flavor structure v^A_{a,b} = tau^A_{a,b}.
 // tensor_sign = +1 for the upper diagonal block (standard), -1 for the
 // lower diagonal block — matches the Cstar M_22 = C^T X^T C construction

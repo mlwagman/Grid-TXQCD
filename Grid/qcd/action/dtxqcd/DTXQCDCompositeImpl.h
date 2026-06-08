@@ -201,7 +201,21 @@ class DTXQCDCompositeImpl {
   // convention.
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
                                     RealD lambda) {
-    RealD s = 1.0 / lambda;
+    // Optional fluctuation-scale decoupling, mirroring TXQCD's
+    // AUX_FLUCT_LAMBDA: set the env var to use width 1/lambda_var while
+    // the action still couples at the physical lambda.  The DTXQCD use
+    // case is cold-start initialisation -- at the production lambda (~3)
+    // the per-site 48x48 Mee picks up near-zero eigenvalues from outlier
+    // aux sites and Mpc^dag Mpc lambda_max explodes (measured 6e6 vs
+    // ~30 at lambda=10 on a 4^3 x 8 cold gauge).  Starting at the larger
+    // fluctuation-lambda 10-30 keeps the operator well-conditioned for
+    // the first few trajectories while the HMC dynamics evolve toward
+    // the physical width.
+    RealD lambda_var = lambda;
+    if (const char *e = std::getenv("AUX_FLUCT_LAMBDA"); e && *e) {
+      lambda_var = std::atof(e);
+    }
+    RealD s = 1.0 / lambda_var;
     DtxqcdRealGaussian(pRNG, U.sigma);  U.sigma = s * U.sigma;
     DtxqcdRealGaussian(pRNG, U.pi);     U.pi    = s * U.pi;
     DtxqcdGaussianAntisymTensor(pRNG, U.t);
