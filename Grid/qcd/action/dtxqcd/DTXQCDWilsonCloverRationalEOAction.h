@@ -185,23 +185,80 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       }
     }
 
-    // ---- Per-pole force loop ----
+    // ---- Per-pole intermediates: batched MooeeInv / MooeeInvDag --------
+    //
+    // The Schur complement Mpc applied to each X_k decomposes as
+    //   Y_k   = M_oo X_k - M_oe (M_ee^{-1} M_eo X_k)
+    //         = M_oo X_k - M_oe  W_e_k
+    //   Z_e_k = (M_ee^{-1})^dag M_oe^dag Y_k
+    //
+    // Two reusable identities cut the post-CG work:
+    //   1. M_oe (W_e_k) is the same Meooe that Mpc.M used internally; computing
+    //      it once and reusing it for Y_k and AccumulateHoppingForce avoids
+    //      the duplicate Mpc + Dw.Meooe(X_k) chain in v1.
+    //   2. The two CB-Even inverse applies (one for W_e, one for Z_e) batch
+    //      across all Npole rational poles -- MooeeInvN does one Eigen
+    //      48 x Npole gemm per site instead of Npole separate gemvs, so the
+    //      cached per-site inverse is loaded once per site for all shifts.
+    //
+    // The hopping + aux + clover-sigma accumulators stay per-pole (each pole
+    // has its own residue alpha_k), so the second pass below sums them
+    // sequentially.
+    std::vector<DTXQCDFermionDoubled> Yk;       Yk.reserve(Npole);
+    std::vector<DTXQCDFermionDoubled> Wek;      Wek.reserve(Npole);
+    std::vector<DTXQCDFermionDoubled> Zek;      Zek.reserve(Npole);
+    std::vector<DTXQCDFermionDoubled> Meo_Xk;   Meo_Xk.reserve(Npole);
+    std::vector<DTXQCDFermionDoubled> Moeh_Yk;  Moeh_Yk.reserve(Npole);
+    for (int k = 0; k < Npole; ++k) {
+      Yk.emplace_back(&rbgrid_);
+      Wek.emplace_back(&rbgrid_);
+      Zek.emplace_back(&rbgrid_);
+      Meo_Xk.emplace_back(&rbgrid_);
+      Moeh_Yk.emplace_back(&rbgrid_);
+    }
+
+    // Meooe X_k for all k (per-RHS Wilson stencil; no natural batched apply).
+    for (int k = 0; k < Npole; ++k) Dw.Meooe(Xk[k], Meo_Xk[k]);
+
+    // W_e_k = M_ee^{-1} M_eo X_k for all k -- single batched MooeeInvN call.
+    {
+      std::vector<const DTXQCDFermionDoubled *> ins(Npole);
+      std::vector<DTXQCDFermionDoubled *>       outs(Npole);
+      for (int k = 0; k < Npole; ++k) { ins[k] = &Meo_Xk[k]; outs[k] = &Wek[k]; }
+      Dw.MooeeInvN(ins, outs);
+    }
+
+    // Y_k = M_oo X_k - M_oe W_e_k.
+    DTXQCDFermionDoubled mooee_X(&rbgrid_), moe_W(&rbgrid_);
+    for (int k = 0; k < Npole; ++k) {
+      Dw.Mooee(Xk[k], mooee_X);    // odd-CB site-local apply (lattice op,
+                                   //   forward Mooee is fast via per-CB aux).
+      Dw.Meooe(Wek[k], moe_W);     // M_oe W_e_k -> odd CB.
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        Yk[k].upper.f[a] = mooee_X.upper.f[a] - moe_W.upper.f[a];
+        Yk[k].lower.f[a] = mooee_X.lower.f[a] - moe_W.lower.f[a];
+      }
+    }
+
+    // M_oe^dag Y_k for all k.
+    for (int k = 0; k < Npole; ++k) Dw.MeooeDag(Yk[k], Moeh_Yk[k]);
+
+    // Z_e_k = (M_ee^{-1})^dag M_oe^dag Y_k -- single batched MooeeInvDagN call.
+    {
+      std::vector<const DTXQCDFermionDoubled *> ins(Npole);
+      std::vector<DTXQCDFermionDoubled *>       outs(Npole);
+      for (int k = 0; k < Npole; ++k) { ins[k] = &Moeh_Yk[k]; outs[k] = &Zek[k]; }
+      Dw.MooeeInvDagN(ins, outs);
+    }
+
+    // ---- Per-pole force accumulation (sequential -- each has its own ak) ----
     for (int k = 0; k < Npole; ++k) {
       const RealD ak = PowerNegQuarter.residues[k];
-      DTXQCDFermionDoubled Y(&rbgrid_), tmp_e(&rbgrid_);
-      DTXQCDFermionDoubled W_e(&rbgrid_), Z_e(&rbgrid_);
-
-      Mop.M(Xk[k], Y);                  // Y_k = Mpc X_k          (odd CB)
-      Dw.Meooe(Xk[k], tmp_e);           // M_eo X_k               (even CB)
-      Dw.MooeeInv(tmp_e, W_e);          // W_e = M_ee^{-1} M_eo X_k
-      Dw.MeooeDag(Y, tmp_e);            // M_oe^dag Y_k            (even CB)
-      Dw.MooeeInvDag(tmp_e, Z_e);       // Z_e = (M_ee^{-1})^dag M_oe^dag Y_k
-
-      AccumulateSiteForces(Xk[k], Y,  /*odd_cb=*/true,  ak,
+      AccumulateSiteForces(Xk[k],  Yk[k], /*odd_cb=*/true,  ak,
                            dSdU, clover_sigma_full);
-      AccumulateSiteForces(W_e,  Z_e, /*odd_cb=*/false, ak,
+      AccumulateSiteForces(Wek[k], Zek[k], /*odd_cb=*/false, ak,
                            dSdU, clover_sigma_full);
-      AccumulateHoppingForce(Xk[k], Y, W_e, Z_e, ak, Dw, dSdU);
+      AccumulateHoppingForce(Xk[k], Yk[k], Wek[k], Zek[k], ak, Dw, dSdU);
     }
 
     // ---- Gauge clover force via Cmunu chain rule (csw != 0 only) ----

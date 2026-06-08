@@ -122,8 +122,8 @@ class DTXQCDWilsonCloverFermionEO {
     BuildFieldStrength();
 
     // Mooee^{-1} caches per CB.
-    BuildInverseCacheCB(Even, inv_e_);
-    BuildInverseCacheCB(Odd,  inv_o_);
+    BuildInverseCacheCB(Even, inv_e_, inv_lex_e_);
+    BuildInverseCacheCB(Odd,  inv_o_, inv_lex_o_);
   }
 
   // -------- Full-volume apply --------
@@ -234,6 +234,28 @@ class DTXQCDWilsonCloverFermionEO {
     }
   }
 
+  // -------- Multi-RHS variants for batched-gemm hot loops --------
+  //
+  // MooeeInvN: applies Mooee^{-1} to NRHS fermions in one threaded sweep
+  // over CB sites.  Each thread does a single Eigen 48 x NRHS gemm instead
+  // of NRHS separate 48-component gemvs -- the per-site matrix is loaded
+  // once per site and reused across all RHS columns.  For NRHS = (multi-shift
+  // degree) this gives the matrix-load savings that the cuBLAS-batched
+  // production path on GPU provides.  CPU benefit scales with NRHS up to
+  // the point where the 48 x NRHS Eigen matrix overflows L2.
+  //
+  // Used by DTXQCDWilsonCloverRationalEOAction::deriv()'s post-CG pole loop
+  // (Npole independent Mpc applies on the same gauge configuration).
+  void MooeeInvN(const std::vector<const Field *> &ins,
+                 const std::vector<Field *> &outs) {
+    ApplyInverseLex(ins, outs, /*dag=*/false);
+  }
+
+  void MooeeInvDagN(const std::vector<const Field *> &ins,
+                    const std::vector<Field *> &outs) {
+    ApplyInverseLex(ins, outs, /*dag=*/true);
+  }
+
   // -------- Accessors / introspection (mainly for tests) --------
 
   RealD Mass() const { return mass_; }
@@ -300,7 +322,8 @@ class DTXQCDWilsonCloverFermionEO {
   // computes M48^{-1} via partialPivLu, and pokes the result into the
   // SIMD-vectorized lattice slot.  thread_for-parallel over sites; the
   // SIMD repack is hidden inside Grid's pokeSite.
-  void BuildInverseCacheCB(int cb, InvField &inv) {
+  void BuildInverseCacheCB(int cb, InvField &inv,
+                            std::vector<Eigen::MatrixXcd> &inv_lex) {
     typedef typename InvField::vector_object::scalar_object SmatSobj;
     inv = Zero();
     inv.Checkerboard() = cb;
@@ -354,6 +377,24 @@ class DTXQCDWilsonCloverFermionEO {
     for (uint64_t idx = 0; idx < Nsite; ++idx) {
       pokeSite(sobjs[idx], inv, coords[idx]);
     }
+
+    // Multi-RHS path also needs a lex-ordered std::vector<Eigen::MatrixXcd>
+    // matching Grid's CB-lex convention (the same order unvectorizeToLexOrdArray
+    // produces on the input fermion).  Build by unvectorizing the SIMD field
+    // we just populated -- this guarantees index alignment with the fermion
+    // pack/unpack in ApplyInverseLex below, regardless of how my (x,y,z,t)
+    // iteration order above maps onto Grid's CB-lex enumeration.
+    std::vector<SmatSobj> lex_sobjs;
+    unvectorizeToLexOrdArray(lex_sobjs, inv);
+    inv_lex.clear();
+    inv_lex.resize(lex_sobjs.size());
+    thread_for(s, lex_sobjs.size(), {
+      Eigen::MatrixXcd M(kDim48, kDim48);
+      for (int r = 0; r < kDim48; ++r)
+        for (int c = 0; c < kDim48; ++c)
+          M(r, c) = ComplexD(lex_sobjs[s]()()(r, c));
+      inv_lex[s] = std::move(M);
+    });
   }
 
   // SIMD per-oSite gemv applying the cached 48x48 inverse to a doubled
@@ -432,6 +473,124 @@ class DTXQCDWilsonCloverFermionEO {
     }
   }
 
+  // Multi-RHS apply via per-site Eigen 48 x NRHS gemm.  Mirrors TXQCD's
+  // ApplyMooeeInvScalar pattern with an outer NRHS dimension and the
+  // doubled (upper, lower) block layout.  Threaded across CB sites; each
+  // thread holds a stack-resident 48 x NRHS input + output Eigen matrix.
+  //
+  //   dag = false:  out_k = inv_lex[site] *      input_k
+  //   dag = true :  out_k = inv_lex[site]^dag *  input_k
+  //                       = (inv^dag is the inverse of M^dag = gamma_5 M gamma_5,
+  //                          so we wrap in gamma_5 outside and call dag=false here).
+  //
+  // The dag path is unused on the inside (we provide MooeeInvDagN above as a
+  // gamma_5 wrapper), but kept symmetric in case a caller wants the raw
+  // adjoint apply.
+  void ApplyInverseLex(const std::vector<const Field *> &ins,
+                        const std::vector<Field *> &outs,
+                        bool dag) {
+    const int NRHS = static_cast<int>(ins.size());
+    GRID_ASSERT(NRHS > 0);
+    GRID_ASSERT(static_cast<int>(outs.size()) == NRHS);
+
+    const int cb = ins[0]->upper.f[0].Checkerboard();
+    GRID_ASSERT(ins[0]->upper.f[0].Grid() == &rbgrid_);
+
+    if (dag) {
+      // Wrap in gamma_5 on each RHS and recurse with dag=false.
+      Gamma g5(Gamma::Algebra::Gamma5);
+      std::vector<Field> g5_in;       g5_in.reserve(NRHS);
+      std::vector<Field> tmp;         tmp.reserve(NRHS);
+      std::vector<const Field *> g5_in_p(NRHS);
+      std::vector<Field *>       tmp_p(NRHS);
+      for (int k = 0; k < NRHS; ++k) {
+        g5_in.emplace_back(&rbgrid_);
+        tmp.emplace_back(&rbgrid_);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          g5_in[k].upper.f[a] = g5 * ins[k]->upper.f[a];
+          g5_in[k].lower.f[a] = g5 * ins[k]->lower.f[a];
+          g5_in[k].upper.f[a].Checkerboard() = cb;
+          g5_in[k].lower.f[a].Checkerboard() = cb;
+        }
+        g5_in_p[k] = &g5_in[k];
+        tmp_p[k]   = &tmp[k];
+      }
+      ApplyInverseLex(g5_in_p, tmp_p, /*dag=*/false);
+      for (int k = 0; k < NRHS; ++k) {
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          outs[k]->upper.f[a] = g5 * tmp[k].upper.f[a];
+          outs[k]->lower.f[a] = g5 * tmp[k].lower.f[a];
+          outs[k]->upper.f[a].Checkerboard() = cb;
+          outs[k]->lower.f[a].Checkerboard() = cb;
+        }
+      }
+      return;
+    }
+
+    // Forward (no-dag) batched apply.
+    const auto &inv_lex = (cb == Even) ? inv_lex_e_ : inv_lex_o_;
+    typedef typename LatticeFermion::vector_object::scalar_object SiteFerm;
+
+    // Unvectorize each RHS into per-(rhs, flavor, block) lex arrays.  The
+    // lex order Grid uses here matches the order inv_lex was populated in
+    // (via the same unvectorize on the SIMD InvField in BuildInverseCacheCB),
+    // so per-site indices line up directly.
+    std::vector<std::vector<std::vector<SiteFerm>>> in_up_lex(NRHS,
+        std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+    std::vector<std::vector<std::vector<SiteFerm>>> in_lo_lex(NRHS,
+        std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+    std::vector<std::vector<std::vector<SiteFerm>>> out_up_lex(NRHS,
+        std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+    std::vector<std::vector<std::vector<SiteFerm>>> out_lo_lex(NRHS,
+        std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+    for (int k = 0; k < NRHS; ++k) {
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        unvectorizeToLexOrdArray(in_up_lex[k][a], ins[k]->upper.f[a]);
+        unvectorizeToLexOrdArray(in_lo_lex[k][a], ins[k]->lower.f[a]);
+        out_up_lex[k][a].resize(in_up_lex[k][a].size());
+        out_lo_lex[k][a].resize(in_lo_lex[k][a].size());
+      }
+    }
+    const uint64_t Nsite = in_up_lex[0][0].size();
+    GRID_ASSERT(Nsite == inv_lex.size());
+
+    thread_for(s, Nsite, {
+      Eigen::MatrixXcd B(kDim48, NRHS);
+      for (int k = 0; k < NRHS; ++k) {
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int i = 0; i < Nc; ++i) {
+              int r24 = a * Ns * Nc + alpha * Nc + i;
+              B(r24,           k) = ComplexD(in_up_lex[k][a][s]()(alpha)(i));
+              B(kDim24 + r24,  k) = ComplexD(in_lo_lex[k][a][s]()(alpha)(i));
+            }
+          }
+        }
+      }
+      Eigen::MatrixXcd C = inv_lex[s] * B;
+      for (int k = 0; k < NRHS; ++k) {
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int i = 0; i < Nc; ++i) {
+              int r24 = a * Ns * Nc + alpha * Nc + i;
+              out_up_lex[k][a][s]()(alpha)(i) = C(r24,          k);
+              out_lo_lex[k][a][s]()(alpha)(i) = C(kDim24 + r24, k);
+            }
+          }
+        }
+      }
+    });
+
+    for (int k = 0; k < NRHS; ++k) {
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        vectorizeFromLexOrdArray(out_up_lex[k][a], outs[k]->upper.f[a]);
+        vectorizeFromLexOrdArray(out_lo_lex[k][a], outs[k]->lower.f[a]);
+        outs[k]->upper.f[a].Checkerboard() = cb;
+        outs[k]->lower.f[a].Checkerboard() = cb;
+      }
+    }
+  }
+
   // std::array-of-LatticeView helpers (LatticeView has no default ctor; the
   // index_sequence trick aggregate-initialises the array).  Mirror of
   // TXQCD's MakeFermViewsRead/Write.
@@ -468,6 +627,11 @@ class DTXQCDWilsonCloverFermionEO {
   LatticeDtxqcdN     n_e_,     n_o_;
 
   InvField inv_e_, inv_o_;
+
+  // Multi-RHS scratch: per-CB lex-ordered Eigen 48x48 inverses.  Built by
+  // unvectorizing the SIMD InvField so the lex index matches what
+  // unvectorizeToLexOrdArray produces on input fermions in ApplyInverseLex.
+  std::vector<Eigen::MatrixXcd> inv_lex_e_, inv_lex_o_;
 
   DtxqcdSpinMatrices spin_;
 };
