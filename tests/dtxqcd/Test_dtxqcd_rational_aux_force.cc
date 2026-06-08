@@ -48,13 +48,16 @@ static void PerturbAux(const DTXQCDField &U, const DTXQCDField &Y, RealD scale,
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
-  // 2^3 x 4 chosen for runtime: the v1 SiteWiseApply / SiteWiseSolve do a
-  // per-site 48x48 LU per Mpc apply, and the multi-shift CG inside
-  // ApplyRational does O(100s) of Mpc applies times O(degree) shifts.  On
-  // 4^4 this would take ~hours; 2^3 x 4 (16 sites) runs in seconds and is
-  // enough to validate the aux-force chain.  Bigger volumes need cached
-  // per-site LU factors (TODO; mirror TXQCDSiteMatrix).
-  Coordinate latt(std::vector<int>{2, 2, 2, 4});
+  // Default 4^4.  Pass --lat-2334 to fall back to the smaller 2^3 x 4
+  // volume used during initial bring-up.  The SIMD-cached EO makes 4^4
+  // tractable for FD validation now that Mooee / MooeeInv are O(48^2) per
+  // site per call rather than O(48^3) (per-call LU was the v1 bottleneck).
+  Coordinate latt(std::vector<int>{4, 4, 4, 4});
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--lat-2334") {
+      latt = Coordinate(std::vector<int>{2, 2, 2, 4});
+    }
+  }
   Coordinate simd = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi  = GridDefaultMpi();
   GridCartesian         Grid(latt, simd, mpi);
@@ -95,10 +98,17 @@ int main(int argc, char **argv) {
   const RealD mass = 0.4;
   const RealD h    = 1e-4;
 
-  // Rational params: lo/hi bracket Mpc^dag Mpc spectrum on 4^4 at this mass.
-  OneFlavourRationalParams rp(/*lo*/        1.0e-3,
+  // Rational params: lo/hi bracket the Mpc^dag Mpc spectrum.  At 4^4 with
+  // mass=0.4, csw=0..1.25 and random aux, the spectrum extends from O(0.1)
+  // (Wilson-Schur "mass" floor for this mass) to O(50).  Pushing lo too
+  // small (1e-5) puts a multi-shift pole at sigma_min ~ lo, where the
+  // shifted operator's condition number blows up and CG fails to converge
+  // in 5000 iters.  lo=0.1 brackets the spectrum from below without
+  // creating ill-conditioned shifted systems; MaxIter bumped to 20000 so
+  // the lowest-shift solve has headroom.
+  OneFlavourRationalParams rp(/*lo*/        1.0e-1,
                               /*hi*/        64.0,
-                              /*MaxIter*/   5000,
+                              /*MaxIter*/   20000,
                               /*tol*/       1.0e-12,
                               /*degree*/    12,
                               /*precision*/ 50,
