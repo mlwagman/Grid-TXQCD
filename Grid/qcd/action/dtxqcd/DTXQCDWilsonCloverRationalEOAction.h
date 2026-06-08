@@ -137,7 +137,17 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   }
 
   // ------------------------------------------------------------------
-  // deriv: aux + clover gauge force.  Hopping gauge force = TODO.
+  // deriv: aux + clover gauge force + hopping gauge force.
+  //
+  // Hopping force structure (per pole k):
+  //   dS_k/dU contribution = +alpha_k * 2 Re[Y^dag (dM_oe/dU) W_e + Z_e^dag (dM_eo/dU) X]
+  //     = +alpha_k * (Wilson hopping derivative of Y^dag M_oe W_e + Z_e^dag M_eo X
+  //                   summed with its dagger)
+  // Implemented as 4 MoeDeriv/MeoDeriv calls per flavor per pole, separately for
+  // the upper and lower fermion blocks.  Upper block uses Dw_upper (= Wilson
+  // on gauge field U); lower block uses Dw_lower (= Wilson on U_conj).  Force
+  // returned by Dw_lower is dS/dU_conj; chain-ruling through U_conj = conj(U)
+  // gives dS/dU = conjugate(dS/dU_conj) entry-wise (anti-Hermitian preserved).
   // ------------------------------------------------------------------
   void deriv(const DTXQCDField &U, DTXQCDField &dSdU) override {
     dSdU = Zero();
@@ -191,6 +201,7 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
                            dSdU, clover_sigma_full);
       AccumulateSiteForces(W_e,  Z_e, /*odd_cb=*/false, ak,
                            dSdU, clover_sigma_full);
+      AccumulateHoppingForce(Xk[k], Y, W_e, Z_e, ak, Dw, dSdU);
     }
 
     // ---- Gauge clover force via Cmunu chain rule (csw != 0 only) ----
@@ -231,12 +242,10 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
         pokeLorentz(clover_force, Ulinks[mu] * force_mu, mu);
       }
       // Cmunu output is Convention B; multiply by -1/2 to get the integrator's
-      // Convention A (mirrors LogDet).
-      dSdU.U = ComplexD(-0.5, 0.0) * clover_force;
+      // Convention A (mirrors LogDet).  ACCUMULATE (+=) into dSdU.U so the
+      // hopping gauge force (already added per pole) is preserved.
+      dSdU.U = dSdU.U + ComplexD(-0.5, 0.0) * clover_force;
     }
-
-    // TODO: hopping gauge force (Wilson MoeDeriv/MeoDeriv on upper + lower
-    //       with C-conjugation chain rule for the lower-block U_conj).
   }
 
   DTXQCDFermionDoubled &PseudoFermion() { return Phi_; }
@@ -295,6 +304,69 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     }
   }
 
+  // Per-pole hopping gauge force, accumulated directly into dSdU.U.
+  //
+  // For each flavor a and each fermion block (upper, lower):
+  //   - 2 MoeDeriv calls (DaggerNo and DaggerYes) giving the contributions
+  //     from Y^dag M_oe W_e and X^dag M_oe^dag Z_e respectively.
+  //   - 2 MeoDeriv calls giving Z_e^dag M_eo X and W_e^dag M_eo^dag Y.
+  // Per-block sums are negated (sign convention mirroring TXQCDWilsonClover-
+  // RationalEOAction: gforce = -sum(force calls), then dSdU += ak * gforce).
+  //
+  // Lower-block forces come from Dw_lower (Wilson on U_conj), giving
+  // dS/dU_conj.  Chain rule for U_conj = conj(U) gives
+  //   dS/dU = conjugate(dS/dU_conj)
+  // (entry-wise complex conjugation; preserves anti-Hermiticity).
+  void AccumulateHoppingForce(const DTXQCDFermionDoubled &X,
+                              const DTXQCDFermionDoubled &Y,
+                              const DTXQCDFermionDoubled &W_e,
+                              const DTXQCDFermionDoubled &Z_e,
+                              RealD ak,
+                              DTXQCDWilsonCloverFermionEO &Dw,
+                              DTXQCDField &dSdU) {
+    auto &meooe = Dw.MeooeEngine();
+    auto &Wu    = meooe.UpperWilson();
+    auto &Wl    = meooe.LowerWilson();
+
+    LatticeGaugeField gforce_upper(&grid_);  gforce_upper = Zero();
+    LatticeGaugeField gforce_lower(&grid_);  gforce_lower = Zero();
+    LatticeGaugeField gtmp(&grid_);
+    LatticeGaugeField ForceO(&rbgrid_), ForceE(&rbgrid_);
+
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      // ---- Upper block (gauge = U) -------------------------------------
+      Wu.MoeDeriv(ForceO, Y.upper.f[a],   W_e.upper.f[a], DaggerNo);
+      Wu.MeoDeriv(ForceE, Z_e.upper.f[a], X.upper.f[a],   DaggerNo);
+      setCheckerboard(gtmp, ForceO);
+      setCheckerboard(gtmp, ForceE);
+      gforce_upper = gforce_upper - gtmp;
+
+      Wu.MoeDeriv(ForceO, X.upper.f[a],   Z_e.upper.f[a], DaggerYes);
+      Wu.MeoDeriv(ForceE, W_e.upper.f[a], Y.upper.f[a],   DaggerYes);
+      setCheckerboard(gtmp, ForceO);
+      setCheckerboard(gtmp, ForceE);
+      gforce_upper = gforce_upper - gtmp;
+
+      // ---- Lower block (gauge = U_conj) --------------------------------
+      Wl.MoeDeriv(ForceO, Y.lower.f[a],   W_e.lower.f[a], DaggerNo);
+      Wl.MeoDeriv(ForceE, Z_e.lower.f[a], X.lower.f[a],   DaggerNo);
+      setCheckerboard(gtmp, ForceO);
+      setCheckerboard(gtmp, ForceE);
+      gforce_lower = gforce_lower - gtmp;
+
+      Wl.MoeDeriv(ForceO, X.lower.f[a],   Z_e.lower.f[a], DaggerYes);
+      Wl.MeoDeriv(ForceE, W_e.lower.f[a], Y.lower.f[a],   DaggerYes);
+      setCheckerboard(gtmp, ForceO);
+      setCheckerboard(gtmp, ForceE);
+      gforce_lower = gforce_lower - gtmp;
+    }
+
+    // Map dS/dU_conj → dS/dU via entry-wise conjugation.
+    gforce_lower = conjugate(gforce_lower);
+
+    dSdU.U = dSdU.U + ak * (gforce_upper + gforce_lower);
+  }
+
   // Per-pole per-CB site loop: accumulate aux + clover-sigma contributions
   // from the bilinear (Y, X) into dSdU and clover_sigma_full.
   //
@@ -330,15 +402,29 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
             ExtractSiteVec48(X, coord, X_x);
             ExtractSiteVec48(Y, coord, Y_x);
 
-            // Bil(R, C) = conj(Y[C]) * X[R]  -- swapped indices vs the
-            // "Inv(R, C) = M^{-1}[R][C]" lookup used by LogDet.  This is
-            // because the kernel evaluates Tr-formula entries A[K, R] * dM[R, K]
-            // (so K plays the column of dM in the trace), while we want
-            // Y^dag dM X = sum_{R, C} dM_{R, C} conj(Y[R]) X[C] -- the
-            // index roles swap.  See DTXQCDWilsonCloverRationalEOAction.h
-            // header for the derivation.
+            // Bil(R, C) = 0.5 * [conj(Y[C]) * X[R] + conj(X[C]) * Y[R]]
+            //
+            // (Y, X) symmetrization, mirroring TXQCDWilsonCloverRationalEOAction's
+            // conj(Y)*X + conj(X)*Y clover-sigma formula.  Without it, the
+            // asymmetric conj(Y[C])*X[R] is the natural-Wirtinger bilinear
+            // (gives the right Re value when summed against a real direction
+            // for the aux force test), but its complex Im part leaks into the
+            // clover_sigma_full and pollutes Cmunu's chain rule when the FD
+            // gauge-perturbation test extracts Re Tr(E * F_mu).  The
+            // symmetrization sets val_sym = Re(val_orig) for the aux force
+            // kernels (no change in effective Re-projected output) and gives
+            // the proper "cs = -conj(dS_k/dF)" form for the clover kernel.
+            //
+            // The R↔C swap of indices (vs LogDet's Inv(R, C) = M^{-1}[R][C])
+            // is still needed: the kernel evaluates Tr-formula entries
+            // A[K, R] * dM[R, K] (K is the column of dM), while we want
+            // Y^dag dM X = sum dM[R, C] conj(Y[R]) X[C], so the natural-
+            // Wirtinger half stores conj(Y[C])*X[R].  The 0.5*(...) average
+            // and the (X, Y)-swap cancel the Wirtinger Im contribution.
             auto Bil = [&X_x, &Y_x](int R, int C) -> ComplexD {
-              return std::conj(Y_x[C]) * X_x[R];
+              return ComplexD(0.5, 0.0) *
+                  (std::conj(Y_x[C]) * X_x[R]
+                 + std::conj(X_x[C]) * Y_x[R]);
             };
 
             SigSobj sig_force;

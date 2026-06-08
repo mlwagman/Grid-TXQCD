@@ -7,11 +7,12 @@
 // the start by refresh() with a fixed RNG seed; S() and deriv() are called
 // without an intervening refresh.
 //
-// Gauge perturbations are NOT tested here — v1 of the RationalEOAction has
-// the aux + clover gauge force in place but the hopping gauge force is still
-// a TODO.  Aux directions exercise the full aux force chain (sigma^A, pi^A,
+// Aux directions exercise the full aux force chain (sigma^A, pi^A,
 // t^A_{mu,nu}, d, n) at csw = 0 (no clover) and csw = 1.25 (with clover, but
-// still aux-only perturbation — gauge held fixed).
+// still aux-only perturbation — gauge held fixed).  Gauge directions exercise
+// the hopping (and clover) gauge force chain at csw = 0 (hopping only) and
+// csw = 1.25 (hopping + clover).  All checks compare FD vs analytic deriv()
+// after a single fixed-seed refresh().
 //
 // Run: ./tests/dtxqcd/Test_dtxqcd_rational_aux_force --grid 4.4.4.4 --mpi 1.1.1.1
 
@@ -144,6 +145,55 @@ int main(int argc, char **argv) {
   });
   check_piece("csw=0 all-aux", [](DTXQCDField &) {});
 
+  // ---------- csw = 0 gauge perturbation ----------
+  // Perturb U_mu -> exp(h E_mu) U_mu and compare FD vs analytic dSdU.U.
+  // The integrator-convention "Convention A" force gives
+  //     dS/dh = -2 Re Tr(E_mu * F_mu) summed over Lorentz.
+  // (Mirrors LogDet's gauge-FD test.)
+  auto gauge_fd_check = [&](DTXQCDWilsonCloverRationalEOAction &act,
+                            const DTXQCDField &dS, const char *name) {
+    std::array<LatticeColourMatrix, 4> Emu{
+        LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid),
+        LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid)};
+    for (int mu = 0; mu < Nd; ++mu)
+      SU<Nc>::GaussianFundamentalLieAlgebraMatrix(pRNG, Emu[mu]);
+
+    RealD ana = 0.0;
+    for (int mu = 0; mu < Nd; ++mu) {
+      LatticeColourMatrix Fmu = PeekIndex<LorentzIndex>(dS.U, mu);
+      ana += TensorRemove(sum(trace(Emu[mu] * Fmu))).real();
+    }
+    ana *= -2.0;
+
+    LatticeGaugeField Usaved = U.U;
+
+    for (int mu = 0; mu < Nd; ++mu) {
+      LatticeColourMatrix Umu  = PeekIndex<LorentzIndex>(Usaved, mu);
+      LatticeColourMatrix expE = expMat(Emu[mu], h, 12);
+      PokeIndex<LorentzIndex>(U.U, expE * Umu, mu);
+    }
+    RealD Sp = act.S(U);
+    for (int mu = 0; mu < Nd; ++mu) {
+      LatticeColourMatrix Umu  = PeekIndex<LorentzIndex>(Usaved, mu);
+      LatticeColourMatrix expE = expMat(Emu[mu], -h, 12);
+      PokeIndex<LorentzIndex>(U.U, expE * Umu, mu);
+    }
+    RealD Sm = act.S(U);
+    U.U = Usaved;
+
+    RealD fd = (Sp - Sm) / (2.0 * h);
+    check(name, fd, ana, 1e-3);
+
+    RealD nU = std::sqrt(norm2(dS.U));
+    std::cout << GridLogMessage << name << " |dSdU.U| = " << nU << std::endl;
+    if (nU < 1e-10) {
+      std::cout << GridLogError << "[FAIL] gauge force vanishes" << std::endl;
+      exitcode = 1;
+    }
+  };
+
+  gauge_fd_check(action, dSdU, "csw=0 gauge (hopping) FD vs analytic");
+
   // ---------- csw = 1.25 ----------
   DTXQCDWilsonCloverRationalEOAction action2(Grid, RBGrid, mass, rp, /*csw=*/1.25);
   // Reset RNGs so Phi_ in action2 starts from the same draw structure (the
@@ -162,6 +212,8 @@ int main(int argc, char **argv) {
     RealD ana = AuxInnerReal(dSdU2, Y);
     check("csw=1.25 all-aux FD vs analytic", num, ana, 1e-5);
   }
+
+  gauge_fd_check(action2, dSdU2, "csw=1.25 gauge (hopping+clover) FD vs analytic");
 
   std::cout << GridLogMessage
             << (exitcode ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED")
