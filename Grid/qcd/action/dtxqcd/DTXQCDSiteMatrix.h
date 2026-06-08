@@ -192,8 +192,15 @@ inline void DtxqcdBuildDiagBlock24(double mass,
                                     const DtxqcdSpinMatrices& spin,
                                     Eigen::MatrixXcd& M,
                                     double tensor_sign = +1.0) {
+  // Mooee diagonal = (mass + 4) per Grid's WilsonFermion convention
+  // (M_W = (4 + mass)*I - hopping; Mooee block = (4 + mass)*I).  Matches
+  // TXQCD's diag_mass_[a] = 4.0 + mass_[a] and the DtxqcdApplyMooeeDoubled
+  // lattice op.  Per-site M48 builds (used by LogDet and the cached EO
+  // inverse) and the lattice Mooee MUST use the same diagonal so
+  // det(M_full) = det(Mee) * det(Mpc) is the Wilson determinant.
+  const double mass_diag = mass + 4.0;
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
-  for (int row = 0; row < kDtxqcdSiteDim24; ++row) M(row, row) = ComplexD(mass, 0);
+  for (int row = 0; row < kDtxqcdSiteDim24; ++row) M(row, row) = ComplexD(mass_diag, 0);
 
   const auto& tau = DtxqcdPauliEigen();
   const ComplexD inv_sqrt2(1.0 / std::sqrt(2.0), 0.0);

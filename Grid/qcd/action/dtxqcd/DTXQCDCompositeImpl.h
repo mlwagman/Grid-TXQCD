@@ -187,6 +187,42 @@ class DTXQCDCompositeImpl {
     U.n     = Zero();
   }
 
+  // Fill all aux slots with mean-zero Gaussian samples at the physical
+  // saddle variance Var = 1/lambda^2 per independent component.  Same
+  // pattern as TXQCDCompositeImpl::FillAuxFields (without the optional
+  // Sigma saddle shift -- DTXQCD has no analogue of the TXQCD <q-bar q>
+  // saddle structure at this stage; if/when a non-trivial saddle is
+  // identified for the diquark-tensor variant, add a Sigma overload here).
+  //
+  // For sigma^A, pi^A, t^A: stored as triplets, real-projected, so the
+  // base DtxqcdRealGaussian gives Var=1 per real DOF and we scale by 1/lambda.
+  // For d, n: Hermitian color matrices, DtxqcdHermitianGaussian Var=1/2 per
+  // real DOF; we still scale by 1/lambda to match TXQCD's HermitianGaussian
+  // convention.
+  static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
+                                    RealD lambda) {
+    RealD s = 1.0 / lambda;
+    DtxqcdRealGaussian(pRNG, U.sigma);  U.sigma = s * U.sigma;
+    DtxqcdRealGaussian(pRNG, U.pi);     U.pi    = s * U.pi;
+    DtxqcdGaussianAntisymTensor(pRNG, U.t);
+    U.t = (s / std::sqrt(2.0)) * U.t;
+    DtxqcdHermitianGaussian(pRNG, U.d); U.d     = s * U.d;
+    DtxqcdHermitianGaussian(pRNG, U.n); U.n     = s * U.n;
+  }
+
+  // Weak-field gauge + thermal aux init.  This is the recommended cold-start
+  // for DTXQCD HMC: U links near identity (scale wf_scale ~ 0.1) plus aux
+  // fields drawn at their physical Var=1/lambda^2 saddle width.  Avoids the
+  // exact-aux=0 spectral degeneracy that makes the doubled M block-diagonal
+  // (and breaks multi-shift CG convergence on cold starts).  Direct sibling
+  // of TXQCDCompositeImpl::ThermalAuxConfiguration.
+  static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
+                                              RealD lambda,
+                                              double wf_scale = 0.1) {
+    GenerateWeakFieldGauge(pRNG, U, wf_scale);
+    FillAuxFields(pRNG, U, lambda);
+  }
+
   // Weak-field gauge initializer matching TXQCDCompositeImpl convention
   // (LieRandomize per mu, default wf_scale=0.1 = chroma WEAK_FIELD).
   static inline void GenerateWeakFieldGauge(GridParallelRNG &pRNG, Field &U,

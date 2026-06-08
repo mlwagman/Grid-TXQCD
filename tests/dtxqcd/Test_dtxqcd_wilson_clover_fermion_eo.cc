@@ -176,18 +176,28 @@ int main(int argc, char **argv) {
   }
 
   // ---------- 5.  Mooee * MooeeInv = I ----------
+  // MooeeInv requires a CB-lattice input (post-Phase-4 EO refactor); peek
+  // even half of the random full-volume v into a CB doubled fermion and
+  // round-trip there.  Reuses the outer RBGrid -- the EO wrapper stores a
+  // pointer-typed reference to its rbgrid_, so a fresh local
+  // GridRedBlackCartesian here would fail the assert against the wrapper's
+  // stored pointer.
   {
-    DTXQCDFermionDoubled inv_v(&Grid), back(&Grid);
-    M_wrap.MooeeInv(v, inv_v);
+    DTXQCDFermionDoubled v_e(&RBGrid), inv_v(&RBGrid), back(&RBGrid);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      pickCheckerboard(Even, v_e.upper.f[a], v.upper.f[a]);
+      pickCheckerboard(Even, v_e.lower.f[a], v.lower.f[a]);
+    }
+    M_wrap.MooeeInv(v_e, inv_v);
     M_wrap.Mooee(inv_v, back);
 
-    DTXQCDFermionDoubled diff(&Grid);
+    DTXQCDFermionDoubled diff(&RBGrid);
     for (int a = 0; a < DtxqcdNf; ++a) {
-      diff.upper.f[a] = back.upper.f[a] - v.upper.f[a];
-      diff.lower.f[a] = back.lower.f[a] - v.lower.f[a];
+      diff.upper.f[a] = back.upper.f[a] - v_e.upper.f[a];
+      diff.lower.f[a] = back.lower.f[a] - v_e.lower.f[a];
     }
     RealD rel = std::sqrt(norm2(diff)
-                          / std::max(norm2(v), 1e-30));
+                          / std::max(norm2(v_e), 1e-30));
     check("Mooee * MooeeInv = I (rel)", rel, 1e-10);
   }
 

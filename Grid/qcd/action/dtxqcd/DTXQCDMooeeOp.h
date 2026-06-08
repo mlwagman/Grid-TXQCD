@@ -95,13 +95,21 @@ inline void DtxqcdApplyMooeeDoubled(
   DtxqcdApplyDnCross(d, n, in_lower, off_upper);  // off-upper from in_lower
   DtxqcdApplyDnCross(d, n, in_upper, off_lower);  // off-lower from in_upper
 
-  // Assemble out = mass * in + diag + off.
+  // Assemble out = (mass + 4) * in + diag + off.  The "+ 4" is the Wilson
+  // hopping-normalization constant: Grid's WilsonFermion convention has
+  // M_W = (4 + mass)*I - hopping, so the EO Mooee block diagonal is
+  // (4 + mass)*I, not just mass*I.  Matching TXQCD's diag_mass_[a] =
+  // 4.0 + mass_[a].  Pre-fix, the missing +4 left Mooee = mass*I with
+  // mass=0.3, making Mee^{-1} ~ 1/0.3 = 3.3, which amplified Meo by ~10x
+  // in Mpc and pushed lambda_max(Mpc^dag Mpc) to ~2800 on cold gauge
+  // (vs. ~75 with the fix).
+  const double mooee_diag = mass + 4.0;
   for (int a = 0; a < DtxqcdNf; ++a) {
-    out_upper.f[a] = ComplexD(mass, 0.0) * in_upper.f[a]
+    out_upper.f[a] = ComplexD(mooee_diag, 0.0) * in_upper.f[a]
                    + diag_upper.f[a]
                    + off_upper.f[a];
     out_upper.f[a].Checkerboard() = cb;
-    out_lower.f[a] = ComplexD(mass, 0.0) * in_lower.f[a]
+    out_lower.f[a] = ComplexD(mooee_diag, 0.0) * in_lower.f[a]
                    + diag_lower.f[a]
                    + off_lower.f[a];
     out_lower.f[a].Checkerboard() = cb;

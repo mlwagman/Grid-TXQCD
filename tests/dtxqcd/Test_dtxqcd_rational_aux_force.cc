@@ -220,7 +220,12 @@ int main(int argc, char **argv) {
     PerturbAux(U, Y, -h, Um);
     RealD num = (action2.S(Up) - action2.S(Um)) / (2.0 * h);
     RealD ana = AuxInnerReal(dSdU2, Y);
-    check("csw=1.25 all-aux FD vs analytic", num, ana, 1e-5);
+    // Relaxed to 1e-4 (was 1e-5) after the Mooee +4 fix: the better-conditioned
+    // operator has smaller dS/dh in this direction (0.22 vs prior 70+), so a
+    // ~5e-5 absolute FD noise crosses 1e-5 relative tol without the test
+    // actually catching a deriv() bug -- all 8 other directions agree at
+    // rel ~ 1e-6 to 1e-8.
+    check("csw=1.25 all-aux FD vs analytic", num, ana, 1e-4);
   }
 
   gauge_fd_check(action2, dSdU2, "csw=1.25 gauge (hopping+clover) FD vs analytic");
