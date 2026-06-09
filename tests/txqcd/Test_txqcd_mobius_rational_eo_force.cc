@@ -54,8 +54,15 @@ int main(int argc, char **argv) {
   GridSerialRNG sRNG;            sRNG.SeedFixedIntegers({7, 8, 9, 10});
 
   TXQCDField U(UGrid);
-  SU<Nc>::HotConfiguration(pRNG4, U.U);
-  const RealD aux_scale = 0.05;   // production-realistic; EO PCG converges fast
+  const char *gt = std::getenv("GAUGE_TYPE");
+  bool cold_gauge = (gt && std::string(gt) == "cold");
+  if (cold_gauge) { SU<Nc>::ColdConfiguration(U.U); }
+  else            { SU<Nc>::HotConfiguration(pRNG4, U.U); }
+  std::cout << GridLogMessage << "[fd test] GAUGE_TYPE="
+            << (cold_gauge ? "cold" : "hot") << std::endl;
+  const char *as_env = std::getenv("AUX_SCALE");
+  const RealD aux_scale = (as_env && *as_env) ? std::atof(as_env) : 0.05;
+  std::cout << GridLogMessage << "[fd test] AUX_SCALE=" << aux_scale << std::endl;
   HermitianGaussian(pRNG4, U.sigma); U.sigma = aux_scale * U.sigma;
   HermitianGaussian(pRNG4, U.pi);    U.pi    = aux_scale * U.pi;
   HermitianGaussian(pRNG4, U.s);     U.s     = aux_scale * U.s;
@@ -63,11 +70,20 @@ int main(int argc, char **argv) {
   GaussianAntisymTensor(pRNG4, U.t); U.t     = aux_scale * U.t;
 
   RealD mass = 0.05, M5 = 1.8, b = 1.5, c = 0.5;
-  OneFlavourRationalParams param(/*lo=*/1e-4, /*hi=*/64.0,
-                                 /*maxit=*/20000, /*tol=*/1e-10,
+  auto envD = [](const char *k, RealD d){ const char *v=std::getenv(k);
+                                          return (v&&*v)?std::atof(v):d; };
+  const RealD rat_lo  = envD("RAT_LO",  1e-4);
+  const RealD rat_hi  = envD("RAT_HI",  64.0);
+  const RealD md_tol  = envD("MD_TOL",  1e-7);
+  const int   max_it  = (int)envD("MAX_IT", 20000);
+  std::cout << GridLogMessage << "[fd test] RAT_LO=" << rat_lo
+            << " RAT_HI=" << rat_hi << " MD_TOL=" << md_tol
+            << " MAX_IT=" << max_it << std::endl;
+  OneFlavourRationalParams param(/*lo=*/rat_lo, /*hi=*/rat_hi,
+                                 /*maxit=*/max_it, /*tol=*/1e-10,
                                  /*degree=*/12, /*precision=*/64,
                                  /*BoundsCheckFreq=*/100,
-                                 /*mdtol=*/1e-7,
+                                 /*mdtol=*/md_tol,
                                  /*BoundsCheckTol=*/1e-4);
 
   TXQCDMobiusRationalEOAction action(*FGrid, *FrbGrid, *UGrid, *UrbGrid,

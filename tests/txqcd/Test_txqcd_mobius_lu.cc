@@ -43,7 +43,10 @@ int main(int argc, char **argv) {
   LatticeSigmaField sigma(UGrid); LatticePiField pi(UGrid);
   LatticeSFieldC s(UGrid);        LatticePFieldC p(UGrid);
   LatticeTField  t(UGrid);
-  const RealD as = 0.05;
+  // aux scale via env (default 0.05; HMC sees std ~ 1/lambda)
+  const char *as_env = std::getenv("AUX_SCALE");
+  const RealD as = (as_env && *as_env) ? std::atof(as_env) : 0.05;
+  std::cout << GridLogMessage << "[lu test] AUX_SCALE=" << as << std::endl;
   HermitianGaussian(pRNG4, sigma); sigma = as * sigma;
   HermitianGaussian(pRNG4, pi);    pi    = as * pi;
   HermitianGaussian(pRNG4, s);     s     = as * s;
@@ -95,6 +98,38 @@ int main(int argc, char **argv) {
     bool ok = e < 1e-7;
     std::cout << GridLogMessage << "Test 4 (LU^dag vs PCG MooeeInvDag): " << e
               << (ok ? "  PASS" : "  FAIL") << std::endl; if (!ok) ec = 1; }
+
+  // ---- EVEN cb: the cb Schur Mpc actually uses for Mee^{-1} ----
+  TXQCDMobiusSiteLU lu_e(FrbGrid, Ls);
+  lu_e.Build([&](const TXQCDFermionNf &i, TXQCDFermionNf &o){ Meo.Mooee(i, o); },
+             Even);
+  std::cout << GridLogMessage << "[lu] built Even per-site blocks" << std::endl;
+  TXQCDFermionNf xe(FrbGrid), bbe(FrbGrid), ye(FrbGrid), yoe(FrbGrid);
+  for (int f = 0; f < TxqcdNf; ++f) {
+    LatticeFermion tmp(FGrid); gaussian(pRNG5, tmp);
+    xe.f[f].Checkerboard() = Even;  pickCheckerboard(Even, xe.f[f], tmp);
+    bbe.f[f].Checkerboard() = Even; ye.f[f].Checkerboard() = Even;
+    yoe.f[f].Checkerboard() = Even;
+  }
+  Meo.Mooee(xe, bbe);
+  lu_e.Apply(bbe, ye, /*dag=*/false);
+  { RealD e = relerr(xe, ye); bool ok = e < 1e-9;
+    std::cout << GridLogMessage << "Test 5 (Even LU.Apply(Mooee x)==x): " << e
+              << (ok ? "  PASS" : "  FAIL") << std::endl; if (!ok) ec = 1; }
+  Meo.MooeeInv(bbe, yoe);
+  { RealD e = relerr(yoe, ye); bool ok = e < 1e-7;
+    std::cout << GridLogMessage << "Test 6 (Even LU vs PCG MooeeInv): " << e
+              << (ok ? "  PASS" : "  FAIL") << std::endl; if (!ok) ec = 1; }
+  Meo.MooeeDag(xe, bbe);
+  lu_e.Apply(bbe, ye, /*dag=*/true);
+  { RealD e = relerr(xe, ye); bool ok = e < 1e-9;
+    std::cout << GridLogMessage << "Test 7 (Even LU^dag(MooeeDag x)==x): " << e
+              << (ok ? "  PASS" : "  FAIL") << std::endl; if (!ok) ec = 1; }
+  Meo.MooeeInvDag(bbe, yoe);
+  lu_e.Apply(bbe, ye, /*dag=*/true);
+  { RealD e = relerr(yoe, ye); bool ok = e < 1e-7;
+    std::cout << GridLogMessage << "Test 8 (Even LU^dag vs PCG MooeeInvDag): "
+              << e << (ok ? "  PASS" : "  FAIL") << std::endl; if (!ok) ec = 1; }
 
   std::cout << GridLogMessage
             << (ec ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED") << std::endl;
