@@ -393,12 +393,23 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     Quda::AccumulateRbScaledToFull(dSdU.t,     1.0, F_t_e);
 
     if (csw_ != 0.0) {
-      // Derive 6 clover_sigma RB ColourMatrix from F_t_e on GPU.
+      // Derive 6 clover_sigma RB ColourMatrix.
+      // Mode A (color-t): F_t_e numerically equals the color sigma-bilinear,
+      //   so DeriveCloverSigma scales F_t by (i*csw/2) directly.
+      // Mode B (flavor-t): F_t_e is a flavor matrix (different trace structure)
+      //   and CANNOT be used here.  We extract the color sigma-bilinear in a
+      //   separate kernel pass over M^{-1}.  See
+      //   memory/project_t_condensate_low_lambda.md and TxqcdTMode.h.
       std::array<LatticeColourMatrix, 6> clover_sigma_e_arr = {
           LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_),
           LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_),
           LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_)};
-      TxqcdLogDet::DeriveCloverSigma(F_t_e, csw_, clover_sigma_e_arr);
+      if (TxqcdTIsFlavor) {
+        TxqcdLogDet::ExtractCloverSigmaColorFromBuffers(
+            &M_inv_dev_[0], &lex_table_dev_[0], csw_, clover_sigma_e_arr);
+      } else {
+        TxqcdLogDet::DeriveCloverSigma(F_t_e, csw_, clover_sigma_e_arr);
+      }
 
       // Push each clover_sigma_e[k] to full grid via fused acc helper, then
       // run the existing Cmunu chain (already GPU-resident via Grid exprs).
@@ -456,6 +467,19 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
 
   // -------------------- CPU path (legacy) --------------------
   void deriv_cpu(const TXQCDField &U, TXQCDField &dSdU) {
+    // The mode-B (flavor-t) variant requires a separate color-sigma extraction
+    // for the clover gauge force (the t channel is orthogonal to color).  The
+    // GPU path implements this via ExtractCloverSigmaColorFromBuffers; the CPU
+    // path has not been updated.  Production runs the GPU path; this safeguard
+    // prevents silent wrong physics if someone disables TXQCD_LOGDET_GPU under
+    // TXQCD_T_FLAVOR=1.
+    if (TxqcdTIsFlavor && csw_ != 0.0) {
+      std::cerr << "[TXQCDLogDetCloverEOAction] deriv_cpu in mode B (flavor-t)"
+                << " with csw != 0 is not yet implemented.  Use the GPU path"
+                << " (export TXQCD_LOGDET_GPU=1) or recompile with csw=0."
+                << std::endl;
+      assert(false);
+    }
     auto aux = GetEvenAux(U);
     auto cl = GetEvenClover(U);
     uint64_t nsites = aux.sig.size();

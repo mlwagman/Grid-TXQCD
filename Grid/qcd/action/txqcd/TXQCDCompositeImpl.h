@@ -12,6 +12,7 @@
 // piece is (1/2) Tr P^2, which the Integrator sums via FieldSquareNorm.
 
 #include <Grid/qcd/action/txqcd/TXQCDField.h>
+#include <Grid/qcd/action/txqcd/TxqcdTMode.h>
 #include <Grid/qcd/action/gauge/GaugeImplementations.h>
 
 NAMESPACE_BEGIN(Grid);
@@ -54,8 +55,11 @@ inline void AntisymmetrizeTensor(LatticeTField &T) {
   });
 }
 
-// Hermitize color indices of the tensor field.
-inline void HermitianProjectTensorColor(LatticeTField &T) {
+// Hermitize the active TxqcdTDim x TxqcdTDim block of the tensor field per
+// Lorentz pair, and zero out the inactive slots.  In mode A (color-t) the
+// active block IS the full Nc x Nc storage.  In mode B (flavor-t) only the
+// upper Nf x Nf block is active; inactive slots must be zero by invariant.
+inline void HermitianProjectTensorBlock(LatticeTField &T) {
   autoView(T_v, T, CpuWrite);
   GridBase *grid = T.Grid();
   thread_for(ss, grid->oSites(), {
@@ -64,26 +68,39 @@ inline void HermitianProjectTensorColor(LatticeTField &T) {
         auto M = T_v[ss]()(mu, nu);
         auto Mdag = adj(M);
         for (int i = 0; i < Nc; ++i)
-          for (int j = 0; j < Nc; ++j)
-            T_v[ss]()(mu, nu)(i, j) = 0.5 * (M(i, j) + Mdag(i, j));
+          for (int j = 0; j < Nc; ++j) {
+            if (i < TxqcdTDim && j < TxqcdTDim) {
+              T_v[ss]()(mu, nu)(i, j) = 0.5 * (M(i, j) + Mdag(i, j));
+            } else {
+              T_v[ss]()(mu, nu)(i, j) = Zero();  // inactive slot in mode B
+            }
+          }
       }
     }
   });
 }
 
+// Deprecated alias retained for source compatibility.  Use
+// HermitianProjectTensorBlock in new code.
+inline void HermitianProjectTensorColor(LatticeTField &T) {
+  HermitianProjectTensorBlock(T);
+}
+
 inline void GaussianAntisymTensor(GridParallelRNG &pRNG, LatticeTField &T) {
   // Fill with complex N(0,1)+i*N(0,1) entries, then:
-  //   1. Hermitize color blocks (preserves per-DOF variance 1 on the Hermitian
-  //      representation),
+  //   1. Hermitize active TxqcdTDim x TxqcdTDim blocks (preserves per-DOF
+  //      variance 1 on the Hermitian representation); inactive color slots are
+  //      zeroed here in mode B (TXQCD_T_FLAVOR=1).
   //   2. Antisymmetrize in (mu,nu) -- this halves per-DOF variance because the
   //      projector is (t_{mu,nu} - t_{nu,mu})/2 combining two independent
-  //      samples,
+  //      samples.  Antisymmetrization is linear and preserves zeros in the
+  //      inactive slots.
   //   3. Rescale by sqrt(2) so the independent DOFs of the antisym-Hermitian
   //      representation end up with unit variance, matching the convention
   //      used by HermitianGaussian (and required so the HMC kinetic term
   //      (1/2) Tr P^2 is normalized correctly).
   gaussian(pRNG, T);
-  HermitianProjectTensorColor(T);
+  HermitianProjectTensorBlock(T);
   AntisymmetrizeTensor(T);
   T = T * std::sqrt(2.0);
 }

@@ -33,6 +33,12 @@ class AuxiliaryFieldGaussianAction : public Action<TXQCDField> {
     TXQCDField &Unc = const_cast<TXQCDField &>(U);
     // TensorFieldSquareNorm returns Σ_{μ<ν} Tr(t²), but the paper's Einstein
     // summation t_{μν}t_{μν} = 2 Σ_{μ<ν} Tr(t²) due to antisymmetry.
+    //
+    // The "·2" Fierz factor is geometric (it reflects Σ_{μν} = 2 Σ_{μ<ν}) and
+    // is mode-invariant under TXQCD_T_FLAVOR.  In mode B (flavor-t), only the
+    // upper Nf x Nf block of each (μ,ν) slot is populated; inactive color slots
+    // are zero by invariant (see TxqcdTMode.h, GaussianAntisymTensor), so the
+    // norm2(Unc.t) reduction correctly sums only over the populated DOFs.
     RealD n2 = HermitianFieldSquareNorm(Unc.sigma)
              + HermitianFieldSquareNorm(Unc.pi)
              + HermitianFieldSquareNorm(Unc.s)

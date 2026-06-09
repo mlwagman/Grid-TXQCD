@@ -187,9 +187,12 @@ struct TxqcdDiag : public HmcObservable<TXQCDField> {
       dump_mat("s_color", U.s,   Nc);
       dump_mat("p_color", U.p,   Nc);
       {
+        // t01 dump bound: Nc (color-t mode A) or Nf (flavor-t mode B).
+        // In mode B the upper Nf x Nf block of the Nc x Nc storage holds the
+        // active flavor matrix; inactive slots are zero by invariant.
         LatticeSFieldC t01(U.t.Grid());
         t01 = PeekIndex<1>(U.t, 0, 1);
-        dump_mat("t01", t01, Nc);
+        dump_mat("t01", t01, TxqcdTDim);
       }
     }
     {

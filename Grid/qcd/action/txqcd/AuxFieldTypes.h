@@ -21,6 +21,18 @@ NAMESPACE_BEGIN(Grid);
 #endif
 static constexpr int TxqcdNf = TXQCD_Nf;
 
+// Compile-time toggle for t_{mu,nu} index structure.
+//   0 (default): t is a color tensor (Nc x Nc upper-triangle blocks).
+//   1          : t is a flavor tensor (Nf x Nf upper-triangle blocks).
+// In flavor mode the existing storage (Nc x Nc per (mu,nu)) is reused but only
+// the upper Nf x Nf block is ever written non-zero; inactive color slots stay 0
+// by invariant.  See TxqcdTMode.h for helpers.
+#ifndef TXQCD_T_FLAVOR
+#define TXQCD_T_FLAVOR 0
+#endif
+static constexpr bool TxqcdTIsFlavor = (TXQCD_T_FLAVOR != 0);
+static constexpr int  TxqcdTDim     = (TXQCD_T_FLAVOR ? TxqcdNf : Nc);
+
 // -----------------------------------------------------------------------
 // Site tensors
 // -----------------------------------------------------------------------

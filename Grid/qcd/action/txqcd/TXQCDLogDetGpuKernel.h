@@ -14,6 +14,7 @@
 // 6 LatticeViews in the main accelerator_for body.
 
 #include <Grid/qcd/action/txqcd/AuxFieldTypes.h>
+#include <Grid/qcd/action/txqcd/TxqcdTMode.h>
 #include <Grid/qcd/action/txqcd/TXQCDSiteMatrix.h>
 
 NAMESPACE_BEGIN(Grid);
@@ -78,6 +79,13 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
   autoView(pv,   F_p_e,   AcceleratorWrite);
   autoView(tv,   F_t_e,   AcceleratorWrite);
 
+  // Mode-dependent factors mirroring TXQCDSiteMatrix::BuildSiteMatrix:
+  //   mode A: sigma, pi -> 1            ; s, p -> 1/sqrt(2)
+  //   mode B: sigma, pi -> 1/sqrt(2)    ; s, p -> 1
+  constexpr RealD sig_pi_factor = TxqcdTIsFlavor ? 0.7071067811865475 : 1.0;
+  constexpr RealD s_p_factor    = TxqcdTIsFlavor ? 1.0 : 0.7071067811865475;
+  constexpr int   TDim          = TxqcdTDim;  // Nc (mode A) or Nf (mode B)
+
   accelerator_for(s, oSites, Nsimd, {
     int simt_lane = static_cast<int>(lane);
     int lex = lex_dev[s * Nsimd + simt_lane];
@@ -99,7 +107,10 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
             val = val + Mij(ra, rb);
           }
         }
-        putlane(sigv[s]()()(a, b), -val, simt_lane);
+        putlane(sigv[s]()()(a, b),
+                ComplexD(-sig_pi_factor * val.real(),
+                         -sig_pi_factor * val.imag()),
+                simt_lane);
       }
     }
 
@@ -117,12 +128,14 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
             }
           }
         }
-        putlane(piv[s]()()(a, b), -val, simt_lane);
+        putlane(piv[s]()()(a, b),
+                ComplexD(-sig_pi_factor * val.real(),
+                         -sig_pi_factor * val.imag()),
+                simt_lane);
       }
     }
 
-    // ---- s force (color, ⨉ inv_sqrt2) ----
-    const RealD inv_sqrt2 = 0.7071067811865475;
+    // ---- s force (color, scaled by s_p_factor) ----
     for (int i = 0; i < Ncc; ++i) {
       for (int j = 0; j < Ncc; ++j) {
         ComplexD val = ComplexD(0.0, 0.0);
@@ -133,13 +146,13 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
             val = val + Mij(ri, rj);
           }
         }
-        putlane(sv[s]()()(i, j), ComplexD(-inv_sqrt2 * val.real(),
-                                          -inv_sqrt2 * val.imag()),
+        putlane(sv[s]()()(i, j), ComplexD(-s_p_factor * val.real(),
+                                          -s_p_factor * val.imag()),
                 simt_lane);
       }
     }
 
-    // ---- p force (color, γ5 spin, ⨉ inv_sqrt2) ----
+    // ---- p force (color, γ5 spin, scaled by s_p_factor) ----
     for (int i = 0; i < Ncc; ++i) {
       for (int j = 0; j < Ncc; ++j) {
         ComplexD val = ComplexD(0.0, 0.0);
@@ -153,14 +166,17 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
             }
           }
         }
-        putlane(pv[s]()()(i, j), ComplexD(-inv_sqrt2 * val.real(),
-                                          -inv_sqrt2 * val.imag()),
+        putlane(pv[s]()()(i, j), ComplexD(-s_p_factor * val.real(),
+                                          -s_p_factor * val.imag()),
                 simt_lane);
       }
     }
 
-    // ---- t force (color × Lorentz tensor, antisym μν, ⨉ iσ_{μν}) ----
-    // Initialize all 16 (μ,ν) entries to zero (μ=ν stays zero by antisymmetry).
+    // ---- t force (Lorentz antisym, mode-dependent index structure) ----
+    // mode A (color-t): writes tv[s](mu,nu)(i,j) — color matrix per (μ,ν).
+    // mode B (flavor-t): writes tv[s](mu,nu)(a,b) within upper Nf x Nf block;
+    //   inactive color slots (i,j outside Nf x Nf) are zeroed.
+    // Initialize all 16 (μ,ν) entries × Nc x Nc slots to zero.
     for (int mu_l = 0; mu_l < Nd; ++mu_l)
       for (int nu_l = 0; nu_l < Nd; ++nu_l)
         for (int i = 0; i < Ncc; ++i)
@@ -170,27 +186,57 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
     int mu_arr[6] = {0, 0, 0, 1, 1, 2};
     int nu_arr[6] = {1, 2, 3, 2, 3, 3};
 
-    for (int p = 0; p < 6; ++p) {
-      int mu_l = mu_arr[p];
-      int nu_l = nu_arr[p];
-      const ComplexD *isig = &isig_flat[p * Nsp * Nsp];
-      for (int i = 0; i < Ncc; ++i) {
-        for (int j = 0; j < Ncc; ++j) {
-          ComplexD val = ComplexD(0.0, 0.0);
-          for (int a = 0; a < Nsf; ++a) {
+    if (TxqcdTIsFlavor) {  // not constexpr-if: nvcc lambda first-capture restriction
+      // Mode B: t indexed by (a,b) flavor, color-diagonal.
+      // F_t[μν][a,b] = -Σ_{α,β,i} isig(β,α) · M^{-1}_{(a,α,i),(b,β,i)}
+      for (int p_idx = 0; p_idx < 6; ++p_idx) {
+        int mu_l = mu_arr[p_idx];
+        int nu_l = nu_arr[p_idx];
+        const ComplexD *isig = &isig_flat[p_idx * Nsp * Nsp];
+        for (int a = 0; a < TDim; ++a) {
+          for (int b = 0; b < TDim; ++b) {
+            ComplexD val = ComplexD(0.0, 0.0);
             for (int alpha = 0; alpha < Nsp; ++alpha) {
               for (int beta = 0; beta < Nsp; ++beta) {
                 ComplexD isigv = isig[beta * Nsp + alpha];
-                int ri = a * Nsp * Ncc + alpha * Ncc + i;
-                int rj = a * Nsp * Ncc + beta  * Ncc + j;
-                val = val + isigv * Mij(ri, rj);
+                for (int i = 0; i < Ncc; ++i) {
+                  int ri = a * Nsp * Ncc + alpha * Ncc + i;
+                  int rj = b * Nsp * Ncc + beta  * Ncc + i;
+                  val = val + isigv * Mij(ri, rj);
+                }
               }
             }
+            ComplexD vneg(-val.real(), -val.imag());
+            ComplexD vpos( val.real(),  val.imag());
+            putlane(tv[s]()(mu_l, nu_l)(a, b), vneg, simt_lane);
+            putlane(tv[s]()(nu_l, mu_l)(a, b), vpos, simt_lane);
           }
-          ComplexD vneg(-val.real(), -val.imag());
-          ComplexD vpos( val.real(),  val.imag());
-          putlane(tv[s]()(mu_l, nu_l)(i, j), vneg, simt_lane);
-          putlane(tv[s]()(nu_l, mu_l)(i, j), vpos, simt_lane);
+        }
+      }
+    } else {
+      // Mode A: t indexed by (i,j) color, flavor-diagonal (sum over flavor).
+      for (int p_idx = 0; p_idx < 6; ++p_idx) {
+        int mu_l = mu_arr[p_idx];
+        int nu_l = nu_arr[p_idx];
+        const ComplexD *isig = &isig_flat[p_idx * Nsp * Nsp];
+        for (int i = 0; i < Ncc; ++i) {
+          for (int j = 0; j < Ncc; ++j) {
+            ComplexD val = ComplexD(0.0, 0.0);
+            for (int a = 0; a < Nsf; ++a) {
+              for (int alpha = 0; alpha < Nsp; ++alpha) {
+                for (int beta = 0; beta < Nsp; ++beta) {
+                  ComplexD isigv = isig[beta * Nsp + alpha];
+                  int ri = a * Nsp * Ncc + alpha * Ncc + i;
+                  int rj = a * Nsp * Ncc + beta  * Ncc + j;
+                  val = val + isigv * Mij(ri, rj);
+                }
+              }
+            }
+            ComplexD vneg(-val.real(), -val.imag());
+            ComplexD vpos( val.real(),  val.imag());
+            putlane(tv[s]()(mu_l, nu_l)(i, j), vneg, simt_lane);
+            putlane(tv[s]()(nu_l, mu_l)(i, j), vpos, simt_lane);
+          }
         }
       }
     }
@@ -236,6 +282,96 @@ inline void DeriveCloverSigma(const LatticeTField &F_t_e,
       }
     });
   }
+}
+
+// Mode-B helper: extract the color sigma-bilinear matrix
+//   Sigma_color[mu,nu](i,j) = -Sum_{a,alpha,beta} isigma_{mu,nu}(beta,alpha)
+//                                    * M^{-1}_{(a,alpha,i),(a,beta,j)}
+// scaled by clover_coeff = (i*csw/2), and write 6 such color matrices into
+// clover_sigma_e[k=FmnIndex(mu,nu)].
+//
+// In mode A this is equal (after the csw scaling) to DeriveCloverSigma(F_t_e),
+// because F_t in mode A IS the color sigma-bilinear.  In mode B, F_t becomes a
+// flavor matrix (orthogonal channel), so we need to compute the color
+// sigma-bilinear directly from M^{-1}.  See memory/project_t_condensate_low_lambda.md
+// for why this matters: the clover gauge force depends on a color trace that
+// is decoupled from the flavor-t channel in mode B.
+inline void ExtractCloverSigmaColorFromBuffers(
+    const ComplexD *M_inv_dev,
+    const int *lex_dev,
+    RealD csw,
+    std::array<LatticeColourMatrix, 6> &clover_sigma_e) {
+  using SMU = TXQCDSiteMatrixUtil;
+  constexpr int N    = SMU::kDim;
+  constexpr int Nsf  = TxqcdNf;
+  constexpr int Nsp  = Ns;
+  constexpr int Ncc  = Nc;
+
+  SMU::SpinMatrices sm;
+  std::array<ComplexD, 6 * Nsp * Nsp> isig_flat{};
+  static const int MU_PAIR[6] = {0, 0, 0, 1, 1, 2};
+  static const int NU_PAIR[6] = {1, 2, 3, 2, 3, 3};
+  for (int p = 0; p < 6; ++p)
+    for (int a = 0; a < Nsp; ++a)
+      for (int b = 0; b < Nsp; ++b)
+        isig_flat[p * Nsp * Nsp + a * Nsp + b] =
+            sm.isigma[MU_PAIR[p]][NU_PAIR[p]](a, b);
+
+  // The +i·(csw/2) factor (matches DeriveCloverSigma in mode A: clover_sigma
+  // = +i·(csw/2)·F_t, where F_t already carries a sign convention).  Encoded
+  // as +i·(csw/2) here together with the (-) sign of the trace formula.
+  const ComplexD scale(0.0, 0.5 * csw);
+
+  GridBase *rbgrid = clover_sigma_e[0].Grid();
+  uint64_t oSites  = rbgrid->oSites();
+  constexpr int Nsimd = LatticeColourMatrix::vector_object::Nsimd();
+
+  // Open six write views (one per Fmn slot)
+  autoView(c0v, clover_sigma_e[0], AcceleratorWrite);
+  autoView(c1v, clover_sigma_e[1], AcceleratorWrite);
+  autoView(c2v, clover_sigma_e[2], AcceleratorWrite);
+  autoView(c3v, clover_sigma_e[3], AcceleratorWrite);
+  autoView(c4v, clover_sigma_e[4], AcceleratorWrite);
+  autoView(c5v, clover_sigma_e[5], AcceleratorWrite);
+  for (int k = 0; k < 6; ++k) clover_sigma_e[k].Checkerboard() = Even;
+
+  accelerator_for(s, oSites, Nsimd, {
+    int simt_lane = static_cast<int>(lane);
+    int lex = lex_dev[s * Nsimd + simt_lane];
+    const ComplexD *Inv = &M_inv_dev[lex * uint64_t(N) * N];
+    auto Mij = [&](int ra, int rb) -> ComplexD { return Inv[rb * N + ra]; };
+
+    for (int p_idx = 0; p_idx < 6; ++p_idx) {
+      const ComplexD *isig = &isig_flat[p_idx * Nsp * Nsp];
+      for (int i = 0; i < Ncc; ++i) {
+        for (int j = 0; j < Ncc; ++j) {
+          ComplexD val = ComplexD(0.0, 0.0);
+          for (int a = 0; a < Nsf; ++a) {
+            for (int alpha = 0; alpha < Nsp; ++alpha) {
+              for (int beta = 0; beta < Nsp; ++beta) {
+                ComplexD isigv = isig[beta * Nsp + alpha];
+                int ri = a * Nsp * Ncc + alpha * Ncc + i;
+                int rj = a * Nsp * Ncc + beta  * Ncc + j;
+                val = val + isigv * Mij(ri, rj);
+              }
+            }
+          }
+          // Sigma_color[μν](i,j) = -val (matches F_t sign convention in mode A)
+          // clover_sigma = scale * Sigma_color = +(i*csw/2) * (-val)
+          ComplexD cs = ComplexD(-scale.real(), -scale.imag());
+          // (-(scale.re), -(scale.im)) * val
+          ComplexD out(cs.real() * val.real() - cs.imag() * val.imag(),
+                       cs.real() * val.imag() + cs.imag() * val.real());
+          if (p_idx == 0) putlane(c0v[s]()()(i, j), out, simt_lane);
+          if (p_idx == 1) putlane(c1v[s]()()(i, j), out, simt_lane);
+          if (p_idx == 2) putlane(c2v[s]()()(i, j), out, simt_lane);
+          if (p_idx == 3) putlane(c3v[s]()()(i, j), out, simt_lane);
+          if (p_idx == 4) putlane(c4v[s]()()(i, j), out, simt_lane);
+          if (p_idx == 5) putlane(c5v[s]()()(i, j), out, simt_lane);
+        }
+      }
+    }
+  });
 }
 
 // Phase J.3 retry: GPU BuildSiteMatrix.
@@ -309,6 +445,13 @@ inline void BuildSiteMatrixFromLattice(
 
   // Fmn views — opened only when csw != 0 inside the dispatch below.
 
+  // Mode-dependent factors mirroring TXQCDSiteMatrix::BuildSiteMatrix:
+  //   mode A: sigma, pi -> 1            ; s, p -> 1/sqrt(2)
+  //   mode B: sigma, pi -> 1/sqrt(2)    ; s, p -> 1
+  const RealD sig_pi_factor = TxqcdTIsFlavor ? inv_sqrt2 : 1.0;
+  const RealD s_p_factor    = TxqcdTIsFlavor ? 1.0       : inv_sqrt2;
+  const int   TDim          = TxqcdTDim;
+
   if (!have_csw) {
     accelerator_for(s, oSites, Nsimd, {
       int simt_lane = static_cast<int>(lane);
@@ -326,7 +469,7 @@ inline void BuildSiteMatrixFromLattice(
             M[r + r * N] = ComplexD(diag_mass_flat[a], 0.0);
           }
 
-      // sigma + pi block
+      // sigma + pi block (flavor, color-diagonal, sig_pi_factor)
       for (int a = 0; a < Nsf; ++a) {
         for (int b = 0; b < Nsf; ++b) {
           ComplexD sig_ab = getlane(sigv[s]()()(a, b), simt_lane);
@@ -337,15 +480,15 @@ inline void BuildSiteMatrixFromLattice(
               for (int i = 0; i < Ncc; ++i) {
                 int r = a * Nsp * Ncc + alpha * Ncc + i;
                 int c = b * Nsp * Ncc + beta  * Ncc + i;
-                if (alpha == beta) M[r + c * N] = M[r + c * N] + sig_ab;
-                M[r + c * N] = M[r + c * N] + pi_ab * g5;
+                if (alpha == beta) M[r + c * N] = M[r + c * N] + sig_pi_factor * sig_ab;
+                M[r + c * N] = M[r + c * N] + sig_pi_factor * pi_ab * g5;
               }
             }
           }
         }
       }
 
-      // s, p, t block
+      // s, p block (color, flavor-diagonal, s_p_factor)
       for (int a = 0; a < Nsf; ++a) {
         for (int i = 0; i < Ncc; ++i) {
           for (int j = 0; j < Ncc; ++j) {
@@ -355,17 +498,55 @@ inline void BuildSiteMatrixFromLattice(
               for (int beta = 0; beta < Nsp; ++beta) {
                 int r = a * Nsp * Ncc + alpha * Ncc + i;
                 int c = a * Nsp * Ncc + beta  * Ncc + j;
-                if (alpha == beta) M[r + c * N] = M[r + c * N] + inv_sqrt2 * s_ij;
-                M[r + c * N] = M[r + c * N] + inv_sqrt2 * p_ij *
+                if (alpha == beta) M[r + c * N] = M[r + c * N] + s_p_factor * s_ij;
+                M[r + c * N] = M[r + c * N] + s_p_factor * p_ij *
                                g5_flat[alpha * Nsp + beta];
-                const int MU_LOC[6] = {0, 0, 0, 1, 1, 2};
-                const int NU_LOC[6] = {1, 2, 3, 2, 3, 3};
-                for (int p_idx = 0; p_idx < 6; ++p_idx) {
-                  int mu_l = MU_LOC[p_idx];
-                  int nu_l = NU_LOC[p_idx];
-                  ComplexD t_ij = getlane(tv[s]()(mu_l, nu_l)(i, j), simt_lane);
-                  ComplexD isig = isig_flat[p_idx * Nsp * Nsp + alpha * Nsp + beta];
-                  M[r + c * N] = M[r + c * N] + t_ij * isig;
+              }
+            }
+          }
+        }
+      }
+
+      // t block (mode-dependent)
+      const int MU_LOC[6] = {0, 0, 0, 1, 1, 2};
+      const int NU_LOC[6] = {1, 2, 3, 2, 3, 3};
+      if (TxqcdTIsFlavor) {  // not constexpr-if: nvcc lambda first-capture restriction
+        // Mode B: t indexed by (a,b) flavor (upper Nf x Nf), color-diagonal.
+        for (int a = 0; a < TDim; ++a) {
+          for (int b = 0; b < TDim; ++b) {
+            for (int alpha = 0; alpha < Nsp; ++alpha) {
+              for (int beta = 0; beta < Nsp; ++beta) {
+                for (int i = 0; i < Ncc; ++i) {
+                  int r = a * Nsp * Ncc + alpha * Ncc + i;
+                  int c = b * Nsp * Ncc + beta  * Ncc + i;
+                  for (int p_idx = 0; p_idx < 6; ++p_idx) {
+                    int mu_l = MU_LOC[p_idx];
+                    int nu_l = NU_LOC[p_idx];
+                    ComplexD t_ab = getlane(tv[s]()(mu_l, nu_l)(a, b), simt_lane);
+                    ComplexD isig = isig_flat[p_idx * Nsp * Nsp + alpha * Nsp + beta];
+                    M[r + c * N] = M[r + c * N] + t_ab * isig;
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // Mode A: t indexed by (i,j) color, flavor-diagonal.
+        for (int a = 0; a < Nsf; ++a) {
+          for (int i = 0; i < Ncc; ++i) {
+            for (int j = 0; j < Ncc; ++j) {
+              for (int alpha = 0; alpha < Nsp; ++alpha) {
+                for (int beta = 0; beta < Nsp; ++beta) {
+                  int r = a * Nsp * Ncc + alpha * Ncc + i;
+                  int c = a * Nsp * Ncc + beta  * Ncc + j;
+                  for (int p_idx = 0; p_idx < 6; ++p_idx) {
+                    int mu_l = MU_LOC[p_idx];
+                    int nu_l = NU_LOC[p_idx];
+                    ComplexD t_ij = getlane(tv[s]()(mu_l, nu_l)(i, j), simt_lane);
+                    ComplexD isig = isig_flat[p_idx * Nsp * Nsp + alpha * Nsp + beta];
+                    M[r + c * N] = M[r + c * N] + t_ij * isig;
+                  }
                 }
               }
             }
@@ -398,7 +579,7 @@ inline void BuildSiteMatrixFromLattice(
             M[r + r * N] = ComplexD(diag_mass_flat[a], 0.0);
           }
 
-      // sigma + pi block
+      // sigma + pi block (flavor, color-diagonal, sig_pi_factor)
       for (int a = 0; a < Nsf; ++a) {
         for (int b = 0; b < Nsf; ++b) {
           ComplexD sig_ab = getlane(sigv[s]()()(a, b), simt_lane);
@@ -409,15 +590,15 @@ inline void BuildSiteMatrixFromLattice(
               for (int i = 0; i < Ncc; ++i) {
                 int r = a * Nsp * Ncc + alpha * Ncc + i;
                 int c = b * Nsp * Ncc + beta  * Ncc + i;
-                if (alpha == beta) M[r + c * N] = M[r + c * N] + sig_ab;
-                M[r + c * N] = M[r + c * N] + pi_ab * g5;
+                if (alpha == beta) M[r + c * N] = M[r + c * N] + sig_pi_factor * sig_ab;
+                M[r + c * N] = M[r + c * N] + sig_pi_factor * pi_ab * g5;
               }
             }
           }
         }
       }
 
-      // s, p, t, Fmn block
+      // s, p, Fmn block (color, flavor-diagonal; s,p use s_p_factor; Fmn unchanged)
       for (int a = 0; a < Nsf; ++a) {
         for (int i = 0; i < Ncc; ++i) {
           for (int j = 0; j < Ncc; ++j) {
@@ -435,18 +616,61 @@ inline void BuildSiteMatrixFromLattice(
               for (int beta = 0; beta < Nsp; ++beta) {
                 int r = a * Nsp * Ncc + alpha * Ncc + i;
                 int c = a * Nsp * Ncc + beta  * Ncc + j;
-                if (alpha == beta) M[r + c * N] = M[r + c * N] + inv_sqrt2 * s_ij;
-                M[r + c * N] = M[r + c * N] + inv_sqrt2 * p_ij *
+                if (alpha == beta) M[r + c * N] = M[r + c * N] + s_p_factor * s_ij;
+                M[r + c * N] = M[r + c * N] + s_p_factor * p_ij *
                                g5_flat[alpha * Nsp + beta];
                 const int MU_LOC[6] = {0, 0, 0, 1, 1, 2};
                 const int NU_LOC[6] = {1, 2, 3, 2, 3, 3};
                 for (int p_idx = 0; p_idx < 6; ++p_idx) {
-                  int mu_l = MU_LOC[p_idx];
-                  int nu_l = NU_LOC[p_idx];
-                  ComplexD t_ij = getlane(tv[s]()(mu_l, nu_l)(i, j), simt_lane);
                   ComplexD isig = isig_flat[p_idx * Nsp * Nsp + alpha * Nsp + beta];
-                  M[r + c * N] = M[r + c * N] + t_ij * isig +
-                                 clover_coeff_re * f_ij[p_idx] * isig;
+                  M[r + c * N] = M[r + c * N] + clover_coeff_re * f_ij[p_idx] * isig;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // t block (mode-dependent index structure, decoupled from clover Fmn)
+      const int MU_LOC[6] = {0, 0, 0, 1, 1, 2};
+      const int NU_LOC[6] = {1, 2, 3, 2, 3, 3};
+      if (TxqcdTIsFlavor) {  // not constexpr-if: nvcc lambda first-capture restriction
+        // Mode B: t indexed by (a,b) flavor (upper Nf x Nf), color-diagonal.
+        for (int a = 0; a < TDim; ++a) {
+          for (int b = 0; b < TDim; ++b) {
+            for (int alpha = 0; alpha < Nsp; ++alpha) {
+              for (int beta = 0; beta < Nsp; ++beta) {
+                for (int i = 0; i < Ncc; ++i) {
+                  int r = a * Nsp * Ncc + alpha * Ncc + i;
+                  int c = b * Nsp * Ncc + beta  * Ncc + i;
+                  for (int p_idx = 0; p_idx < 6; ++p_idx) {
+                    int mu_l = MU_LOC[p_idx];
+                    int nu_l = NU_LOC[p_idx];
+                    ComplexD t_ab = getlane(tv[s]()(mu_l, nu_l)(a, b), simt_lane);
+                    ComplexD isig = isig_flat[p_idx * Nsp * Nsp + alpha * Nsp + beta];
+                    M[r + c * N] = M[r + c * N] + t_ab * isig;
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // Mode A: t indexed by (i,j) color, flavor-diagonal.
+        for (int a = 0; a < Nsf; ++a) {
+          for (int i = 0; i < Ncc; ++i) {
+            for (int j = 0; j < Ncc; ++j) {
+              for (int alpha = 0; alpha < Nsp; ++alpha) {
+                for (int beta = 0; beta < Nsp; ++beta) {
+                  int r = a * Nsp * Ncc + alpha * Ncc + i;
+                  int c = a * Nsp * Ncc + beta  * Ncc + j;
+                  for (int p_idx = 0; p_idx < 6; ++p_idx) {
+                    int mu_l = MU_LOC[p_idx];
+                    int nu_l = NU_LOC[p_idx];
+                    ComplexD t_ij = getlane(tv[s]()(mu_l, nu_l)(i, j), simt_lane);
+                    ComplexD isig = isig_flat[p_idx * Nsp * Nsp + alpha * Nsp + beta];
+                    M[r + c * N] = M[r + c * N] + t_ij * isig;
+                  }
                 }
               }
             }

@@ -97,6 +97,13 @@ struct TXQCDSiteMatrixUtil {
 
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
 
+    // Mode-dependent pre-factors (compile-time selected via TXQCD_T_FLAVOR):
+    //   mode A (color-t):  sigma, pi -> 1            ; s, p -> 1/sqrt(2)
+    //   mode B (flavor-t): sigma, pi -> 1/sqrt(2)    ; s, p -> 1
+    constexpr double sig_pi_factor = TxqcdTIsFlavor ? (1.0 / 1.4142135623730951) : 1.0;
+    constexpr double s_p_factor    = TxqcdTIsFlavor ? 1.0 : (1.0 / 1.4142135623730951);
+
+    // ---- sigma, pi contributions: flavor matrix, color-diagonal ----
     for (int a = 0; a < TxqcdNf; ++a) {
       for (int b = 0; b < TxqcdNf; ++b) {
         std::complex<double> sig_ab(sig_site()()(a, b).real(),
@@ -109,8 +116,8 @@ struct TXQCDSiteMatrixUtil {
             for (int i = 0; i < Nc; ++i) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = b * Ns * Nc + beta * Nc + i;
-              if (alpha == beta) M(r, c) += sig_ab;
-              M(r, c) += pi_ab * g5;
+              if (alpha == beta) M(r, c) += sig_pi_factor * sig_ab;
+              M(r, c) += sig_pi_factor * pi_ab * g5;
             }
           }
         }
@@ -119,6 +126,8 @@ struct TXQCDSiteMatrixUtil {
 
     const std::complex<double> clover_coeff(0.0, 0.5 * csw);
 
+    // ---- s, p contributions: color matrix, flavor-diagonal ----
+    // ---- clover F_{mu,nu} contribution: always color, flavor-diagonal ----
     for (int a = 0; a < TxqcdNf; ++a) {
       for (int i = 0; i < Nc; ++i) {
         for (int j = 0; j < Nc; ++j) {
@@ -130,14 +139,8 @@ struct TXQCDSiteMatrixUtil {
             for (int beta = 0; beta < Ns; ++beta) {
               int r = a * Ns * Nc + alpha * Nc + i;
               int c = a * Ns * Nc + beta * Nc + j;
-              if (alpha == beta) M(r, c) += inv_sqrt2 * s_ij;
-              M(r, c) += inv_sqrt2 * p_ij * sm.gamma5(alpha, beta);
-              for (int mu = 0; mu < Nd; ++mu)
-                for (int nu = mu + 1; nu < Nd; ++nu) {
-                  std::complex<double> t_ij(t_site()(mu, nu)(i, j).real(),
-                                            t_site()(mu, nu)(i, j).imag());
-                  M(r, c) += t_ij * sm.isigma[mu][nu](alpha, beta);
-                }
+              if (alpha == beta) M(r, c) += s_p_factor * s_ij;
+              M(r, c) += s_p_factor * p_ij * sm.gamma5(alpha, beta);
               if (fmn_site != nullptr) {
                 for (int mu = 0; mu < Nd; ++mu)
                   for (int nu = mu + 1; nu < Nd; ++nu) {
@@ -147,6 +150,51 @@ struct TXQCDSiteMatrixUtil {
                         (*fmn_site)[k]()()(i, j).imag());
                     M(r, c) += clover_coeff * fs_ij *
                                sm.isigma[mu][nu](alpha, beta);
+                  }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // ---- t_{mu,nu} contribution: mode-dependent index structure ----
+    // mode A (color-t): t indexed by (i,j) color, flavor-diagonal.
+    // mode B (flavor-t): t indexed by (a,b) flavor (upper Nf x Nf block of
+    //   the Nc x Nc storage), color-diagonal.  Inactive color slots are 0
+    //   by invariant maintained at initialization.
+    if constexpr (TxqcdTIsFlavor) {
+      for (int a = 0; a < TxqcdNf; ++a) {
+        for (int b = 0; b < TxqcdNf; ++b) {
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int beta = 0; beta < Ns; ++beta) {
+              for (int i = 0; i < Nc; ++i) {
+                int r = a * Ns * Nc + alpha * Nc + i;
+                int c = b * Ns * Nc + beta  * Nc + i;
+                for (int mu = 0; mu < Nd; ++mu)
+                  for (int nu = mu + 1; nu < Nd; ++nu) {
+                    std::complex<double> t_ab(t_site()(mu, nu)(a, b).real(),
+                                              t_site()(mu, nu)(a, b).imag());
+                    M(r, c) += t_ab * sm.isigma[mu][nu](alpha, beta);
+                  }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      for (int a = 0; a < TxqcdNf; ++a) {
+        for (int i = 0; i < Nc; ++i) {
+          for (int j = 0; j < Nc; ++j) {
+            for (int alpha = 0; alpha < Ns; ++alpha) {
+              for (int beta = 0; beta < Ns; ++beta) {
+                int r = a * Ns * Nc + alpha * Nc + i;
+                int c = a * Ns * Nc + beta  * Nc + j;
+                for (int mu = 0; mu < Nd; ++mu)
+                  for (int nu = mu + 1; nu < Nd; ++nu) {
+                    std::complex<double> t_ij(t_site()(mu, nu)(i, j).real(),
+                                              t_site()(mu, nu)(i, j).imag());
+                    M(r, c) += t_ij * sm.isigma[mu][nu](alpha, beta);
                   }
               }
             }
