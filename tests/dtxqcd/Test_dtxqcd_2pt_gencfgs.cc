@@ -55,28 +55,42 @@ int main(int argc, char **argv) {
     int start_traj = 0;
     int latest = latest_dtxqcd_checkpoint();
 
-    // Rational parameters.  TXQCD's Wilson Fierz test gets away with
-    // lo=1e-4 because TXQCD's Mpc^dag Mpc has a clean spectral gap at
-    // mass=0.3.  DTXQCD's doubled operator picks up lower-eigenvalue
-    // modes from the d, n off-diagonal coupling, and the multi-shift CG
-    // poles near sigma ~ lo blow up if lo is below the actual spectrum
-    // bottom -- the FD validation at 4^4 confirmed lo=0.1 was the right
-    // production floor (raising lo, not lowering it, was the fix).
+    // Rational bracket tuned to Test_dtxqcd_spectrum measurements on
+    // 4^3 x 8, mass = 0.3, csw = 0, weak gauge + thermal aux at
+    // AUX_FLUCT_LAMBDA = 10 (see DTXQCDCompositeImpl::FillAuxFields):
+    //
+    //   lambda_min(Mpc^dag Mpc) ~ 0.11
+    //   lambda_max(Mpc^dag Mpc) ~ 37
+    //
+    // bracket lo = 0.05 (well below lambda_min) and hi = 80 (1.5x
+    // measured lambda_max + headroom for HMC drift) keeps the shifted
+    // multi-shift CG well-conditioned.  AUX_FLUCT_LAMBDA = 10 is exported
+    // below before the cold-start init.
     RealD cg_tol = 1e-8;
     OneFlavourRationalParams rat_params(
-        /*lo=*/1e-1, /*hi=*/64.0,
+        /*lo=*/0.05, /*hi=*/80.0,
         /*MaxIter=*/cg_max, /*tolerance=*/cg_tol,
         /*degree=*/12, /*precision=*/64,
         /*BoundsCheckFreq=*/100,
         /*mdtolerance=*/1e-6);
 
+    RealD lambda_run = lambda;
+    if (const char *l = std::getenv("LAMBDA"); l && *l) {
+      lambda_run = std::atof(l);
+    }
+    std::cout << GridLogMessage << "DTXQCD lambda = " << lambda_run << std::endl;
+    RealD mass_run = mass;
+    if (const char *m = std::getenv("MASS"); m && *m) {
+      mass_run = std::atof(m);
+    }
+    std::cout << GridLogMessage << "DTXQCD mass = " << mass_run << std::endl;
     DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
-    DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lambda);
+    DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lambda_run);
     // csw=0 => Wilson (no clover term).  The rational/LogDet code paths
     // skip the clover assembly when csw == 0.
-    DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass, 0.0);
+    DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass_run, 0.0);
     DTXQCDWilsonCloverRationalEOAction
-        PF(Grid, RBGrid, mass, rat_params, 0.0);
+        PF(Grid, RBGrid, mass_run, rat_params, 0.0);
 
     // Three-level hierarchy.  TXQCD's Wilson Fierz test bundles AuxGaussian
     // into L1 with PF and LogDet -- a smoke run at that structure showed
@@ -94,7 +108,12 @@ int main(int argc, char **argv) {
     L1.push_back(&LogDet);
     ActionLevel<DTXQCDField, Reps> L2(2);
     L2.push_back(&GaugeAction);
-    ActionLevel<DTXQCDField, Reps> L3(4);
+    int aux_mult = 4;
+    if (const char *m = std::getenv("AUX_MULT"); m && *m) {
+      aux_mult = std::atoi(m);
+    }
+    std::cout << GridLogMessage << "DTXQCD aux multiplier = " << aux_mult << std::endl;
+    ActionLevel<DTXQCDField, Reps> L3(aux_mult);
     L3.push_back(&AuxAction);
     ActionSet<DTXQCDField, Reps> Aset;
     Aset.push_back(L1);
@@ -103,8 +122,26 @@ int main(int argc, char **argv) {
 
     IntegratorParameters MD;
     MD.name    = "ForceGradient";
+    // MDSTEPS env: scaling experiment for the LogDet instability.  At
+    // MDsteps = 10 + trajL = 0.1 (eps = 0.01), LogDet Fdt_max bounces
+    // between sub-1 (stable) and 3000+ (CG failed, force trash) within
+    // the first 3 MD substeps because per-site M_ee_48 sites cross
+    // near-singular eigenvalues.  Halving eps via doubled MDsteps tells
+    // us whether the instability is purely a step-size issue (stays
+    // bounded longer with finer eps) or a per-trajectory cliff that
+    // refinement can't reach (LogDet blows up at the same point in
+    // configuration-space regardless of step size).
     MD.MDsteps = 10;
-    MD.trajL   = 0.5;
+    if (const char *ms = std::getenv("MDSTEPS"); ms && *ms) {
+      MD.MDsteps = std::atoi(ms);
+    }
+    MD.trajL   = 0.1;
+    if (const char *tl = std::getenv("TRAJL"); tl && *tl) {
+      MD.trajL = std::atof(tl);
+    }
+    std::cout << GridLogMessage << "Integrator: MDsteps=" << MD.MDsteps
+              << " trajL=" << MD.trajL
+              << " eps=" << (MD.trajL / MD.MDsteps) << std::endl;
 
     DTXQCDField U(&Grid);
     if (latest > 0) {
@@ -115,10 +152,32 @@ int main(int argc, char **argv) {
     } else {
       sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
       pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
-      DTXQCDCompositeImpl::ColdConfiguration(pRNG, U);
+      // Thermal aux init at the spectrum-safe fluctuation width.  Without
+      // AUX_FLUCT_LAMBDA the env-knob defaults to lambda = 3 -> outlier
+      // aux sites near the Pfaffian sign boundary; FLUCT = 10 keeps the
+      // doubled M well-conditioned on the cold gauge while HMC evolves
+      // the aux toward the physical 1/lambda width.
+      if (std::getenv("AUX_FLUCT_LAMBDA") == nullptr) setenv("AUX_FLUCT_LAMBDA", "10.0", 0);
+      DTXQCDCompositeImpl::ThermalAuxConfiguration(pRNG, U, lambda_run, /*wf=*/0.1);
+      if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {
+        std::cout << GridLogMessage << "Zeroing d, n diquark fields at init" << std::endl;
+        U.d = Zero();
+        U.n = Zero();
+      }
+      if (const char *z = std::getenv("ZERO_ALL_AUX"); z && std::atoi(z) != 0) {
+        std::cout << GridLogMessage << "Zeroing ALL aux fields at init (cold)" << std::endl;
+        U.sigma = Zero();
+        U.pi    = Zero();
+        U.t     = Zero();
+        U.d     = Zero();
+        U.n     = Zero();
+      }
     }
 
     int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
+    if (const char *nm = std::getenv("NO_METROP"); nm && *nm) {
+      no_metrop = std::atoi(nm);
+    }
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
     HMCp.Trajectories        = total_traj - no_metrop - start_traj;
@@ -207,6 +266,9 @@ int main(int argc, char **argv) {
     MD.trajL   = 0.5;
 
     int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
+    if (const char *nm = std::getenv("NO_METROP"); nm && *nm) {
+      no_metrop = std::atoi(nm);
+    }
     HMCparameters HMCp;
     HMCp.StartTrajectory     = start_traj;
     HMCp.Trajectories        = total_traj - no_metrop - start_traj;

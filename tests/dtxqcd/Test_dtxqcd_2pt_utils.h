@@ -23,7 +23,10 @@ using namespace TxqcdTest2pt;  // shared params (beta, lambda, mass, etc.) +
 // DTXQCD-specific config directory.  Sits beside configs_2pt_txqcd /
 // configs_2pt_qcd_nf2 so a single run of the 2pt suite produces all three
 // ensembles at the same trajectory range.
-inline std::string dtxqcd_cfg_dir() { return "configs_2pt_dtxqcd"; }
+inline std::string dtxqcd_cfg_dir() {
+  if (const char *d = std::getenv("CFG_DIR"); d && *d) return std::string(d);
+  return "configs_2pt_dtxqcd";
+}
 
 // Existence check: in addition to gauge + rng, the DTXQCD sidecar has the
 // "_daux" suffix (not "_aux", which is the TXQCD sidecar).

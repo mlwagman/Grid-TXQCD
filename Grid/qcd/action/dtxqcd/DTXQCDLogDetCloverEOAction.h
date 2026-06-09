@@ -70,6 +70,10 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
   RealD S(const DTXQCDField &U) override {
     auto FS = BuildFS(U);
     RealD logdet = 0.0;
+    RealD sum_arg = 0.0;
+    RealD min_log_absdet = 1e300;
+    RealD n_small = 0.0;
+    const RealD small_threshold = -10.0;  // log|det| < -10 ~ |det| < 5e-5
     Coordinate gd(grid_.GlobalDimensions());
     for (int x = 0; x < gd[0]; ++x)
       for (int y = 0; y < gd[1]; ++y)
@@ -80,12 +84,26 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
             Eigen::MatrixXcd M48;
             BuildSiteMatrix48(U, FS, coord, M48);
             ComplexD det = M48.partialPivLu().determinant();
-            logdet += std::log(std::abs(det));
+            RealD logabs = std::log(std::abs(det));
+            logdet += logabs;
+            sum_arg += std::arg(det);
+            if (logabs < min_log_absdet) min_log_absdet = logabs;
+            if (logabs < small_threshold) n_small += 1.0;
           }
     grid_.GlobalSum(logdet);
+    grid_.GlobalSum(sum_arg);
+    grid_.GlobalSum(n_small);
+    RealD global_min;
+    {
+      RealD x = min_log_absdet;
+      grid_.GlobalSum(x);
+      global_min = x;
+    }
     RealD action = -0.5 * logdet;
     std::cout << GridLogMessage << "[" << action_name() << "] S = " << action
-              << std::endl;
+              << "  sum_arg(det) = " << sum_arg
+              << "  min_log|det| = " << min_log_absdet
+              << "  n_small = " << n_small << std::endl;
     return action;
   }
 

@@ -227,7 +227,10 @@ public:
   void TrajectoryComplete(int traj, Field &U, GridSerialRNG &sRNG,
                           GridParallelRNG &pRNG) override {
     traj_.push_back(traj);
-    plaq_.push_back(get_plaq(U));
+    RealD plaq_now = get_plaq(U);
+    plaq_.push_back(plaq_now);
+    std::cout << GridLogMessage << "Traj " << traj
+              << " plaq = " << plaq_now << std::endl;
 
     int na = (int)actions_.size();
     std::vector<RealD> fa(na), fm(na), fdta(na), fdtm(na);
