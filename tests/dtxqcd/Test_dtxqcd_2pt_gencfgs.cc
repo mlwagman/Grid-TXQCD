@@ -22,6 +22,7 @@
 #include "Test_dtxqcd_2pt_utils.h"
 #include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/action/gauge/WilsonGaugeAction.h>
@@ -88,9 +89,26 @@ int main(int argc, char **argv) {
     DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lambda_run);
     // csw=0 => Wilson (no clover term).  The rational/LogDet code paths
     // skip the clover assembly when csw == 0.
+    // USE_FULL_PF=1 swaps the EO Schur 1/4-root + LogDet pair for a single
+    // non-EO 1/4-root pseudofermion on the full doubled M^dag M.  The
+    // 2026-06-09 PSD diagnostic (Test_dtxqcd_psd_check) showed the EO Schur
+    // Mpc explodes by 10^3-10^5 above aux_std ~ 0.5 while the full M stays
+    // mild; the production HMC breakdowns at lambda=3 are EO-only.  Non-EO
+    // bypasses the cliff at the cost of slower per-CG multishift.
+    bool use_full_pf = false;
+    if (const char *u = std::getenv("USE_FULL_PF"); u && *u) {
+      use_full_pf = (std::atoi(u) != 0);
+    }
+    std::cout << GridLogMessage
+              << "DTXQCD pseudofermion = "
+              << (use_full_pf ? "FULL (non-EO)" : "EO Schur")
+              << std::endl;
+
     DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass_run, 0.0);
     DTXQCDWilsonCloverRationalEOAction
         PF(Grid, RBGrid, mass_run, rat_params, 0.0);
+    DTXQCDWilsonCloverRationalFullAction
+        PF_full(Grid, RBGrid, mass_run, rat_params, 0.0);
 
     // Three-level hierarchy.  TXQCD's Wilson Fierz test bundles AuxGaussian
     // into L1 with PF and LogDet -- a smoke run at that structure showed
@@ -104,8 +122,13 @@ int main(int argc, char **argv) {
     // contributions.  Same structure gen_dtxqcd_cfgs uses.
     typedef Representations<EmptyRep<DTXQCDField>> Reps;
     ActionLevel<DTXQCDField, Reps> L1(1);
-    L1.push_back(&PF);
-    L1.push_back(&LogDet);
+    if (use_full_pf) {
+      L1.push_back(&PF_full);     // single rational on full M^dag M;
+                                  // LogDet folded in (no companion).
+    } else {
+      L1.push_back(&PF);
+      L1.push_back(&LogDet);
+    }
     ActionLevel<DTXQCDField, Reps> L2(2);
     L2.push_back(&GaugeAction);
     int aux_mult = 4;
