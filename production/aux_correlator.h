@@ -61,7 +61,11 @@ SliceSumPiAll(const LatticePiField &piF) {
   return out;
 }
 
-// Σ_{x} Tr_color t_{μν}(x), 6 antisymmetric pairs (01,02,03,12,13,23) × T.
+// Σ_{x} Tr t_{μν}(x), 6 antisymmetric pairs (01,02,03,12,13,23) × T.
+// Mode A: Tr is over color (Nc x Nc storage).
+// Mode B (TXQCD_T_FLAVOR=1): the Nc x Nc storage holds a flavor matrix in the
+//   upper Nf x Nf block with zeros elsewhere (invariant), so the same trace
+//   reduces to a flavor trace — no code change needed.
 inline std::vector<std::vector<ComplexD>>
 SliceSumTAll(const LatticeTField &tF) {
   GridBase *g = tF.Grid();

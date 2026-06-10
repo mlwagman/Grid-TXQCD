@@ -123,7 +123,10 @@ int main(int argc, char **argv) {
   const int Nf = TxqcdNf;
   const RealD expected_flavor = RealD(Nf * Nf);
   const RealD expected_color  = RealD(Nc * Nc);
-  const RealD expected_tensor = RealD((Nd * (Nd - 1) / 2) * Nc * Nc);
+  // t block dimension is mode-dependent: Nc in mode A (color-t), Nf in mode B
+  // (flavor-t).  Inactive slots are bit-zero by invariant.
+  const RealD expected_tensor =
+      RealD((Nd * (Nd - 1) / 2) * TxqcdTDim * TxqcdTDim);
   // Moments converge at 1/sqrt(Nsamp * #DOF * vol). 15% gives headroom.
   RealD tol_moment = 0.15;
   check("<Tr sigma^2>/site", mean_sigma, expected_flavor, tol_moment);

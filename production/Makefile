@@ -28,10 +28,10 @@ ifneq ($(QUDA_PREFIX),)
   endif
 endif
 
-PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
+PROGRAMS = gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_2plus1_tflavor gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
            meas_conn_txqcd meas_conn_qcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
-           meas_aux_txqcd compare compute_plaq compute_vev \
+           meas_aux_txqcd meas_aux_smear_txqcd compare compute_plaq compute_vev \
            eigspec_diag eigspec_diag_nf2 \
            test_quda_init test_quda_roundtrip test_quda_inverter \
            test_quda_clover_mg \
@@ -51,6 +51,14 @@ gen_txqcd_cfgs: gen_txqcd_cfgs.cc params.h eig_diag.h
 # Nf=3 form on the same chroma-imported config.
 gen_txqcd_cfgs_2plus1: gen_txqcd_cfgs_2plus1.cc params.h eig_diag.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -o $@ $< $(LDFLAGS) $(LIBS)
+
+# gen_txqcd_cfgs_2plus1_tflavor: same driver, with t_{mu,nu} as a flavor
+# tensor (TXQCD_T_FLAVOR=1) instead of a color tensor.  See TxqcdTMode.h and
+# memory/project_t_condensate_low_lambda.md.  Use for low-lambda chains where
+# the color-t SSB pathway dominates plaq drift; the flavor-t variant moves
+# the dominant condensate into a global (ungauged) sector.
+gen_txqcd_cfgs_2plus1_tflavor: gen_txqcd_cfgs_2plus1_tflavor.cc gen_txqcd_cfgs_2plus1.cc params.h eig_diag.h
+	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=2 -DTXQCD_T_FLAVOR=1 -o $@ $< $(LDFLAGS) $(LIBS)
 
 # gen_txqcd_cfgs_nf2: Nf=2 light-only diagnostic — gen_txqcd_cfgs_2plus1 with the
 # strange Nf=1 monomials removed.  Isolates the strange quark's role.  Nf=2.

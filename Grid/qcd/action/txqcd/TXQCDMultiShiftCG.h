@@ -20,12 +20,12 @@
 
 NAMESPACE_BEGIN(Grid);
 
-// Templated on the TXQCD Dirac operator type (TXQCDWilsonOp,
-// TXQCDWilsonCloverOp, TXQCDMobiusOp, ...): only requires M(in,out) and
-// Mdag(in,out) on TXQCDFermionNf.  Existing call sites that pass a
-// TXQCDWilsonOp continue to work unchanged.
-template <class TXQCDOp>
-inline void TXQCDMultiShiftCG(TXQCDOp &Mop,
+// Templated on the operator type: any object exposing
+//   M(in, out)  and  Mdag(in, out)
+// works.  Originally TXQCDWilsonOp; TXQCDWilsonCloverOp uses the same call
+// surface for the non-EO clover rational action.
+template <class Op>
+inline void TXQCDMultiShiftCG(Op &Mop,
                               const std::vector<RealD> &poles,
                               const std::vector<RealD> &tol,
                               const TXQCDFermionNf &src,
