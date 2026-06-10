@@ -6,6 +6,8 @@
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOActionQudaPrimitive.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalActionQudaPrimitive.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverHasenbuschAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/txqcd/TXQCDSmearedConfiguration.h>
@@ -470,22 +472,41 @@ int main(int argc, char **argv) {
             << "  mass_heavy=" << mass_heavy << std::endl;
 
   // Full rational at mass_light (used when HASEN_DM == 0).
-  // Phase C: QUDA σ-piece hybrid via TXQCD_QUDA_HYBRID env (=1 enables).
+  // USE_FULL_PF=1 swaps to the non-EO TXQCDWilsonCloverRationalAction, which
+  // bypasses the EO-Schur cliff at low lambda (see appendix_eo_cliff.tex).
+  // TXQCD_QUDA_HYBRID=1 layers in the QUDA σ-force subclass on top of the
+  // selected base (EO or non-EO).
   bool tx_quda_hybrid = env_enabled("TXQCD_QUDA_HYBRID");
-  std::unique_ptr<TXQCDWilsonCloverRationalEOAction> PF_grid_holder;
-  std::unique_ptr<TXQCDWilsonCloverRationalEOActionQudaPrimitive> PF_quda_holder;
+  bool tx_full_pf     = env_enabled("USE_FULL_PF");
+  std::unique_ptr<TXQCDWilsonCloverRationalEOAction>                PF_eo_grid;
+  std::unique_ptr<TXQCDWilsonCloverRationalEOActionQudaPrimitive>   PF_eo_quda;
+  std::unique_ptr<TXQCDWilsonCloverRationalAction>                  PF_full_grid;
+  std::unique_ptr<TXQCDWilsonCloverRationalActionQudaPrimitive>     PF_full_quda;
   Action<TXQCDField> *PF = nullptr;
-  if (tx_quda_hybrid) {
-    PF_quda_holder = std::make_unique<TXQCDWilsonCloverRationalEOActionQudaPrimitive>(
+  if (tx_full_pf && tx_quda_hybrid) {
+    PF_full_quda = std::make_unique<TXQCDWilsonCloverRationalActionQudaPrimitive>(
         Grid, RBGrid, mass_light, rat_params, csw);
-    PF_quda_holder->is_smeared = true;
-    PF = PF_quda_holder.get();
+    PF_full_quda->is_smeared = true;
+    PF = PF_full_quda.get();
+    std::cout << GridLogMessage
+              << "[TXQCD light Nf=2] using non-EO + QUDA σ hybrid" << std::endl;
+  } else if (tx_full_pf) {
+    PF_full_grid = std::make_unique<TXQCDWilsonCloverRationalAction>(
+        Grid, RBGrid, mass_light, rat_params, csw);
+    PF_full_grid->is_smeared = true;
+    PF = PF_full_grid.get();
+    std::cout << GridLogMessage << "[TXQCD light Nf=2] using non-EO Grid rational" << std::endl;
+  } else if (tx_quda_hybrid) {
+    PF_eo_quda = std::make_unique<TXQCDWilsonCloverRationalEOActionQudaPrimitive>(
+        Grid, RBGrid, mass_light, rat_params, csw);
+    PF_eo_quda->is_smeared = true;
+    PF = PF_eo_quda.get();
     std::cout << GridLogMessage << "[TXQCD light Nf=2] using QUDA σ-piece hybrid" << std::endl;
   } else {
-    PF_grid_holder = std::make_unique<TXQCDWilsonCloverRationalEOAction>(
+    PF_eo_grid = std::make_unique<TXQCDWilsonCloverRationalEOAction>(
         Grid, RBGrid, mass_light, rat_params, csw);
-    PF_grid_holder->is_smeared = true;
-    PF = PF_grid_holder.get();
+    PF_eo_grid->is_smeared = true;
+    PF = PF_eo_grid.get();
   }
 
   // Hasenbusch split pair (used when HASEN_DM > 0).

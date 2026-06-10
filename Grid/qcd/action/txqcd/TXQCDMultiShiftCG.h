@@ -20,7 +20,12 @@
 
 NAMESPACE_BEGIN(Grid);
 
-inline void TXQCDMultiShiftCG(TXQCDWilsonOp &Mop,
+// Templated on the operator type: any object exposing
+//   M(in, out)  and  Mdag(in, out)
+// works.  Originally TXQCDWilsonOp; TXQCDWilsonCloverOp uses the same call
+// surface for the non-EO clover rational action.
+template <class Op>
+inline void TXQCDMultiShiftCG(Op &Mop,
                               const std::vector<RealD> &poles,
                               const std::vector<RealD> &tol,
                               const TXQCDFermionNf &src,
