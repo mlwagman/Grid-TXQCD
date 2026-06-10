@@ -72,13 +72,17 @@ int main(int argc, char **argv) {
   if (on("p"))     { HermitianGaussian(pRNG4, p);     p     = aux_scale * p; }
   if (on("t"))     { GaussianAntisymTensor(pRNG4, t); t     = aux_scale * t; }
 
+  auto envD2 = [](const char *k, RealD d){ const char *v=std::getenv(k);
+                                           return (v&&*v)?std::atof(v):d; };
+  RealD M5 = envD2("M5", 1.8);
+  RealD b  = envD2("MOBIUS_B", 1.5);
+  RealD c  = envD2("MOBIUS_C", 0.5);
   std::cout << GridLogMessage << "[psd] GAUGE=" << gauge_label
             << " LATT=" << dims[0] << "x" << dims[1] << "x" << dims[2] << "x" << dims[3]
             << " AUX=" << aux_scale << " mass=" << mass
             << " channel=" << channel
-            << " M5=1.8 b=1.5 c=0.5" << std::endl;
-
-  RealD M5 = 1.8, b = 1.5, c = 0.5;
+            << " M5=" << M5 << " b=" << b << " c=" << c
+            << "  (bee=" << b*(M5+1) - c*(M5-1) << ")" << std::endl;
   TXQCDMobiusFermionEO Mop(Umu, *FGrid, *FrbGrid, *UGrid, *UrbGrid,
                            mass, M5, b, c, sigma, pi, s, p, t);
   // Always enable LU here — this isolates the question to the Schur op

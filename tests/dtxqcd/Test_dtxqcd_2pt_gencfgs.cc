@@ -68,10 +68,21 @@ int main(int argc, char **argv) {
     // multi-shift CG well-conditioned.  AUX_FLUCT_LAMBDA = 10 is exported
     // below before the cold-start init.
     RealD cg_tol = 1e-8;
+    // RAT_LO / RAT_HI / RAT_DEGREE env knobs let us tighten the rational
+    // bracket to reduce 4th-order ForceGradient remainder.  Defaults match
+    // the original EO-tuned values (broad bracket, high degree).
+    RealD rat_lo     = 0.05;
+    RealD rat_hi     = 80.0;
+    int   rat_degree = 12;
+    if (const char *v = std::getenv("RAT_LO");     v && *v) rat_lo     = std::atof(v);
+    if (const char *v = std::getenv("RAT_HI");     v && *v) rat_hi     = std::atof(v);
+    if (const char *v = std::getenv("RAT_DEGREE"); v && *v) rat_degree = std::atoi(v);
+    std::cout << GridLogMessage << "DTXQCD rational: lo=" << rat_lo
+              << " hi=" << rat_hi << " degree=" << rat_degree << std::endl;
     OneFlavourRationalParams rat_params(
-        /*lo=*/0.05, /*hi=*/80.0,
+        /*lo=*/rat_lo, /*hi=*/rat_hi,
         /*MaxIter=*/cg_max, /*tolerance=*/cg_tol,
-        /*degree=*/12, /*precision=*/64,
+        /*degree=*/rat_degree, /*precision=*/64,
         /*BoundsCheckFreq=*/100,
         /*mdtolerance=*/1e-6);
 
