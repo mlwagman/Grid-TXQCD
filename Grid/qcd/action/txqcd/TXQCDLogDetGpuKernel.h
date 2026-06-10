@@ -87,7 +87,11 @@ inline void ExtractTracesFromBuffers(const ComplexD *M_inv_dev,
   constexpr int   TDim          = TxqcdTDim;  // Nc (mode A) or Nf (mode B)
 
   accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
     int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
     int lex = lex_dev[s * Nsimd + simt_lane];
     // Per-site stride is N*N (= kDim²) — was hardcoded 576 (= 24²), silently
     // wrong at Nf=3 where kDim=36 → 1296.  Fixed 2026-06-02.
@@ -270,7 +274,15 @@ inline void DeriveCloverSigma(const LatticeTField &F_t_e,
     clover_sigma_e[k_idx].Checkerboard() = Even;
     autoView(cv, clover_sigma_e[k_idx], AcceleratorWrite);
     accelerator_for(s, oSites, Nsimd, {
-      int simt_lane = static_cast<int>(lane);
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
+  #if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
+    int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
+#else
+      int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
       for (int i = 0; i < Ncc; ++i) {
         for (int j = 0; j < Ncc; ++j) {
           ComplexD t_val = getlane(tv[s]()(mu_l, nu_l)(i, j), simt_lane);
@@ -336,7 +348,11 @@ inline void ExtractCloverSigmaColorFromBuffers(
   for (int k = 0; k < 6; ++k) clover_sigma_e[k].Checkerboard() = Even;
 
   accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
     int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
     int lex = lex_dev[s * Nsimd + simt_lane];
     const ComplexD *Inv = &M_inv_dev[lex * uint64_t(N) * N];
     auto Mij = [&](int ra, int rb) -> ComplexD { return Inv[rb * N + ra]; };
@@ -454,7 +470,15 @@ inline void BuildSiteMatrixFromLattice(
 
   if (!have_csw) {
     accelerator_for(s, oSites, Nsimd, {
-      int simt_lane = static_cast<int>(lane);
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
+  #if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
+    int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
+#else
+      int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
       int lex = lex_dev[s * Nsimd + simt_lane];
       ComplexD *M = &M_fwd_dev[(uint64_t)lex * N2];
 
@@ -565,7 +589,15 @@ inline void BuildSiteMatrixFromLattice(
     const ComplexD clover_coeff_re(0.0, 0.5 * csw_local);  // i·(csw/2)
 
     accelerator_for(s, oSites, Nsimd, {
-      int simt_lane = static_cast<int>(lane);
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
+  #if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
+    int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
+#else
+      int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
       int lex = lex_dev[s * Nsimd + simt_lane];
       ComplexD *M = &M_fwd_dev[(uint64_t)lex * N2];
 

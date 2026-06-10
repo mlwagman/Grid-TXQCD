@@ -39,7 +39,9 @@ int main(int argc, char **argv) {
 
   // ---- physics parameters (match TXQCD_Mobius_small.cc) ----
   RealD beta   = 5.6;
-  RealD lambda = 3.0;
+  const char *lam_env = std::getenv("LAMBDA");
+  RealD lambda = (lam_env && *lam_env) ? std::atof(lam_env) : 3.0;
+  std::cout << GridLogMessage << "[scout-eo] lambda=" << lambda << std::endl;
   RealD mass   = 0.05;
   RealD M5     = 1.8;
   RealD b      = 1.5;

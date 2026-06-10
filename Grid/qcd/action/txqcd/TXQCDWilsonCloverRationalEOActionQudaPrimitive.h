@@ -15,6 +15,7 @@
 // Activated by env var TXQCD_QUDA_HYBRID=1 in production.
 
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#ifdef GRID_HAVE_QUDA
 #include <Grid/algorithms/iterative/QudaCloverMultiShiftInverter.h>  // gauge/clover loader
 #include <Grid/util/QudaInit.h>
 #include <Grid/util/QudaForcePrimitives.h>
@@ -525,3 +526,4 @@ class TXQCDWilsonCloverRationalEOActionQudaPrimitive
 };
 
 NAMESPACE_END(Grid);
+#endif  // GRID_HAVE_QUDA

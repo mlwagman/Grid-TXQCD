@@ -29,6 +29,7 @@
 // FULL_PF_QUDA_SCHUR_SCALE_{X,Y} env knobs.
 
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalAction.h>
+#ifdef GRID_HAVE_QUDA
 #include <Grid/algorithms/iterative/QudaCloverMultiShiftInverter.h>
 #include <Grid/util/QudaInit.h>
 #include <Grid/util/QudaForcePrimitives.h>
@@ -279,3 +280,4 @@ class TXQCDWilsonCloverRationalActionQudaPrimitive
 };
 
 NAMESPACE_END(Grid);
+#endif  // GRID_HAVE_QUDA

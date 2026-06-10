@@ -13,6 +13,7 @@
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/txqcd/TXQCDMobiusOp.h>
 #include <Grid/qcd/action/txqcd/TXQCDMobiusPseudoFermionAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDCheckpointer.h>
 
 using namespace Grid;
 
@@ -21,8 +22,16 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage << "Grid threads: "
             << GridThread::GetThreads() << std::endl;
 
+  const char *e;
   const int Ls = 8;
-  Coordinate latt4(std::vector<int>{4, 4, 4, 4});
+  // LATT4="Lx.Ly.Lz.Lt" (default 4.4.4.4)
+  std::vector<int> dims = {4, 4, 4, 4};
+  if ((e = std::getenv("LATT4")) && *e) {
+    dims.clear();
+    std::stringstream ss(e); std::string tok;
+    while (std::getline(ss, tok, '.')) dims.push_back(std::atoi(tok.c_str()));
+  }
+  Coordinate latt4(dims);
   Coordinate simd  = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi   = GridDefaultMpi();
 
@@ -36,7 +45,9 @@ int main(int argc, char **argv) {
 
   // ---- physics parameters ----
   RealD beta   = 5.6;
-  RealD lambda = 3.0;
+  const char *lam_env = std::getenv("LAMBDA");
+  RealD lambda = (lam_env && *lam_env) ? std::atof(lam_env) : 3.0;
+  std::cout << GridLogMessage << "[scout-non-eo] lambda=" << lambda << std::endl;
   RealD mass   = 0.05;            // light Möbius m_l
   RealD M5     = 1.8;             // standard
   RealD b      = 1.5;             // Möbius b
@@ -68,13 +79,26 @@ int main(int argc, char **argv) {
   MD.MDsteps = 80;
   MD.trajL   = 0.5;
 
+  // ---- HMC params (envs) ----
+  int ntraj  = (e = std::getenv("NTRAJ"))     ? std::atoi(e) : 10;
+  int ntherm = (e = std::getenv("NTHERM"))    ? std::atoi(e) : 0;
+  int start  = (e = std::getenv("STARTTRAJ")) ? std::atoi(e) : 0;
+  int save_every = (e = std::getenv("MEAS_SKIP")) ? std::atoi(e) : 0;
+  std::string ckpt_prefix =
+    (e = std::getenv("CKPT_PREFIX")) ? e : "";
+  std::cout << GridLogMessage << "[scout-non-eo] ntraj=" << ntraj
+            << " ntherm=" << ntherm << " start=" << start
+            << " meas_skip=" << save_every
+            << " ckpt_prefix=" << (ckpt_prefix.empty() ? "<disabled>" : ckpt_prefix)
+            << std::endl;
+
   HMCparameters HMCparams;
-  HMCparams.StartTrajectory    = 0;
-  HMCparams.Trajectories       = 10;
-  HMCparams.NoMetropolisUntil  = 0;
+  HMCparams.StartTrajectory    = start;
+  HMCparams.Trajectories       = ntraj;
+  HMCparams.NoMetropolisUntil  = ntherm;
   HMCparams.MetropolisTest     = true;
   HMCparams.PerformRandomShift = false;
-  HMCparams.StartingType       = "ColdStart";
+  HMCparams.StartingType       = (start == 0) ? "ColdStart" : "CheckpointStart";
   HMCparams.MD                 = MD;
 
   NoSmearing<TXQCDCompositeImpl> Smearer;
@@ -86,6 +110,16 @@ int main(int argc, char **argv) {
   Smearer.set_Field(U);
 
   std::vector<HmcObservable<TXQCDField> *> Observables;
+  std::unique_ptr<TXQCDCheckpointer> CheckPoint;
+  if (!ckpt_prefix.empty() && save_every > 0) {
+    CheckpointerParameters CPp;
+    CPp.config_prefix = ckpt_prefix;
+    CPp.rng_prefix    = ckpt_prefix + "_rng";
+    CPp.saveInterval  = save_every;
+    CPp.format        = "IEEE64BIG";
+    CheckPoint = std::make_unique<TXQCDCheckpointer>(CPp);
+    Observables.push_back(CheckPoint.get());
+  }
   HybridMonteCarlo<IntegratorT> HMC(HMCparams, MDynamics, sRNG, pRNG4,
                                     Observables, U);
   HMC.evolve();

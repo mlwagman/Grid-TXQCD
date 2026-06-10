@@ -479,17 +479,24 @@ int main(int argc, char **argv) {
   bool tx_quda_hybrid = env_enabled("TXQCD_QUDA_HYBRID");
   bool tx_full_pf     = env_enabled("USE_FULL_PF");
   std::unique_ptr<TXQCDWilsonCloverRationalEOAction>                PF_eo_grid;
-  std::unique_ptr<TXQCDWilsonCloverRationalEOActionQudaPrimitive>   PF_eo_quda;
   std::unique_ptr<TXQCDWilsonCloverRationalAction>                  PF_full_grid;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<TXQCDWilsonCloverRationalEOActionQudaPrimitive>   PF_eo_quda;
   std::unique_ptr<TXQCDWilsonCloverRationalActionQudaPrimitive>     PF_full_quda;
+#endif
   Action<TXQCDField> *PF = nullptr;
   if (tx_full_pf && tx_quda_hybrid) {
+#ifdef GRID_HAVE_QUDA
     PF_full_quda = std::make_unique<TXQCDWilsonCloverRationalActionQudaPrimitive>(
         Grid, RBGrid, mass_light, rat_params, csw);
     PF_full_quda->is_smeared = true;
     PF = PF_full_quda.get();
     std::cout << GridLogMessage
               << "[TXQCD light Nf=2] using non-EO + QUDA σ hybrid" << std::endl;
+#else
+    std::cerr << "TXQCD_QUDA_HYBRID requires GRID_HAVE_QUDA at build time" << std::endl;
+    abort();
+#endif
   } else if (tx_full_pf) {
     PF_full_grid = std::make_unique<TXQCDWilsonCloverRationalAction>(
         Grid, RBGrid, mass_light, rat_params, csw);
@@ -497,11 +504,16 @@ int main(int argc, char **argv) {
     PF = PF_full_grid.get();
     std::cout << GridLogMessage << "[TXQCD light Nf=2] using non-EO Grid rational" << std::endl;
   } else if (tx_quda_hybrid) {
+#ifdef GRID_HAVE_QUDA
     PF_eo_quda = std::make_unique<TXQCDWilsonCloverRationalEOActionQudaPrimitive>(
         Grid, RBGrid, mass_light, rat_params, csw);
     PF_eo_quda->is_smeared = true;
     PF = PF_eo_quda.get();
     std::cout << GridLogMessage << "[TXQCD light Nf=2] using QUDA σ-piece hybrid" << std::endl;
+#else
+    std::cerr << "TXQCD_QUDA_HYBRID requires GRID_HAVE_QUDA at build time" << std::endl;
+    abort();
+#endif
   } else {
     PF_eo_grid = std::make_unique<TXQCDWilsonCloverRationalEOAction>(
         Grid, RBGrid, mass_light, rat_params, csw);
@@ -613,10 +625,15 @@ int main(int argc, char **argv) {
       typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
       NerscIO::readConfiguration<GaugeStats>(U.U, header, std::string(ic));
     } else {
+#ifdef HAVE_LIME
       IldgReader IR;
       IR.open(std::string(ic));
       IR.readConfiguration(U.U, header);
       IR.close();
+#else
+      std::cerr << "Non-NERSC IMPORT_CFG requires HAVE_LIME at build time"
+                << std::endl; abort();
+#endif
     }
     sRNG.SeedFixedIntegers({1 + seed_offset, 2 + seed_offset, 3 + seed_offset,
                             4 + seed_offset, 5 + seed_offset});

@@ -185,8 +185,13 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
   void deriv(const TXQCDField &U, TXQCDField &dSdU) override {
     static int use_gpu = []() {
       const char *e = std::getenv("TXQCD_LOGDET_GPU");
-      // Default ON: env var must be set to "0" to opt out.
+      // Default: ON when compiled with GRID_CUDA, OFF on CPU-only builds
+      // (deriv_gpu is a cuBLAS path that aborts at runtime without CUDA).
+#ifdef GRID_CUDA
       if (!e || !*e) return 1;
+#else
+      if (!e || !*e) return 0;
+#endif
       return std::atoi(e);
     }();
     if (use_gpu) { deriv_gpu(U, dSdU); return; }
@@ -362,7 +367,8 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       abort();
     }
 #else
-#  error "Phase J.2 GPU LogDet requires GRID_CUDA"
+    std::cerr << "[TXQCDLogDet::deriv_gpu] GRID_CUDA not enabled at compile time"
+              << std::endl; abort();
 #endif
     t_cublas_us_ += usecond() - t_cublas0;
 

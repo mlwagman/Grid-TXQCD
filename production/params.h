@@ -112,8 +112,15 @@ constexpr int n_vev_noise = 8;
 constexpr int n_noise_disco = 32;
 
 // ===== HMC =====
-constexpr int n_therm = 100;
-constexpr int n_prod = 1000;
+// Compile-time defaults; runtime overrides via N_THERM / N_PROD env vars
+// (read in gen_*_cfgs drivers; useful for short laptop-scale runs without
+// recompiling production binaries).
+constexpr int n_therm_default = 100;
+constexpr int n_prod_default  = 1000;
+inline int n_therm_runtime() { return detail::env_int("N_THERM", n_therm_default); }
+inline int n_prod_runtime()  { return detail::env_int("N_PROD",  n_prod_default);  }
+#define n_therm (TXQCDProduction::n_therm_runtime())
+#define n_prod  (TXQCDProduction::n_prod_runtime())
 // meas_skip is the checkpoint-save cadence (used in gen_*_cfgs.cc via
 // CheckpointerParameters::saveInterval).  Env-overridable as N_SKIP so
 // short runs can save every traj (N_SKIP=1).  Default 10 for production.

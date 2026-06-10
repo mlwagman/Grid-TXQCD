@@ -75,7 +75,11 @@ inline void GpuPackFermionRbLex(const Lattice<vobj> &fld,
 
   autoView(in_v, fld, AcceleratorRead);
   accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
     int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
     int lex = lex_table_dev[s * Nsimd + simt_lane];
     double *dst = &dst_dev[lex * 24];
     auto v = in_v[s];
@@ -154,7 +158,11 @@ inline void GpuUnpackMomToGauge(const double *mom_buf_dev,
 
   autoView(out_v, out, AcceleratorWrite);
   accelerator_for(s, oSites, Nsimd, {
+#if defined(GRID_CUDA) || defined(GRID_HIP) || defined(GRID_SYCL)
     int simt_lane = static_cast<int>(lane);
+#else
+    int simt_lane = 0;  // CPU: SIMT-packed kernel is mode-gated, never run
+#endif
     int eo_site = eo_table_dev[s * Nsimd + simt_lane];
     for (int mu = 0; mu < Nd_; ++mu) {
       const double *m = &mom_buf_dev[(eo_site * Nd_ + mu) * 10];
