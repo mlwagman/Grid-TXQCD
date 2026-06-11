@@ -38,14 +38,16 @@ int main(int argc, char **argv) {
   // Aux fields.
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
-  LatticeDtxqcdT     t(&Grid);
   LatticeDtxqcdD     d(&Grid);
   LatticeDtxqcdN     n(&Grid);
-  DtxqcdRealGaussian(pRNG, sigma);
-  DtxqcdRealGaussian(pRNG, pi);
-  DtxqcdGaussianAntisymTensor(pRNG, t);
-  DtxqcdHermitianGaussian(pRNG, d);
-  DtxqcdHermitianGaussian(pRNG, n);
+  LatticeDtxqcdS     s(&Grid);
+  LatticeDtxqcdP     p(&Grid);
+  DtxqcdHermitianCFGaussian(pRNG, sigma);
+  DtxqcdHermitianCFGaussian(pRNG, pi);
+  DtxqcdRealScalarGaussian(pRNG, s);
+  DtxqcdRealScalarGaussian(pRNG, p);
+  DtxqcdHermitianCFGaussian(pRNG, d);
+  DtxqcdHermitianCFGaussian(pRNG, n);
 
   // Random anti-Hermitian field strength F_{mu,nu} per (mu<nu) pair.
   std::vector<LatticeColourMatrix> FS;
@@ -70,7 +72,7 @@ int main(int argc, char **argv) {
 
   // Operator-level apply (with clover).
   DTXQCDFermionNf out_upper_op(&Grid), out_lower_op(&Grid);
-  DtxqcdApplyMooeeDoubled(mass, sigma, pi, t, d, n,
+  DtxqcdApplyMooeeDoubled(mass, sigma, pi, d, n, s, p,
                           in_upper, in_lower,
                           out_upper_op, out_lower_op,
                           csw, &FS);
@@ -94,7 +96,7 @@ int main(int argc, char **argv) {
         for (int tt = 0; tt < gd[3]; ++tt) {
           Coordinate coord(std::vector<int>{x, y, z, tt});
 
-          DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, t, d, n, coord);
+          DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, d, n, s, p, coord);
           DtxqcdSiteClover clover = DtxqcdSiteClover::Extract(FS, coord);
 
           MatrixXcd M_upper, M_lower, M_off, M48;

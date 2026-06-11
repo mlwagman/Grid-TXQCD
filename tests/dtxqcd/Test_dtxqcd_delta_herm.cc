@@ -1,14 +1,10 @@
-// Test_dtxqcd_delta_herm: unit checks for the DTXQCD diagonal-block Delta
-// insertion (sigma^A, pi^A, t^A_{mu,nu}) — see Grid/qcd/action/dtxqcd/DTXQCDDeltaOp.h.
+// Test_dtxqcd_delta_herm (v2): unit checks for the diagonal-block X insertion
+// (DtxqcdApplyDeltaDiag) on the v2 aux roster.
 //
-// Three checks on a 4^4 lattice:
-//   1. Aux=0 nullity: with sigma^A = pi^A = t^A = 0, Delta(v) = 0 for any v.
-//   2. Hermiticity (sigma,pi piece): on random sigma^A, pi^A and random v, w,
-//      < w | Delta_{sigma,pi} v > = < v | Delta_{sigma,pi} w > (up to FP).
-//   3. Hermiticity (tensor piece): same with t^A_{mu,nu} only.
-//   4. Hermiticity (combined): both with all three pieces active.
-//
-// Run: ./tests/dtxqcd/Test_dtxqcd_delta_herm --grid 4.4.4.4 --mpi 1.1.1.1
+// X^{ij}_{ab} = sigma + s delta delta + (pi + p delta delta) gamma5  is
+// Hermitian whenever sigma, pi are CF Hermitian and s, p are real.  We
+// verify <w, X v> = conj(<v, X w>) on random fermions for several aux
+// configurations.
 
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
@@ -35,69 +31,71 @@ int main(int argc, char **argv) {
     if (!ok) exitcode = 1;
   };
 
-  // ---------- random fermion test pair ----------
   DTXQCDFermionNf v(&Grid), w(&Grid), Dv(&Grid), Dw(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {
     gaussian(pRNG, v.f[a]);
     gaussian(pRNG, w.f[a]);
   }
 
-  // ---------- 1. Aux=0 nullity ----------
+  auto herm_check = [&](const char *name,
+                        const DTXQCDFermionNf &Dv,
+                        const DTXQCDFermionNf &Dw) {
+    ComplexD wDv = innerProduct(w, Dv);
+    ComplexD vDw = innerProduct(v, Dw);
+    RealD herm_resid = std::abs(wDv - std::conj(vDw));
+    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
+    check(name, herm_resid / ref, 1e-10);
+  };
+
+  // 1. aux=0 nullity.
   {
     LatticeDtxqcdSigma sigma(&Grid); sigma = Zero();
     LatticeDtxqcdPi    pi(&Grid);    pi    = Zero();
-    LatticeDtxqcdT     t(&Grid);     t     = Zero();
-    DtxqcdApplyDeltaDiag(sigma, pi, t, v, Dv);
-    RealD r = norm2(Dv);
-    check("aux=0 nullity ||Delta v||^2", r, 1e-20);
+    LatticeDtxqcdS     s(&Grid);     s     = Zero();
+    LatticeDtxqcdP     p(&Grid);     p     = Zero();
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, v, Dv);
+    check("aux=0 nullity ||X v||^2", norm2(Dv), 1e-20);
   }
 
-  // ---------- 2. Hermiticity of (sigma,pi) piece ----------
+  // 2. Hermiticity with sigma + pi only (singlets zero).
   {
     LatticeDtxqcdSigma sigma(&Grid);
     LatticeDtxqcdPi    pi(&Grid);
-    DtxqcdRealGaussian(pRNG, sigma);
-    DtxqcdRealGaussian(pRNG, pi);
-    DtxqcdApplyDeltaSigmaPi(sigma, pi, v, Dv);
-    DtxqcdApplyDeltaSigmaPi(sigma, pi, w, Dw);
-    ComplexD wDv = innerProduct(w, Dv);
-    ComplexD vDw = innerProduct(v, Dw);
-    // Hermiticity: <w, D v> = conj(<v, D w>) for D = D^dag.
-    RealD herm_resid = std::abs(wDv - std::conj(vDw));
-    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
-    check("Hermiticity Delta_{sigma,pi} | wDv - vDw |", herm_resid / ref, 1e-10);
+    LatticeDtxqcdS     s(&Grid);     s = Zero();
+    LatticeDtxqcdP     p(&Grid);     p = Zero();
+    DtxqcdHermitianCFGaussian(pRNG, sigma);
+    DtxqcdHermitianCFGaussian(pRNG, pi);
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, v, Dv);
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, w, Dw);
+    herm_check("Hermiticity X (sigma+pi)", Dv, Dw);
   }
 
-  // ---------- 3. Hermiticity of tensor piece ----------
+  // 3. Hermiticity with singlets s, p only.
   {
-    LatticeDtxqcdT t(&Grid);
-    DtxqcdGaussianAntisymTensor(pRNG, t);
-    DtxqcdApplyDeltaTensor(t, v, Dv);
-    DtxqcdApplyDeltaTensor(t, w, Dw);
-    ComplexD wDv = innerProduct(w, Dv);
-    ComplexD vDw = innerProduct(v, Dw);
-    // Hermiticity: <w, D v> = conj(<v, D w>) for D = D^dag.
-    RealD herm_resid = std::abs(wDv - std::conj(vDw));
-    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
-    check("Hermiticity Delta_t | wDv - vDw |", herm_resid / ref, 1e-10);
+    LatticeDtxqcdSigma sigma(&Grid); sigma = Zero();
+    LatticeDtxqcdPi    pi(&Grid);    pi    = Zero();
+    LatticeDtxqcdS     s(&Grid);
+    LatticeDtxqcdP     p(&Grid);
+    DtxqcdRealScalarGaussian(pRNG, s);
+    DtxqcdRealScalarGaussian(pRNG, p);
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, v, Dv);
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, w, Dw);
+    herm_check("Hermiticity X (s+p)", Dv, Dw);
   }
 
-  // ---------- 4. Hermiticity of full diagonal Delta ----------
+  // 4. Hermiticity with full X (all four pieces).
   {
     LatticeDtxqcdSigma sigma(&Grid);
     LatticeDtxqcdPi    pi(&Grid);
-    LatticeDtxqcdT     t(&Grid);
-    DtxqcdRealGaussian(pRNG, sigma);
-    DtxqcdRealGaussian(pRNG, pi);
-    DtxqcdGaussianAntisymTensor(pRNG, t);
-    DtxqcdApplyDeltaDiag(sigma, pi, t, v, Dv);
-    DtxqcdApplyDeltaDiag(sigma, pi, t, w, Dw);
-    ComplexD wDv = innerProduct(w, Dv);
-    ComplexD vDw = innerProduct(v, Dw);
-    // Hermiticity: <w, D v> = conj(<v, D w>) for D = D^dag.
-    RealD herm_resid = std::abs(wDv - std::conj(vDw));
-    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
-    check("Hermiticity Delta_diag | wDv - vDw |", herm_resid / ref, 1e-10);
+    LatticeDtxqcdS     s(&Grid);
+    LatticeDtxqcdP     p(&Grid);
+    DtxqcdHermitianCFGaussian(pRNG, sigma);
+    DtxqcdHermitianCFGaussian(pRNG, pi);
+    DtxqcdRealScalarGaussian(pRNG, s);
+    DtxqcdRealScalarGaussian(pRNG, p);
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, v, Dv);
+    DtxqcdApplyDeltaDiag(sigma, pi, s, p, w, Dw);
+    herm_check("Hermiticity X (full)", Dv, Dw);
   }
 
   std::cout << GridLogMessage

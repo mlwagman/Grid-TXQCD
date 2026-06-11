@@ -45,21 +45,23 @@ int main(int argc, char **argv) {
 
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
-  LatticeDtxqcdT     t(&Grid);
   LatticeDtxqcdD     d(&Grid);
   LatticeDtxqcdN     n(&Grid);
-  DtxqcdRealGaussian(pRNG, sigma);
-  DtxqcdRealGaussian(pRNG, pi);
-  DtxqcdGaussianAntisymTensor(pRNG, t);
-  DtxqcdHermitianGaussian(pRNG, d);
-  DtxqcdHermitianGaussian(pRNG, n);
+  LatticeDtxqcdS     s(&Grid);
+  LatticeDtxqcdP     p(&Grid);
+  DtxqcdHermitianCFGaussian(pRNG, sigma);
+  DtxqcdHermitianCFGaussian(pRNG, pi);
+  DtxqcdRealScalarGaussian(pRNG, s);
+  DtxqcdRealScalarGaussian(pRNG, p);
+  DtxqcdHermitianCFGaussian(pRNG, d);
+  DtxqcdHermitianCFGaussian(pRNG, n);
 
   const RealD mass = 0.4;
   const RealD csw  = 1.25;
 
   // Construct the wrapper.
   DTXQCDWilsonCloverFermionEO M_wrap(U, Grid, RBGrid, mass, csw,
-                                    sigma, pi, t, d, n);
+                                    sigma, pi, d, n, s, p);
 
   // ---------- Random doubled fermion ----------
   DTXQCDFermionDoubled v(&Grid), w(&Grid);
@@ -83,8 +85,8 @@ int main(int argc, char **argv) {
       meooe_ref.LowerWilson().M(v.lower.f[a], out_ref.lower.f[a]);
     }
     DTXQCDFermionNf delta_u(&Grid), delta_l(&Grid);
-    DtxqcdApplyDeltaDiag(sigma, pi, t, v.upper, delta_u);
-    DtxqcdApplyDeltaDiagLower(sigma, pi, t, v.lower, delta_l);
+    DtxqcdApplyDeltaDiag     (sigma, pi, s, p, v.upper, delta_u);
+    DtxqcdApplyDeltaDiagLower(sigma, pi, s, p, v.lower, delta_l);
     DTXQCDFermionNf cross_u(&Grid), cross_l(&Grid);
     DtxqcdApplyDnCross(d, n, v.lower, cross_u);
     DtxqcdApplyDnCross(d, n, v.upper, cross_l);
@@ -128,7 +130,7 @@ int main(int argc, char **argv) {
   {
     DTXQCDFermionDoubled out_wrap(&Grid), out_ref(&Grid);
     M_wrap.Mooee(v, out_wrap);
-    DtxqcdApplyMooeeDoubled(mass, sigma, pi, t, d, n,
+    DtxqcdApplyMooeeDoubled(mass, sigma, pi, d, n, s, p,
                             v.upper, v.lower, out_ref.upper, out_ref.lower,
                             csw, &M_wrap.FieldStrength());
 

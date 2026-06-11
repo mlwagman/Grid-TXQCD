@@ -35,14 +35,16 @@ int main(int argc, char** argv) {
 
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
-  LatticeDtxqcdT     t(&Grid);
   LatticeDtxqcdD     d(&Grid);
   LatticeDtxqcdN     n(&Grid);
-  DtxqcdRealGaussian(pRNG, sigma);
-  DtxqcdRealGaussian(pRNG, pi);
-  DtxqcdGaussianAntisymTensor(pRNG, t);
-  DtxqcdHermitianGaussian(pRNG, d);
-  DtxqcdHermitianGaussian(pRNG, n);
+  LatticeDtxqcdS     s(&Grid);
+  LatticeDtxqcdP     p(&Grid);
+  DtxqcdHermitianCFGaussian(pRNG, sigma);
+  DtxqcdHermitianCFGaussian(pRNG, pi);
+  DtxqcdRealScalarGaussian(pRNG, s);
+  DtxqcdRealScalarGaussian(pRNG, p);
+  DtxqcdHermitianCFGaussian(pRNG, d);
+  DtxqcdHermitianCFGaussian(pRNG, n);
 
   const double mass = 0.5;  // safely-invertible diagonal shift
 
@@ -57,10 +59,10 @@ int main(int argc, char** argv) {
   for (int x = 0; x < gd[0]; ++x) {
     for (int y = 0; y < gd[1]; ++y) {
       for (int z = 0; z < gd[2]; ++z) {
-        for (int s = 0; s < gd[3]; ++s) {
-          coord = Coordinate(std::vector<int>{x, y, z, s});
+        for (int tt = 0; tt < gd[3]; ++tt) {
+          coord = Coordinate(std::vector<int>{x, y, z, tt});
 
-          DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, t, d, n, coord);
+          DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, d, n, s, p, coord);
 
           MatrixXcd M_upper, M_lower, M_off, M48;
           DtxqcdBuildUpperBlock24(mass, aux, spin, M_upper);

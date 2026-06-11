@@ -43,10 +43,11 @@ using namespace Grid;
 static void ApplyMDoubled(
     DTXQCDMeooeDoubled &meooe,
     const LatticeDtxqcdSigma &sigma,
-    const LatticeDtxqcdPi &pi,
-    const LatticeDtxqcdT &t,
-    const LatticeDtxqcdD &d,
-    const LatticeDtxqcdN &n,
+    const LatticeDtxqcdPi    &pi,
+    const LatticeDtxqcdD     &d,
+    const LatticeDtxqcdN     &n,
+    const LatticeDtxqcdS     &s,
+    const LatticeDtxqcdP     &p,
     double csw,
     const std::vector<LatticeColourMatrix> *FS,
     const DTXQCDFermionNf &in_upper,
@@ -61,10 +62,10 @@ static void ApplyMDoubled(
     meooe.LowerWilson().M(in_lower.f[a], out_lower.f[a]);
   }
 
-  // Delta_diag insertion: upper uses standard, lower uses Cstar (tensor sign-flipped).
+  // Delta_diag insertion: upper uses +X, lower uses -X (Cstar X^T = X).
   DTXQCDFermionNf delta_upper(grid), delta_lower(grid);
-  DtxqcdApplyDeltaDiag(sigma, pi, t, in_upper, delta_upper);
-  DtxqcdApplyDeltaDiagLower(sigma, pi, t, in_lower, delta_lower);
+  DtxqcdApplyDeltaDiag     (sigma, pi, s, p, in_upper, delta_upper);
+  DtxqcdApplyDeltaDiagLower(sigma, pi, s, p, in_lower, delta_lower);
 
   // Off-diagonal d, n cross term (couples upper and lower).
   DTXQCDFermionNf cross_upper(grid), cross_lower(grid);
@@ -123,14 +124,16 @@ int main(int argc, char **argv) {
 
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
-  LatticeDtxqcdT     t(&Grid);
   LatticeDtxqcdD     d(&Grid);
   LatticeDtxqcdN     n(&Grid);
-  DtxqcdRealGaussian(pRNG, sigma);
-  DtxqcdRealGaussian(pRNG, pi);
-  DtxqcdGaussianAntisymTensor(pRNG, t);
-  DtxqcdHermitianGaussian(pRNG, d);
-  DtxqcdHermitianGaussian(pRNG, n);
+  LatticeDtxqcdS     s(&Grid);
+  LatticeDtxqcdP     p(&Grid);
+  DtxqcdHermitianCFGaussian(pRNG, sigma);
+  DtxqcdHermitianCFGaussian(pRNG, pi);
+  DtxqcdHermitianCFGaussian(pRNG, d);
+  DtxqcdHermitianCFGaussian(pRNG, n);
+  DtxqcdRealScalarGaussian(pRNG, s);
+  DtxqcdRealScalarGaussian(pRNG, p);
 
   std::vector<LatticeColourMatrix> FS;
   FS.reserve(6);
@@ -164,7 +167,7 @@ int main(int argc, char **argv) {
     ApplyGamma5(v_l, g5_v_l);
     // M (gamma_5 v)
     DTXQCDFermionNf M_g5_v_u(&Grid), M_g5_v_l(&Grid);
-    ApplyMDoubled(meooe, sigma, pi, t, d, n, 0.0, nullptr,
+    ApplyMDoubled(meooe, sigma, pi, d, n, s, p, 0.0, nullptr,
                   g5_v_u, g5_v_l, M_g5_v_u, M_g5_v_l);
     // gamma_5 (M (gamma_5 v)) = gamma_5 M gamma_5 v
     DTXQCDFermionNf g5_M_g5_v_u(&Grid), g5_M_g5_v_l(&Grid);
@@ -172,7 +175,7 @@ int main(int argc, char **argv) {
     ApplyGamma5(M_g5_v_l, g5_M_g5_v_l);
     // M w
     DTXQCDFermionNf M_w_u(&Grid), M_w_l(&Grid);
-    ApplyMDoubled(meooe, sigma, pi, t, d, n, 0.0, nullptr,
+    ApplyMDoubled(meooe, sigma, pi, d, n, s, p, 0.0, nullptr,
                   w_u, w_l, M_w_u, M_w_l);
 
     // LHS = <w, gamma_5 M gamma_5 v>
@@ -193,13 +196,13 @@ int main(int argc, char **argv) {
     ApplyGamma5(v_u, g5_v_u);
     ApplyGamma5(v_l, g5_v_l);
     DTXQCDFermionNf M_g5_v_u(&Grid), M_g5_v_l(&Grid);
-    ApplyMDoubled(meooe, sigma, pi, t, d, n, csw, &FS,
+    ApplyMDoubled(meooe, sigma, pi, d, n, s, p, csw, &FS,
                   g5_v_u, g5_v_l, M_g5_v_u, M_g5_v_l);
     DTXQCDFermionNf g5_M_g5_v_u(&Grid), g5_M_g5_v_l(&Grid);
     ApplyGamma5(M_g5_v_u, g5_M_g5_v_u);
     ApplyGamma5(M_g5_v_l, g5_M_g5_v_l);
     DTXQCDFermionNf M_w_u(&Grid), M_w_l(&Grid);
-    ApplyMDoubled(meooe, sigma, pi, t, d, n, csw, &FS,
+    ApplyMDoubled(meooe, sigma, pi, d, n, s, p, csw, &FS,
                   w_u, w_l, M_w_u, M_w_l);
 
     ComplexD LHS = DoubledInner(w_u, w_l, g5_M_g5_v_u, g5_M_g5_v_l);

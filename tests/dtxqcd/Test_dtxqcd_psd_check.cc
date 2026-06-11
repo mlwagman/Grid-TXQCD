@@ -118,15 +118,17 @@ int main(int argc, char **argv) {
   // --- Aux fields ---
   LatticeDtxqcdSigma sigma(UGrid);
   LatticeDtxqcdPi    pi(UGrid);
-  LatticeDtxqcdT     t(UGrid);
   LatticeDtxqcdD     d(UGrid);
   LatticeDtxqcdN     n(UGrid);
-  sigma = Zero(); pi = Zero(); t = Zero(); d = Zero(); n = Zero();
-  if (on("sigma")) { DtxqcdRealGaussian(pRNG, sigma);       sigma = aux_scale * sigma; }
-  if (on("pi"))    { DtxqcdRealGaussian(pRNG, pi);          pi    = aux_scale * pi; }
-  if (on("t"))     { DtxqcdGaussianAntisymTensor(pRNG, t);  t     = aux_scale * t; }
-  if (on("d"))     { DtxqcdHermitianGaussian(pRNG, d);      d     = aux_scale * d; }
-  if (on("n"))     { DtxqcdHermitianGaussian(pRNG, n);      n     = aux_scale * n; }
+  LatticeDtxqcdS     s(UGrid);
+  LatticeDtxqcdP     p(UGrid);
+  sigma = Zero(); pi = Zero(); d = Zero(); n = Zero(); s = Zero(); p = Zero();
+  if (on("sigma")) { DtxqcdHermitianCFGaussian(pRNG, sigma);  sigma = aux_scale * sigma; }
+  if (on("pi"))    { DtxqcdHermitianCFGaussian(pRNG, pi);     pi    = aux_scale * pi; }
+  if (on("d"))     { DtxqcdHermitianCFGaussian(pRNG, d);      d     = aux_scale * d; }
+  if (on("n"))     { DtxqcdHermitianCFGaussian(pRNG, n);      n     = aux_scale * n; }
+  if (on("s"))     { DtxqcdRealScalarGaussian(pRNG, s); s = aux_scale * s; }
+  if (on("p"))     { DtxqcdRealScalarGaussian(pRNG, p); p = aux_scale * p; }
 
   std::cout << GridLogMessage
             << "[psd-dtxqcd] GAUGE=" << gauge_label
@@ -139,7 +141,7 @@ int main(int argc, char **argv) {
 
   // --- Operators ---
   DTXQCDWilsonCloverFermionEO Dw(Umu, *UGrid, *UrbGrid, mass, csw,
-                                  sigma, pi, t, d, n);
+                                  sigma, pi, d, n, s, p);
   DTXQCDMpcOp Mpc(Dw);
 
   // --- Samplers ---

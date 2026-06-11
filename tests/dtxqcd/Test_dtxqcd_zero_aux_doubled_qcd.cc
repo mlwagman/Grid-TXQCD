@@ -43,13 +43,14 @@ int main(int argc, char **argv) {
   // Random hot gauge; aux = 0 exactly.
   DTXQCDField U(&Grid);
   SU<Nc>::HotConfiguration(pRNG, U.U);
-  U.sigma = Zero();  U.pi = Zero();  U.t = Zero();
+  U.sigma = Zero();  U.pi = Zero();
   U.d     = Zero();  U.n  = Zero();
+  U.s     = Zero();  U.p  = Zero();
 
   // DTXQCD operator (csw = 0 = Wilson, no clover).
   const RealD mass = 0.3;
   DTXQCDWilsonCloverFermionEO Dw(U.U, Grid, RBGrid, mass, /*csw=*/0.0,
-                                  U.sigma, U.pi, U.t, U.d, U.n);
+                                  U.sigma, U.pi, U.d, U.n, U.s, U.p);
 
   // Stock Grid WilsonFermion references on U (upper) and conj(U) (lower).
   // U_lower needs to be a mutable LatticeGaugeField with the right grid.

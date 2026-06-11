@@ -44,14 +44,16 @@ int main(int argc, char **argv) {
 
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
-  LatticeDtxqcdT     t(&Grid);
   LatticeDtxqcdD     d(&Grid);
   LatticeDtxqcdN     n(&Grid);
-  DtxqcdRealGaussian(pRNG, sigma);
-  DtxqcdRealGaussian(pRNG, pi);
-  DtxqcdGaussianAntisymTensor(pRNG, t);
-  DtxqcdHermitianGaussian(pRNG, d);
-  DtxqcdHermitianGaussian(pRNG, n);
+  LatticeDtxqcdS     s(&Grid);
+  LatticeDtxqcdP     p(&Grid);
+  DtxqcdHermitianCFGaussian(pRNG, sigma);
+  DtxqcdHermitianCFGaussian(pRNG, pi);
+  DtxqcdRealScalarGaussian(pRNG, s);
+  DtxqcdRealScalarGaussian(pRNG, p);
+  DtxqcdHermitianCFGaussian(pRNG, d);
+  DtxqcdHermitianCFGaussian(pRNG, n);
 
   DTXQCDFermionNf w_u(&Grid), w_l(&Grid), v_u(&Grid), v_l(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {
@@ -65,11 +67,11 @@ int main(int argc, char **argv) {
 
   // Apply M_ee to v -> M v
   DTXQCDFermionNf Mv_u(&Grid), Mv_l(&Grid);
-  DtxqcdApplyMooeeDoubled(mass, sigma, pi, t, d, n, v_u, v_l, Mv_u, Mv_l);
+  DtxqcdApplyMooeeDoubled(mass, sigma, pi, d, n, s, p, v_u, v_l, Mv_u, Mv_l);
 
   // Apply M_ee to w -> M w
   DTXQCDFermionNf Mw_u(&Grid), Mw_l(&Grid);
-  DtxqcdApplyMooeeDoubled(mass, sigma, pi, t, d, n, w_u, w_l, Mw_u, Mw_l);
+  DtxqcdApplyMooeeDoubled(mass, sigma, pi, d, n, s, p, w_u, w_l, Mw_u, Mw_l);
 
   ComplexD wMv = doubled_inner(w_u, w_l, Mv_u, Mv_l);
   ComplexD vMw = doubled_inner(v_u, v_l, Mw_u, Mw_l);

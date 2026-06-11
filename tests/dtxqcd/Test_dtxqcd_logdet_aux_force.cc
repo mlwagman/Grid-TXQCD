@@ -32,21 +32,16 @@ using namespace Grid;
 //
 // d, n: HERMITIAN complex color matrices.  Treating d_{ij} as independent
 // complex (Wirtinger), directional derivative = Sum F_{ij} Y_{ij}_full =
-// trace(F * Y^T) per site.  localInnerProduct would give Sum conj(F) Y =
-// Re*Re + Im*Im (Frobenius), which differs by the sign of Im*Im from what
-// we want.  Use trace(F * transpose(Y)) instead.
+// v2 AuxInnerReal: CF Hermitian fields use Re Tr(F * Y^T) (natural-Wirtinger);
+// scalar singlets use plain localInnerProduct (real DOF in real part).
 static RealD AuxInnerReal(const DTXQCDField &A, const DTXQCDField &B) {
   RealD r = 0.0;
-  r += TensorRemove(sum(localInnerProduct(A.sigma, B.sigma))).real();
-  r += TensorRemove(sum(localInnerProduct(A.pi,    B.pi))).real();
-  // Tensor t^A_{mu,nu}: stored antisymmetric in (mu,nu).  The Lattice-wide
-  // localInnerProduct sums all (mu,nu) pairs; for antisymm fields the sum
-  // double-counts (mu<nu and nu<mu give the same contribution), so divide
-  // by 2 to match the FD which only sees mu<nu independent DOFs of t.
-  r += 0.5 * TensorRemove(sum(localInnerProduct(A.t, B.t))).real();
-  // Hermitian color d, n: inner product is Re trace(F * Y^T) = Re Sum F_{ij} Y_{ij}.
-  r += TensorRemove(sum(trace(A.d * transpose(B.d)))).real();
-  r += TensorRemove(sum(trace(A.n * transpose(B.n)))).real();
+  r += TensorRemove(sum(trace(A.sigma * transpose(B.sigma)))).real();
+  r += TensorRemove(sum(trace(A.pi    * transpose(B.pi))))   .real();
+  r += TensorRemove(sum(trace(A.d     * transpose(B.d))))    .real();
+  r += TensorRemove(sum(trace(A.n     * transpose(B.n))))    .real();
+  r += TensorRemove(sum(localInnerProduct(A.s, B.s))).real();
+  r += TensorRemove(sum(localInnerProduct(A.p, B.p))).real();
   return r;
 }
 
@@ -56,9 +51,10 @@ static void PerturbAux(const DTXQCDField &U, const DTXQCDField &Y, RealD scale,
   out.U     = U.U;
   out.sigma = U.sigma + scale * Y.sigma;
   out.pi    = U.pi    + scale * Y.pi;
-  out.t     = U.t     + scale * Y.t;
   out.d     = U.d     + scale * Y.d;
   out.n     = U.n     + scale * Y.n;
+  out.s     = U.s     + scale * Y.s;
+  out.p     = U.p     + scale * Y.p;
 }
 
 int main(int argc, char **argv) {
@@ -85,20 +81,22 @@ int main(int argc, char **argv) {
   // ---------- Random U + aux + Y direction ----------
   DTXQCDField U(&Grid);
   SU<Nc>::HotConfiguration(pRNG, U.U);
-  DtxqcdRealGaussian(pRNG, U.sigma);
-  DtxqcdRealGaussian(pRNG, U.pi);
-  DtxqcdGaussianAntisymTensor(pRNG, U.t);
-  DtxqcdHermitianGaussian(pRNG, U.d);
-  DtxqcdHermitianGaussian(pRNG, U.n);
+  DtxqcdHermitianCFGaussian(pRNG, U.sigma);
+  DtxqcdHermitianCFGaussian(pRNG, U.pi);
+  DtxqcdHermitianCFGaussian(pRNG, U.d);
+  DtxqcdHermitianCFGaussian(pRNG, U.n);
+  DtxqcdRealScalarGaussian(pRNG, U.s);
+  DtxqcdRealScalarGaussian(pRNG, U.p);
 
   // Random aux-only perturbation direction Y.
   DTXQCDField Y(&Grid);
   Y.U = Zero();
-  DtxqcdRealGaussian(pRNG, Y.sigma);
-  DtxqcdRealGaussian(pRNG, Y.pi);
-  DtxqcdGaussianAntisymTensor(pRNG, Y.t);
-  DtxqcdHermitianGaussian(pRNG, Y.d);
-  DtxqcdHermitianGaussian(pRNG, Y.n);
+  DtxqcdHermitianCFGaussian(pRNG, Y.sigma);
+  DtxqcdHermitianCFGaussian(pRNG, Y.pi);
+  DtxqcdHermitianCFGaussian(pRNG, Y.d);
+  DtxqcdHermitianCFGaussian(pRNG, Y.n);
+  DtxqcdRealScalarGaussian(pRNG, Y.s);
+  DtxqcdRealScalarGaussian(pRNG, Y.p);
 
   const RealD mass = 0.4;
   // FD step: 1e-6 is the v1 value.  The Mooee +4 normalization bug fix
@@ -117,7 +115,8 @@ int main(int argc, char **argv) {
     DTXQCDField Y_piece(&Grid);
     Y_piece = Zero();
     Y_piece.sigma = Y.sigma;  Y_piece.pi = Y.pi;
-    Y_piece.t = Y.t;          Y_piece.d = Y.d;          Y_piece.n = Y.n;
+    Y_piece.d     = Y.d;      Y_piece.n  = Y.n;
+    Y_piece.s     = Y.s;      Y_piece.p  = Y.p;
     Y_piece.U = Zero();
     zero_others(Y_piece);
 
@@ -130,19 +129,22 @@ int main(int argc, char **argv) {
   };
 
   check_piece("csw=0 sigma-only", [](DTXQCDField &P) {
-    P.pi = Zero(); P.t = Zero(); P.d = Zero(); P.n = Zero();
+    P.pi = Zero(); P.d = Zero(); P.n = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 pi-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.t = Zero(); P.d = Zero(); P.n = Zero();
-  });
-  check_piece("csw=0 t-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.pi = Zero(); P.d = Zero(); P.n = Zero();
+    P.sigma = Zero(); P.d = Zero(); P.n = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 d-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.pi = Zero(); P.t = Zero(); P.n = Zero();
+    P.sigma = Zero(); P.pi = Zero(); P.n = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 n-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.pi = Zero(); P.t = Zero(); P.d = Zero();
+    P.sigma = Zero(); P.pi = Zero(); P.d = Zero(); P.s = Zero(); P.p = Zero();
+  });
+  check_piece("csw=0 s-only", [](DTXQCDField &P) {
+    P.sigma = Zero(); P.pi = Zero(); P.d = Zero(); P.n = Zero(); P.p = Zero();
+  });
+  check_piece("csw=0 p-only", [](DTXQCDField &P) {
+    P.sigma = Zero(); P.pi = Zero(); P.d = Zero(); P.n = Zero(); P.s = Zero();
   });
   check_piece("csw=0 all-aux", [](DTXQCDField &) {});
 

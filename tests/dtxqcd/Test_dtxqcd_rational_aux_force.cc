@@ -27,12 +27,12 @@ using namespace Grid;
 // complex with the natural-Wirtinger convention.  See comments there.
 static RealD AuxInnerReal(const DTXQCDField &A, const DTXQCDField &B) {
   RealD r = 0.0;
-  r += TensorRemove(sum(localInnerProduct(A.sigma, B.sigma))).real();
-  r += TensorRemove(sum(localInnerProduct(A.pi,    B.pi))).real();
-  // antisymmetric t double-counts (mu<nu and nu<mu), so divide by 2.
-  r += 0.5 * TensorRemove(sum(localInnerProduct(A.t, B.t))).real();
-  r += TensorRemove(sum(trace(A.d * transpose(B.d)))).real();
-  r += TensorRemove(sum(trace(A.n * transpose(B.n)))).real();
+  r += TensorRemove(sum(trace(A.sigma * transpose(B.sigma)))).real();
+  r += TensorRemove(sum(trace(A.pi    * transpose(B.pi))))   .real();
+  r += TensorRemove(sum(trace(A.d     * transpose(B.d))))    .real();
+  r += TensorRemove(sum(trace(A.n     * transpose(B.n))))    .real();
+  r += TensorRemove(sum(localInnerProduct(A.s, B.s))).real();
+  r += TensorRemove(sum(localInnerProduct(A.p, B.p))).real();
   return r;
 }
 
@@ -41,9 +41,10 @@ static void PerturbAux(const DTXQCDField &U, const DTXQCDField &Y, RealD scale,
   out.U     = U.U;
   out.sigma = U.sigma + scale * Y.sigma;
   out.pi    = U.pi    + scale * Y.pi;
-  out.t     = U.t     + scale * Y.t;
   out.d     = U.d     + scale * Y.d;
   out.n     = U.n     + scale * Y.n;
+  out.s     = U.s     + scale * Y.s;
+  out.p     = U.p     + scale * Y.p;
 }
 
 int main(int argc, char **argv) {
@@ -81,19 +82,21 @@ int main(int argc, char **argv) {
   // ---------- Random U + aux + direction ----------
   DTXQCDField U(&Grid);
   SU<Nc>::HotConfiguration(pRNG, U.U);
-  DtxqcdRealGaussian(pRNG, U.sigma);
-  DtxqcdRealGaussian(pRNG, U.pi);
-  DtxqcdGaussianAntisymTensor(pRNG, U.t);
-  DtxqcdHermitianGaussian(pRNG, U.d);
-  DtxqcdHermitianGaussian(pRNG, U.n);
+  DtxqcdHermitianCFGaussian(pRNG, U.sigma);
+  DtxqcdHermitianCFGaussian(pRNG, U.pi);
+  DtxqcdRealScalarGaussian(pRNG, U.s);
+  DtxqcdRealScalarGaussian(pRNG, U.p);
+  DtxqcdHermitianCFGaussian(pRNG, U.d);
+  DtxqcdHermitianCFGaussian(pRNG, U.n);
 
   DTXQCDField Y(&Grid);
   Y.U = Zero();
-  DtxqcdRealGaussian(pRNG, Y.sigma);
-  DtxqcdRealGaussian(pRNG, Y.pi);
-  DtxqcdGaussianAntisymTensor(pRNG, Y.t);
-  DtxqcdHermitianGaussian(pRNG, Y.d);
-  DtxqcdHermitianGaussian(pRNG, Y.n);
+  DtxqcdHermitianCFGaussian(pRNG, Y.sigma);
+  DtxqcdHermitianCFGaussian(pRNG, Y.pi);
+  DtxqcdRealScalarGaussian(pRNG, Y.s);
+  DtxqcdRealScalarGaussian(pRNG, Y.p);
+  DtxqcdHermitianCFGaussian(pRNG, Y.d);
+  DtxqcdHermitianCFGaussian(pRNG, Y.n);
 
   const RealD mass = 0.4;
   const RealD h    = 1e-4;
@@ -126,7 +129,8 @@ int main(int argc, char **argv) {
     DTXQCDField Y_piece(&Grid);
     Y_piece = Zero();
     Y_piece.sigma = Y.sigma;  Y_piece.pi = Y.pi;
-    Y_piece.t = Y.t;          Y_piece.d  = Y.d;          Y_piece.n  = Y.n;
+    Y_piece.d     = Y.d;      Y_piece.n  = Y.n;
+    Y_piece.s     = Y.s;      Y_piece.p  = Y.p;
     Y_piece.U = Zero();
     mask(Y_piece);
 
@@ -139,19 +143,16 @@ int main(int argc, char **argv) {
   };
 
   check_piece("csw=0 sigma-only", [](DTXQCDField &P) {
-    P.pi = Zero(); P.t = Zero(); P.d = Zero(); P.n = Zero();
+    P.pi = Zero(); P.d = Zero(); P.n = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 pi-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.t = Zero(); P.d = Zero(); P.n = Zero();
-  });
-  check_piece("csw=0 t-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.pi = Zero(); P.d = Zero(); P.n = Zero();
+    P.sigma = Zero(); P.d = Zero(); P.n = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 d-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.pi = Zero(); P.t = Zero(); P.n = Zero();
+    P.sigma = Zero(); P.pi = Zero(); P.n = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 n-only", [](DTXQCDField &P) {
-    P.sigma = Zero(); P.pi = Zero(); P.t = Zero(); P.d = Zero();
+    P.sigma = Zero(); P.pi = Zero(); P.d = Zero(); P.s = Zero(); P.p = Zero();
   });
   check_piece("csw=0 all-aux", [](DTXQCDField &) {});
 

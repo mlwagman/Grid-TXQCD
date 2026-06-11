@@ -33,14 +33,16 @@ int main(int argc, char **argv) {
 
   LatticeDtxqcdSigma sigma(&Grid);
   LatticeDtxqcdPi    pi(&Grid);
-  LatticeDtxqcdT     t(&Grid);
   LatticeDtxqcdD     d(&Grid);
   LatticeDtxqcdN     n(&Grid);
-  DtxqcdRealGaussian(pRNG, sigma);
-  DtxqcdRealGaussian(pRNG, pi);
-  DtxqcdGaussianAntisymTensor(pRNG, t);
-  DtxqcdHermitianGaussian(pRNG, d);
-  DtxqcdHermitianGaussian(pRNG, n);
+  LatticeDtxqcdS     s(&Grid);
+  LatticeDtxqcdP     p(&Grid);
+  DtxqcdHermitianCFGaussian(pRNG, sigma);
+  DtxqcdHermitianCFGaussian(pRNG, pi);
+  DtxqcdRealScalarGaussian(pRNG, s);
+  DtxqcdRealScalarGaussian(pRNG, p);
+  DtxqcdHermitianCFGaussian(pRNG, d);
+  DtxqcdHermitianCFGaussian(pRNG, n);
 
   DTXQCDFermionNf in_upper(&Grid), in_lower(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {
@@ -52,7 +54,7 @@ int main(int argc, char **argv) {
 
   // Operator-level application.
   DTXQCDFermionNf out_upper_op(&Grid), out_lower_op(&Grid);
-  DtxqcdApplyMooeeDoubled(mass, sigma, pi, t, d, n,
+  DtxqcdApplyMooeeDoubled(mass, sigma, pi, d, n, s, p,
                           in_upper, in_lower,
                           out_upper_op, out_lower_op);
 
@@ -80,7 +82,7 @@ int main(int argc, char **argv) {
         for (int tt = 0; tt < gd[3]; ++tt) {
           Coordinate coord(std::vector<int>{x, y, z, tt});
 
-          DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, t, d, n, coord);
+          DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, d, n, s, p, coord);
           MatrixXcd M_upper, M_lower, M_off, M48;
           DtxqcdBuildUpperBlock24(mass, aux, spin, M_upper);
           DtxqcdBuildLowerBlock24(mass, aux, spin, M_lower);

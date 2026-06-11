@@ -51,17 +51,18 @@ int main(int argc, char **argv) {
   // Random gauge + aux to fix the cached EO inverse.
   DTXQCDField U(&Grid);
   SU<Nc>::HotConfiguration(pRNG, U.U);
-  DtxqcdRealGaussian(pRNG, U.sigma);
-  DtxqcdRealGaussian(pRNG, U.pi);
-  DtxqcdGaussianAntisymTensor(pRNG, U.t);
-  DtxqcdHermitianGaussian(pRNG, U.d);
-  DtxqcdHermitianGaussian(pRNG, U.n);
+  DtxqcdHermitianCFGaussian(pRNG, U.sigma);
+  DtxqcdHermitianCFGaussian(pRNG, U.pi);
+  DtxqcdRealScalarGaussian(pRNG, U.s);
+  DtxqcdRealScalarGaussian(pRNG, U.p);
+  DtxqcdHermitianCFGaussian(pRNG, U.d);
+  DtxqcdHermitianCFGaussian(pRNG, U.n);
 
   const RealD mass = 0.4;
 
   auto run_csw = [&](RealD csw, const char *tag) {
     DTXQCDWilsonCloverFermionEO Dw(U.U, Grid, RBGrid, mass, csw,
-                                   U.sigma, U.pi, U.t, U.d, U.n);
+                                   U.sigma, U.pi, U.d, U.n, U.s, U.p);
 
     const int NRHS = 5;
     for (int cb_idx = 0; cb_idx < 2; ++cb_idx) {
