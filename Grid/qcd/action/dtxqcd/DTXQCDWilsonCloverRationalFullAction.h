@@ -382,6 +382,9 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
                                                pi_force, d_force, n_force,
                                                s_force, p_force);
 
+            // Wirtinger -> physical-gradient conversion: transpose(F_W) for
+            // Hermitian F_W.  See companion comment in
+            // DTXQCDLogDetCloverEOAction.h::deriv() for the derivation.
             auto AddCF = [&](LatticeDtxqcdSigma &dst, const SigSobj &fv) {
               SigSobj cur; peekSite(cur, dst, coord);
               for (int a = 0; a < DtxqcdNf; ++a)
@@ -389,7 +392,7 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
                   for (int i = 0; i < Nc; ++i)
                     for (int j = 0; j < Nc; ++j)
                       cur()(a, b)(i, j) =
-                          cur()(a, b)(i, j) + coef * fv()(a, b)(i, j);
+                          cur()(a, b)(i, j) + coef * fv()(b, a)(j, i);
               pokeSite(cur, dst, coord);
             };
             AddCF(dSdU.sigma, sig_force);

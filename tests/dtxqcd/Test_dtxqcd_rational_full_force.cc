@@ -17,10 +17,10 @@ using namespace Grid;
 
 static RealD AuxInnerReal(const DTXQCDField &A, const DTXQCDField &B) {
   RealD r = 0.0;
-  r += TensorRemove(sum(trace(A.sigma * transpose(B.sigma)))).real();
-  r += TensorRemove(sum(trace(A.pi    * transpose(B.pi))))   .real();
-  r += TensorRemove(sum(trace(A.d     * transpose(B.d))))    .real();
-  r += TensorRemove(sum(trace(A.n     * transpose(B.n))))    .real();
+  r += TensorRemove(sum(trace(A.sigma * adj(B.sigma)))).real();
+  r += TensorRemove(sum(trace(A.pi    * adj(B.pi))))   .real();
+  r += TensorRemove(sum(trace(A.d     * adj(B.d))))    .real();
+  r += TensorRemove(sum(trace(A.n     * adj(B.n))))    .real();
   r += TensorRemove(sum(localInnerProduct(A.s, B.s))).real();
   r += TensorRemove(sum(localInnerProduct(A.p, B.p))).real();
   return r;

@@ -14,15 +14,21 @@
 
 using namespace Grid;
 
-// AuxInnerReal must match the dS/dX transpose convention chosen by the action
-// (see DTXQCDAuxGaussianAction::deriv()): all four CF Hermitian fields use the
-// natural-Wirtinger Re Tr(F Y^T) form; scalars use the plain product.
+// AuxInnerReal: physical-gradient inner product matching the integrator's
+// expectation.  For a perturbation X -> X + h Y (Y Hermitian), the action
+// S = (lambda^2/2)|X|^2 changes by dS/dh = lambda^2 * Re Tr(X Y^dag).  With
+// F = dS/dX = lambda^2 X (post-fix; the pre-fix code had F = lambda^2 X^T,
+// which caused a linear-eps dH leak in HMC that no FD-vs-analytic gradient
+// test could catch because the test used the SAME transpose convention),
+// the correct inner product is Re Tr(F Y^dag) = Re Tr(F adj(Y)).  For real
+// Y, adj(Y) = transpose(conj(Y)) = transpose(Y), so this also works for
+// the singlet scalars.
 static RealD AuxInnerReal(const DTXQCDField &A, const DTXQCDField &B) {
   RealD r = 0.0;
-  r += TensorRemove(sum(trace(A.sigma * transpose(B.sigma)))).real();
-  r += TensorRemove(sum(trace(A.pi    * transpose(B.pi))))   .real();
-  r += TensorRemove(sum(trace(A.d     * transpose(B.d))))    .real();
-  r += TensorRemove(sum(trace(A.n     * transpose(B.n))))    .real();
+  r += TensorRemove(sum(trace(A.sigma * adj(B.sigma)))).real();
+  r += TensorRemove(sum(trace(A.pi    * adj(B.pi))))   .real();
+  r += TensorRemove(sum(trace(A.d     * adj(B.d))))    .real();
+  r += TensorRemove(sum(trace(A.n     * adj(B.n))))    .real();
   r += TensorRemove(sum(localInnerProduct(A.s, B.s))).real();
   r += TensorRemove(sum(localInnerProduct(A.p, B.p))).real();
   return r;

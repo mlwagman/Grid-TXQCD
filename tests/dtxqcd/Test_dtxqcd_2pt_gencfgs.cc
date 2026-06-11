@@ -131,14 +131,25 @@ int main(int argc, char **argv) {
     // outer level with a x4 multiplier gives it its own time scale and
     // lets the gauge sub-integrator (also x4) carry the fast-varying
     // contributions.  Same structure gen_dtxqcd_cfgs uses.
+    // Diagnostic knobs for bias hunt: DISABLE_PF=1 drops PF/LogDet, DISABLE_AUX=1
+    // drops AuxGaussian.  Use both to test pure-gauge HMC on DTXQCDField (the
+    // gauge adapter zeros aux force; a clean dH at trajectory scale tells us
+    // the integrator + composite impl are sound and the bias is elsewhere).
+    bool disable_pf  = std::getenv("DISABLE_PF")  && std::atoi(std::getenv("DISABLE_PF"))  != 0;
+    bool disable_aux = std::getenv("DISABLE_AUX") && std::atoi(std::getenv("DISABLE_AUX")) != 0;
+    if (disable_pf)  std::cout << GridLogMessage << "DTXQCD DISABLE_PF=1"  << std::endl;
+    if (disable_aux) std::cout << GridLogMessage << "DTXQCD DISABLE_AUX=1" << std::endl;
+
     typedef Representations<EmptyRep<DTXQCDField>> Reps;
     ActionLevel<DTXQCDField, Reps> L1(1);
-    if (use_full_pf) {
-      L1.push_back(&PF_full);     // single rational on full M^dag M;
-                                  // LogDet folded in (no companion).
-    } else {
-      L1.push_back(&PF);
-      L1.push_back(&LogDet);
+    if (!disable_pf) {
+      if (use_full_pf) {
+        L1.push_back(&PF_full);     // single rational on full M^dag M;
+                                    // LogDet folded in (no companion).
+      } else {
+        L1.push_back(&PF);
+        L1.push_back(&LogDet);
+      }
     }
     ActionLevel<DTXQCDField, Reps> L2(2);
     L2.push_back(&GaugeAction);
@@ -148,11 +159,11 @@ int main(int argc, char **argv) {
     }
     std::cout << GridLogMessage << "DTXQCD aux multiplier = " << aux_mult << std::endl;
     ActionLevel<DTXQCDField, Reps> L3(aux_mult);
-    L3.push_back(&AuxAction);
+    if (!disable_aux) L3.push_back(&AuxAction);
     ActionSet<DTXQCDField, Reps> Aset;
-    Aset.push_back(L1);
+    if (!disable_pf) Aset.push_back(L1);
     Aset.push_back(L2);
-    Aset.push_back(L3);
+    if (!disable_aux) Aset.push_back(L3);
 
     IntegratorParameters MD;
     MD.name    = "ForceGradient";

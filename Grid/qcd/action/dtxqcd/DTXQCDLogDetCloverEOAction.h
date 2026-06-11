@@ -175,11 +175,28 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
                 pokeSite(cs_arr[p_idx], clover_sigma_full[p_idx], coord);
             }
 
-            // Poke per-site forces into the full-volume lattice slots.
-            pokeSite(sig_force, dSdU.sigma, coord);
-            pokeSite(pi_force,  dSdU.pi,    coord);
-            pokeSite(d_force,   dSdU.d,     coord);
-            pokeSite(n_force,   dSdU.n,     coord);
+            // Wirtinger -> physical-gradient conversion: for a real-valued
+            // S(sigma), the Wirtinger derivative F_W = dS/dsigma_ab^ij and
+            // the physical gradient F_phys (the Hamilton-flow force the
+            // integrator expects) are related by F_phys = 2 conj(F_W).  For
+            // Hermitian F_W (which our force kernel returns), conj(F_W) =
+            // transpose(F_W), so F_phys = 2 * transpose(F_W).  The factor of 2
+            // is folded into the rational coefficient downstream of this poke
+            // (and into the FD-test normalization on the aux side); here we
+            // need only swap indices to deliver the physical gradient.
+            auto TransposePoke = [&coord](auto &dst, const auto &fv) {
+              std::remove_const_t<std::remove_reference_t<decltype(fv)>> ft;
+              for (int a = 0; a < DtxqcdNf; ++a)
+                for (int b = 0; b < DtxqcdNf; ++b)
+                  for (int i = 0; i < Nc; ++i)
+                    for (int j = 0; j < Nc; ++j)
+                      ft()(a, b)(i, j) = fv()(b, a)(j, i);
+              pokeSite(ft, dst, coord);
+            };
+            TransposePoke(dSdU.sigma, sig_force);
+            TransposePoke(dSdU.pi,    pi_force);
+            TransposePoke(dSdU.d,     d_force);
+            TransposePoke(dSdU.n,     n_force);
             pokeSite(s_force,   dSdU.s,     coord);
             pokeSite(p_force,   dSdU.p,     coord);
           }

@@ -61,15 +61,23 @@ class DTXQCDAuxiliaryFieldGaussianAction : public Action<DTXQCDField> {
   void deriv(const DTXQCDField &U, DTXQCDField &dSdU) override {
     const RealD c = lambda * lambda;
     dSdU.U     = Zero();
-    // For Hermitian matrix fields, the natural-Wirtinger derivative of
-    // (1/2)|M_kl|^2 (matched against an AuxInnerReal that uses Re Tr(F Y^T))
-    // requires transpose(M) on the right side -- same convention v1 used for
-    // d, n and now extended to sigma, pi for the 6x6 CF Hermitian case.
-    dSdU.sigma = c * transpose(U.sigma);
-    dSdU.pi    = c * transpose(U.pi);
-    dSdU.d     = c * transpose(U.d);
-    dSdU.n     = c * transpose(U.n);
-    // Singlet scalars: real-valued, no transpose subtlety; dS/ds = lambda^2 s.
+    // For Hermitian CF matrix sigma_ab^ij the action is
+    //   S = (lambda^2/2) * Sum_{a,b,i,j} |sigma_ab^ij|^2
+    // and the gradient under the integrator's update P -= F * eps (which
+    // expects F = dS/dX as the actual position-space gradient) is
+    //   dS/dsigma_ab^ij = lambda^2 * sigma_ab^ij,
+    // i.e. F = lambda^2 * X, NOT lambda^2 * transpose(X).  The pre-fix
+    // code used transpose, which is conj() on Hermitian fields; that
+    // flipped the imaginary part of the off-diagonal force.  The
+    // resulting integrator was non-symplectic and dH leaked linearly in
+    // eps even though the FD-vs-analytic test passed (the test used the
+    // same transpose convention in its inner product, so both sides
+    // were self-consistent with each other but not with the true
+    // gradient flow that the HMC integrator runs).
+    dSdU.sigma = c * U.sigma;
+    dSdU.pi    = c * U.pi;
+    dSdU.d     = c * U.d;
+    dSdU.n     = c * U.n;
     dSdU.s     = c * U.s;
     dSdU.p     = c * U.p;
   }
