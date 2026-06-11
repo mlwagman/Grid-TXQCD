@@ -202,9 +202,10 @@ int main(int argc, char **argv) {
         std::cout << GridLogMessage << "Zeroing ALL aux fields at init (cold)" << std::endl;
         U.sigma = Zero();
         U.pi    = Zero();
-        U.t     = Zero();
         U.d     = Zero();
         U.n     = Zero();
+        U.s     = Zero();
+        U.p     = Zero();
       }
     }
 

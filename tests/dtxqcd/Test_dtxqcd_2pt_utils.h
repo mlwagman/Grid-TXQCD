@@ -79,7 +79,7 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
   GridParallelRNG       &prng_;
   RealD mass_;
   int   n_vev_noise_;
-  std::vector<RealD> norm_sigma_, norm_pi_, norm_t_, norm_d_, norm_n_;
+  std::vector<RealD> norm_sigma_, norm_pi_, norm_d_, norm_n_, norm_s_, norm_p_;
   std::vector<RealD> vev_trminv_;
 
   DtxqcdDiagnostics(const std::string &prefix, int interval,
@@ -119,9 +119,10 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     RealD V = (RealD)U.Grid()->gSites();
     norm_sigma_.push_back(norm2(U.sigma) / V);
     norm_pi_   .push_back(norm2(U.pi)    / V);
-    norm_t_    .push_back(norm2(U.t)     / V);
     norm_d_    .push_back(norm2(U.d)     / V);
     norm_n_    .push_back(norm2(U.n)     / V);
+    norm_s_    .push_back(norm2(U.s)     / V);
+    norm_p_    .push_back(norm2(U.p)     / V);
     vev_trminv_.push_back(compute_trminv(U.U));
   }
 
@@ -137,9 +138,10 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     write(wr, "fdt_max",   fdt_max_);
     write(wr, "norm_sigma", norm_sigma_);
     write(wr, "norm_pi",    norm_pi_);
-    write(wr, "norm_t",     norm_t_);
     write(wr, "norm_d",     norm_d_);
     write(wr, "norm_n",     norm_n_);
+    write(wr, "norm_s",     norm_s_);
+    write(wr, "norm_p",     norm_p_);
     write(wr, "vev_trminv", vev_trminv_);
     std::vector<std::string> names;
     for (auto &a : actions_) names.push_back(a.name);
@@ -148,8 +150,9 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     traj_.clear(); plaq_.clear();
     force_avg_.clear(); force_max_.clear();
     fdt_avg_.clear();  fdt_max_.clear();
-    norm_sigma_.clear(); norm_pi_.clear(); norm_t_.clear();
+    norm_sigma_.clear(); norm_pi_.clear();
     norm_d_.clear();     norm_n_.clear();
+    norm_s_.clear();     norm_p_.clear();
     vev_trminv_.clear();
 
     std::cout << GridLogMessage << "HMC diagnostics written to " << fname

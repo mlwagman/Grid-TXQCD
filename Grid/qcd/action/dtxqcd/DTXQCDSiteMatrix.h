@@ -1,33 +1,32 @@
 #pragma once
-// Per-site dense site matrices for the doubled DTXQCD Wilson-Clover operator.
+// Per-site dense site matrices for the v2 DTXQCD doubled Wilson-Clover
+// operator.
 //
-// Layout: each diagonal block is 24x24 = DtxqcdNf * Ns * Nc (one flavor
-// doubling).  The full doubled site matrix is 48x48 = 2 * 24, with off-
-// diagonal 24x24 blocks from the d, n auxiliary fields:
+// Layout: each diagonal block is 24x24 = DtxqcdNf * Ns * Nc.  The full
+// doubled site matrix is 48x48 = 2 * 24, with off-diagonal 24x24 blocks
+// from the d, n auxiliary fields:
 //
 //   M48(x) = [ M_upper(x)   M_offdiag(x) ]
 //            [ M_offdiag(x) M_lower(x)   ]
 //
-//   M_upper(x) = m I_24 + Delta_diag(x)
-//   M_lower(x) = m I_24 + Delta_diag(x)            (v1 placeholder; see note)
-//   Delta_diag(x) = (1/sqrt 2) sigma^A(x) tau^A I_spin I_color
-//                 + (1/sqrt 2) pi^A(x)    tau^A gamma5 I_color
-//                 + sum_{mu<nu} i t^A_{mu,nu}(x) tau^A Grid_Sigma_{mu,nu} I_color
-//   M_offdiag(x) = 2 d^{ij}(x) gamma5 + 2 n^{ij}(x)        (flavor identity)
+//   M_upper(x) = (mass + 4) I_24 + X^{ij}_{ab}
+//   M_lower(x) = (mass + 4) I_24 - X^{ij}_{ab}
+//   X^{ij}_{ab} = sigma^{ij}_{ab}                              (scalar in spin)
+//               + s delta^{ij} delta_{ab}                      (scalar singlet)
+//               + (pi^{ij}_{ab} + p delta^{ij} delta_{ab}) gamma5
+//   M_offdiag(x) = d^{ij}_{ab} gamma5 + n^{ij}_{ab}
 //
-// M_upper and M_lower differ by the Cstar M_22 = C^T D^T C^T rotation:
-// (a) the tensor piece i t^A sigma_munu picks up a sign flip in the lower
-// block (C^T sigma_munu^T C = -sigma_munu); (b) the clover piece flips its
-// prefactor sign AND uses F^T (C^T F sigma C = -F^T sigma).  Encoded by
-// DtxqcdBuildLowerBlock24 with tensor_sign = -1.0 and lower_block = true.
+// Lower block additionally includes the Cstar clover term sign flip
+// (DtxqcdAddCloverToDiagBlock24 with lower_block=true).  Cstar mapping
+// on X gives M_lower = ... - X due to X^T = X (gamma5^T = gamma5 in
+// Grid basis); the entire X term sign-flips between upper and lower.
 //
-// Eigen 4x4 / 2x2 / 3x3 are used for the gamma / Pauli / color sub-blocks.
-// Per-site 48x48 matrices use MatrixXcd (heap-allocated) for v1 simplicity;
-// switching to fixed-size Matrix<ComplexD, 48, 48> is an optimization once
-// the EO operator wraps this in a SIMD-vectorized tensor.
+// Eigen 4x4 / 3x3 / scalar Eigen matrices for sub-blocks; per-site 48x48
+// matrices use MatrixXcd (heap) for simplicity.
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxFieldTypes.h>
-#include <Grid/qcd/action/dtxqcd/DTXQCDDeltaOp.h>  // SigmaMuNuAlgebra + DtxqcdPauli
+#include <Grid/qcd/action/dtxqcd/DTXQCDDeltaOp.h>
+#include <Grid/qcd/action/txqcd/TXQCDDeltaOp.h>  // SigmaMuNuAlgebra
 #include <Grid/Eigen/Dense>
 #include <array>
 
@@ -42,34 +41,17 @@ inline int DtxqcdSiteIdx24(int a, int alpha, int color) {
   return a * (Ns * Nc) + alpha * Nc + color;
 }
 
-// ---------- Pauli + spin matrix caches ----------
-
-// Pauli matrices tau^A in 2x2 Eigen form (Hermitian, traceless).  Singleton
-// — built once on first access.
-inline const std::array<Eigen::Matrix2cd, DtxqcdNTriplet>& DtxqcdPauliEigen() {
-  static const auto T = []() {
-    std::array<Eigen::Matrix2cd, DtxqcdNTriplet> arr;
-    arr[0] << ComplexD(0, 0), ComplexD(1, 0),
-              ComplexD(1, 0), ComplexD(0, 0);   // tau^1
-    arr[1] << ComplexD(0, 0), ComplexD(0, -1),
-              ComplexD(0, 1), ComplexD(0, 0);   // tau^2
-    arr[2] << ComplexD(1, 0), ComplexD(0, 0),
-              ComplexD(0, 0), ComplexD(-1, 0);  // tau^3
-    return arr;
-  }();
-  return T;
-}
+// ---------- gamma5 + sigma_{mu,nu} 4x4 spin matrices ----------
 
 // Cached gamma5 and sigma_{mu,nu} (mu<nu) as 4x4 Eigen matrices in Grid's
 // internal spin basis.  Probed at construction by applying the Gamma to a
 // single-site canonical-basis spinor and reading out the result, so the
-// stored matrices are guaranteed consistent with what
-// DtxqcdApplyDeltaSigmaPi / DtxqcdApplyDeltaTensor (and any other Gamma-
-// using code) compute.
+// stored matrices are guaranteed consistent with what DtxqcdApplyX (and any
+// other Gamma-using code) compute.
 class DtxqcdSpinMatrices {
  public:
   Eigen::Matrix4cd gamma5;
-  std::array<Eigen::Matrix4cd, 6> sigma_munu;  // pair index = (mu,nu) lex with mu<nu
+  std::array<Eigen::Matrix4cd, 6> sigma_munu;  // (mu,nu) lex with mu<nu
 
   explicit DtxqcdSpinMatrices(GridCartesian& g) {
     gamma5 = ProbeGamma(g, Gamma::Algebra::Gamma5);
@@ -104,60 +86,62 @@ class DtxqcdSpinMatrices {
 
 // ---------- Per-site aux extraction ----------
 
-// Site-local aux field values (per Pauli triplet component, plus full 3x3
-// Hermitian color matrices d, n).  Built by peeking a single site of the
-// Lattice fields.
+// Site-local aux values.  sigma, pi, d, n are 6x6 = (Nf x Nc) x (Nf x Nc)
+// color-flavor matrices in dense Eigen form; s, p are real scalars.
 struct DtxqcdSiteAux {
-  std::array<ComplexD, DtxqcdNTriplet> sigma;
-  std::array<ComplexD, DtxqcdNTriplet> pi;
-  std::array<std::array<ComplexD, DtxqcdNTriplet>, 6> t;  // [pair_idx][A]
-  Eigen::Matrix3cd d;
-  Eigen::Matrix3cd n;
+  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> sigma;
+  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> pi;
+  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> d;
+  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> n;
+  RealD s;
+  RealD p;
 
-  static DtxqcdSiteAux Extract(const LatticeDtxqcdSigma& sigma_L,
-                                const LatticeDtxqcdPi& pi_L,
-                                const LatticeDtxqcdT& t_L,
-                                const LatticeDtxqcdD& d_L,
-                                const LatticeDtxqcdN& n_L,
+  // Combined-index helpers: row = a*Nc + i, col = b*Nc + j.
+  static inline int Kab(int a, int i) { return a * Nc + i; }
+
+  static DtxqcdSiteAux Extract(const LatticeDtxqcdSigma &sigma_L,
+                                const LatticeDtxqcdPi    &pi_L,
+                                const LatticeDtxqcdD     &d_L,
+                                const LatticeDtxqcdN     &n_L,
+                                const LatticeDtxqcdS     &s_L,
+                                const LatticeDtxqcdP     &p_L,
                                 const Coordinate& coord) {
     DtxqcdSiteAux out;
-    typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SiteSig;
-    typedef typename LatticeDtxqcdT::vector_object::scalar_object     SiteT;
-    typedef typename LatticeDtxqcdD::vector_object::scalar_object     SiteD;
+    typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SiteCF;
+    typedef typename LatticeDtxqcdS::vector_object::scalar_object     SiteSc;
 
-    SiteSig sig_s, pi_s; SiteT t_s; SiteD d_s, n_s;
+    SiteCF sig_s, pi_s, d_s, n_s;
+    SiteSc s_s, p_s;
     peekSite(sig_s, sigma_L, coord);
     peekSite(pi_s,  pi_L,    coord);
-    peekSite(t_s,   t_L,     coord);
     peekSite(d_s,   d_L,     coord);
     peekSite(n_s,   n_L,     coord);
+    peekSite(s_s,   s_L,     coord);
+    peekSite(p_s,   p_L,     coord);
 
-    for (int A = 0; A < DtxqcdNTriplet; ++A) {
-      out.sigma[A] = ComplexD(TensorRemove(sig_s()()(A)));
-      out.pi[A]    = ComplexD(TensorRemove(pi_s()()(A)));
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int b = 0; b < DtxqcdNf; ++b) {
+        for (int i = 0; i < Nc; ++i) {
+          for (int j = 0; j < Nc; ++j) {
+            out.sigma(Kab(a, i), Kab(b, j)) =
+                ComplexD(TensorRemove(sig_s()(a, b)(i, j)));
+            out.pi(Kab(a, i), Kab(b, j)) =
+                ComplexD(TensorRemove(pi_s()(a, b)(i, j)));
+            out.d(Kab(a, i), Kab(b, j)) =
+                ComplexD(TensorRemove(d_s()(a, b)(i, j)));
+            out.n(Kab(a, i), Kab(b, j)) =
+                ComplexD(TensorRemove(n_s()(a, b)(i, j)));
+          }
+        }
+      }
     }
-    int p = 0;
-    for (int mu = 0; mu < Nd; ++mu)
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        for (int A = 0; A < DtxqcdNTriplet; ++A)
-          out.t[p][A] = ComplexD(TensorRemove(t_s()(mu, nu)(A)));
-        ++p;
-      }
-    out.d = Eigen::Matrix3cd::Zero();
-    out.n = Eigen::Matrix3cd::Zero();
-    for (int i = 0; i < Nc; ++i)
-      for (int j = 0; j < Nc; ++j) {
-        out.d(i, j) = ComplexD(TensorRemove(d_s()()(i, j)));
-        out.n(i, j) = ComplexD(TensorRemove(n_s()()(i, j)));
-      }
+    out.s = ComplexD(TensorRemove(s_s()()())).real();
+    out.p = ComplexD(TensorRemove(p_s()()())).real();
     return out;
   }
 };
 
-// Site-local clover field strength values: 6 (mu<nu) color matrices F_{mu,nu}
-// extracted from a std::vector<LatticeColourMatrix> of size 6 (Grid clover
-// convention: anti-Hermitian color matrix per pair).  Built by peeking the
-// per-pair lattice at a single coordinate.
+// Site-local clover field strength: 6 (mu<nu) color matrices F_{mu,nu}.
 struct DtxqcdSiteClover {
   std::array<Eigen::Matrix3cd, 6> F_munu;
 
@@ -180,66 +164,61 @@ struct DtxqcdSiteClover {
 
 // ---------- Block builders ----------
 
-// Diagonal-block builder: M_diag = (mass + 4) * I_24 + Delta_diag (sigma^A, pi^A,
-// t^A) using the Pauli flavor structure v^A_{a,b} = tau^A_{a,b}.
-// tensor_sign = +1 for the upper diagonal block (standard), -1 for the
-// lower diagonal block — matches the Cstar M_22 = C^T X^T C construction
-// where the tensor piece of X picks up a sign flip from
-// C^T sigma_{mu,nu}^T C = -sigma_{mu,nu} (sigma and pi pieces are
-// invariant under that operation; see DTXQCDDeltaOp.h).
+// Diagonal-block builder: M_diag = (mass + 4) * I_24 + block_sign * X^{ij}_{ab}.
+//   block_sign = +1 for the upper diagonal block (standard).
+//   block_sign = -1 for the lower diagonal block (Cstar M_22 has -X).
+//
+// X^{ij}_{ab} = sigma^{ij}_{ab} + s delta^{ij} delta_{ab}
+//             + (pi^{ij}_{ab} + p delta^{ij} delta_{ab}) gamma5
+//
+// All four terms are diagonal in spin index (alpha == beta) for the
+// scalar pieces, and convolved with gamma5(alpha, beta) for the
+// pseudoscalar pieces.
 inline void DtxqcdBuildDiagBlock24(double mass,
                                     const DtxqcdSiteAux& aux,
                                     const DtxqcdSpinMatrices& spin,
                                     Eigen::MatrixXcd& M,
-                                    double tensor_sign = +1.0) {
-  // Mooee diagonal = (mass + 4) per Grid's WilsonFermion convention
-  // (M_W = (4 + mass)*I - hopping; Mooee block = (4 + mass)*I).  Matches
-  // TXQCD's diag_mass_[a] = 4.0 + mass_[a] and the DtxqcdApplyMooeeDoubled
-  // lattice op.  Per-site M48 builds (used by LogDet and the cached EO
-  // inverse) and the lattice Mooee MUST use the same diagonal so
-  // det(M_full) = det(Mee) * det(Mpc) is the Wilson determinant.
+                                    double block_sign = +1.0) {
+  // Mooee diagonal = (mass + 4) per Grid's WilsonFermion convention.
   const double mass_diag = mass + 4.0;
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int row = 0; row < kDtxqcdSiteDim24; ++row) M(row, row) = ComplexD(mass_diag, 0);
 
-  const auto& tau = DtxqcdPauliEigen();
-  const ComplexD inv_sqrt2(1.0 / std::sqrt(2.0), 0.0);
-  const ComplexD ci(0.0, 1.0);
-
+  const ComplexD bs(block_sign, 0.0);
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
-      for (int A = 0; A < DtxqcdNTriplet; ++A) {
-        ComplexD tab = tau[A](a, b);
-        if (tab == ComplexD(0, 0)) continue;
-        ComplexD coef_s = inv_sqrt2 * aux.sigma[A] * tab;
-        ComplexD coef_p = inv_sqrt2 * aux.pi[A]    * tab;
-        // sigma + pi diagonal-in-color
-        for (int alpha = 0; alpha < Ns; ++alpha) {
-          for (int beta = 0; beta < Ns; ++beta) {
-            ComplexD g5_ab = spin.gamma5(alpha, beta);
-            for (int i = 0; i < Nc; ++i) {
-              int row = DtxqcdSiteIdx24(a, alpha, i);
-              int col = DtxqcdSiteIdx24(b, beta,  i);
-              if (alpha == beta) M(row, col) += coef_s;
-              M(row, col) += coef_p * g5_ab;
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = 0; j < Nc; ++j) {
+          int kab1 = DtxqcdSiteAux::Kab(a, i);
+          int kab2 = DtxqcdSiteAux::Kab(b, j);
+          ComplexD sig_ij_ab = aux.sigma(kab1, kab2);
+          ComplexD pi_ij_ab  = aux.pi   (kab1, kab2);
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            int row = DtxqcdSiteIdx24(a, alpha, i);
+            // Scalar sigma: diagonal in spin.
+            int col = DtxqcdSiteIdx24(b, alpha, j);
+            M(row, col) += bs * sig_ij_ab;
+            // Pseudoscalar pi: gamma5 in spin.
+            for (int beta = 0; beta < Ns; ++beta) {
+              int col2 = DtxqcdSiteIdx24(b, beta, j);
+              M(row, col2) += bs * pi_ij_ab * spin.gamma5(alpha, beta);
             }
           }
         }
-        // tensor: sum mu<nu of tensor_sign * i * t^A_{mu,nu} sigma_{mu,nu}
-        // diagonal-in-color.  tensor_sign = +1 for upper block, -1 for lower.
-        const ComplexD ci_signed = ComplexD(0.0, tensor_sign);
-        for (int p_idx = 0; p_idx < 6; ++p_idx) {
-          ComplexD coef_t = ci_signed * aux.t[p_idx][A] * tab;
-          for (int alpha = 0; alpha < Ns; ++alpha) {
-            for (int beta = 0; beta < Ns; ++beta) {
-              ComplexD smn_ab = spin.sigma_munu[p_idx](alpha, beta);
-              for (int i = 0; i < Nc; ++i) {
-                int row = DtxqcdSiteIdx24(a, alpha, i);
-                int col = DtxqcdSiteIdx24(b, beta,  i);
-                M(row, col) += coef_t * smn_ab;
-              }
-            }
-          }
+      }
+    }
+  }
+  // Singlet s, p contributions: a == b, i == j.
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    for (int i = 0; i < Nc; ++i) {
+      for (int alpha = 0; alpha < Ns; ++alpha) {
+        int row = DtxqcdSiteIdx24(a, alpha, i);
+        // s I in spin
+        M(row, row) += bs * ComplexD(aux.s, 0.0);
+        // p gamma5
+        for (int beta = 0; beta < Ns; ++beta) {
+          int col = DtxqcdSiteIdx24(a, beta, i);
+          M(row, col) += bs * ComplexD(aux.p, 0.0) * spin.gamma5(alpha, beta);
         }
       }
     }
@@ -249,9 +228,7 @@ inline void DtxqcdBuildDiagBlock24(double mass,
 // Add the clover contribution to a 24x24 diagonal block:
 //   upper:  M += -(csw/2) sum_{mu<nu} F_{mu,nu} sigma_{mu,nu}_Grid  (delta in flavor)
 //   lower:  M += +(csw/2) sum_{mu<nu} F^T_{mu,nu} sigma_{mu,nu}_Grid
-// Color matrix F (or F^T for lower) acts on color indices (i,j); sigma_munu
-// acts on spin (alpha,beta); identity in flavor (a == a').
-// lower_block = true selects the +csw/2 prefactor and color-transposed F.
+// Unchanged from v1.
 inline void DtxqcdAddCloverToDiagBlock24(
     double csw,
     const DtxqcdSiteClover &clover,
@@ -281,11 +258,9 @@ inline void DtxqcdAddCloverToDiagBlock24(
   }
 }
 
-// Upper / lower diagonal blocks.  Differ by:
-//   (a) tensor piece sign in Delta_diag (C^T sigma^T C = -sigma)
+// Upper / lower diagonal blocks differ in:
+//   (a) +X vs -X sign on the aux insertion
 //   (b) clover prefactor sign and color-transposed F (Cstar M_22 = C^T D^T C)
-// Clover is added only when (csw != 0 && clover != nullptr) — defaults give
-// the no-clover behavior so existing callers continue to work.
 inline void DtxqcdBuildUpperBlock24(double mass,
                                     const DtxqcdSiteAux &aux,
                                     const DtxqcdSpinMatrices &spin,
@@ -307,24 +282,31 @@ inline void DtxqcdBuildLowerBlock24(double mass,
     DtxqcdAddCloverToDiagBlock24(csw, *clover, spin, M, /*lower_block=*/true);
 }
 
-// Off-diagonal block: 2 d gamma5 + 2 n.  Identity in flavor; color matrix
-// d, n; gamma5 vs identity in spin.  Hermitian when d, n are Hermitian color
-// matrices (d, n commute with gamma5 because they live on disjoint indices).
+// Off-diagonal block: d^{ij}_{ab} gamma5 + n^{ij}_{ab}.  No factor of 2 (v2).
+// Acts on combined (flavor, color) index, diagonal in spin (n piece) or
+// gamma5 in spin (d piece).
 inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
                                       const DtxqcdSpinMatrices& spin,
                                       Eigen::MatrixXcd& M) {
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int a = 0; a < DtxqcdNf; ++a) {
-    for (int alpha = 0; alpha < Ns; ++alpha) {
-      for (int beta = 0; beta < Ns; ++beta) {
-        ComplexD g5_ab = spin.gamma5(alpha, beta);
-        for (int i = 0; i < Nc; ++i) {
-          for (int j = 0; j < Nc; ++j) {
+    for (int b = 0; b < DtxqcdNf; ++b) {
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = 0; j < Nc; ++j) {
+          int kab1 = DtxqcdSiteAux::Kab(a, i);
+          int kab2 = DtxqcdSiteAux::Kab(b, j);
+          ComplexD d_ij_ab = aux.d(kab1, kab2);
+          ComplexD n_ij_ab = aux.n(kab1, kab2);
+          for (int alpha = 0; alpha < Ns; ++alpha) {
             int row = DtxqcdSiteIdx24(a, alpha, i);
-            int col = DtxqcdSiteIdx24(a, beta,  j);
-            ComplexD val = ComplexD(2.0, 0) * aux.d(i, j) * g5_ab;
-            if (alpha == beta) val += ComplexD(2.0, 0) * aux.n(i, j);
-            M(row, col) += val;
+            // n: diagonal in spin
+            int col = DtxqcdSiteIdx24(b, alpha, j);
+            M(row, col) += n_ij_ab;
+            // d: gamma5 in spin
+            for (int beta = 0; beta < Ns; ++beta) {
+              int col2 = DtxqcdSiteIdx24(b, beta, j);
+              M(row, col2) += d_ij_ab * spin.gamma5(alpha, beta);
+            }
           }
         }
       }
@@ -333,9 +315,7 @@ inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
 }
 
 // Assemble the doubled 48x48 site matrix.  Off-diagonal block goes into both
-// the (upper-right) and (lower-left) positions.  The off-diagonal is
-// Hermitian individually, so this assignment makes M48 Hermitian when the
-// diagonal blocks are.
+// upper-right and lower-left positions.
 inline void DtxqcdAssembleDoubled48(const Eigen::MatrixXcd& M_upper,
                                     const Eigen::MatrixXcd& M_lower,
                                     const Eigen::MatrixXcd& M_offdiag,
@@ -348,17 +328,14 @@ inline void DtxqcdAssembleDoubled48(const Eigen::MatrixXcd& M_upper,
   M48.block(N, N, N, N) = M_lower;
 }
 
-// log |det(M48)| via Eigen partial-pivot LU.  Phase / sign tracking is left
-// to DTXQCDPfaffianSignDiagnostic (Phase 6).
+// log |det(M48)| via Eigen partial-pivot LU.
 inline RealD DtxqcdLogAbsDet48(const Eigen::MatrixXcd& M48) {
   Eigen::PartialPivLU<Eigen::MatrixXcd> lu(M48);
   return std::log(std::abs(lu.determinant()));
 }
 
-// Per-site LU-factor and inverse.  Used by the EO operator to precompute
-// Mooee^{-1} once per ImportAux.  Returns the LU factorization object for
-// downstream solves; the caller can also call .inverse() if a dense inverse
-// is needed.
+// Per-site LU factor and inverse.  Used by the EO operator to precompute
+// Mooee^{-1} once per ImportAux.
 inline Eigen::PartialPivLU<Eigen::MatrixXcd>
 DtxqcdLU48(const Eigen::MatrixXcd& M48) {
   return Eigen::PartialPivLU<Eigen::MatrixXcd>(M48);

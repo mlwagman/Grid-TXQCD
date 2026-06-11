@@ -60,7 +60,8 @@ int main(int argc, char **argv) {
       exitcode = 1;
     } else {
       uint64_t sz = ifs.tellg();
-      uint64_t expected = 16 + (uint64_t)Grid.gSites() * 42 * 8;
+      // v2 payload: 4 * 36 (CF Hermitian) + 2 * 1 (scalars) = 146 doubles/site.
+      uint64_t expected = 16 + (uint64_t)Grid.gSites() * 146 * 8;
       if (sz != expected) {
         std::cout << GridLogError << "[FAIL] sidecar size " << sz
                   << " != expected " << expected << std::endl;
@@ -74,12 +75,12 @@ int main(int argc, char **argv) {
       ifs.seekg(0);
       uint32_t magic = 0;
       ifs.read(reinterpret_cast<char *>(&magic), sizeof(magic));
-      if (magic != 0x44545841u) {
+      if (magic != 0x44545832u) {
         std::cout << GridLogError << "[FAIL] magic 0x" << std::hex << magic
-                  << std::dec << " != 0x44545841 ('DTXA')" << std::endl;
+                  << std::dec << " != 0x44545832 ('DTX2')" << std::endl;
         exitcode = 1;
       } else {
-        std::cout << GridLogMessage << "[ok] magic 0x44545841 ('DTXA')"
+        std::cout << GridLogMessage << "[ok] magic 0x44545832 ('DTX2')"
                   << std::endl;
       }
     }
@@ -106,9 +107,10 @@ int main(int argc, char **argv) {
 
   { LatticeDtxqcdSigma dx(&Grid); dx = Uorig.sigma - Uloaded.sigma; check_diff("sigma", norm2(dx)); }
   { LatticeDtxqcdPi    dx(&Grid); dx = Uorig.pi    - Uloaded.pi;    check_diff("pi",    norm2(dx)); }
-  { LatticeDtxqcdT     dx(&Grid); dx = Uorig.t     - Uloaded.t;     check_diff("t",     norm2(dx)); }
   { LatticeDtxqcdD     dx(&Grid); dx = Uorig.d     - Uloaded.d;     check_diff("d",     norm2(dx)); }
   { LatticeDtxqcdN     dx(&Grid); dx = Uorig.n     - Uloaded.n;     check_diff("n",     norm2(dx)); }
+  { LatticeDtxqcdS     dx(&Grid); dx = Uorig.s     - Uloaded.s;     check_diff("s",     norm2(dx)); }
+  { LatticeDtxqcdP     dx(&Grid); dx = Uorig.p     - Uloaded.p;     check_diff("p",     norm2(dx)); }
   { LatticeGaugeField  dU(&Grid); dU = Uorig.U     - Uloaded.U;     check_diff("U",     norm2(dU)); }
 
   std::cout << GridLogMessage

@@ -1,17 +1,17 @@
 #pragma once
-// Composite FieldImplementation for DTXQCD HMC.
+// Composite FieldImplementation for DTXQCD HMC (v2 roster).
 //
 // Delegates gauge to PeriodicGimplR (exp-update via Ta projection). Aux fields:
-//   sigma^A, pi^A : real-projected vComplex triplets (imag held at 0).
-//   t^A_{mu,nu}   : real-projected per Pauli component, antisymmetric in (mu,nu).
-//   d, n          : Hermitian-projected color matrices (same as TXQCD's s, p).
+//   sigma, pi, d, n : color-flavor 6x6 traceless Hermitian (combined index
+//                     (i,a) x (j,b)).  Stored as full iMatrix<iMatrix<vComplex,
+//                     Nc>, Nf>; HermitizeAndTracelessInPlace enforces invariants
+//                     after every generation, projection, force update.
+//   s, p            : singlet scalars (real DOF in real part of vComplex).
 //
-// Momentum conjugate to each aux field has the same site-tensor type and
-// projection constraints; quadratic kinetic piece is (1/2) Tr P^2 (or sum_A
-// (P^A)^2 for triplets), accumulated into FieldSquareNorm.  Scalar-field
-// momentum convention follows TXQCDCompositeImpl: FieldSquareNorm subtracts
-// (1/2) of each Hermitian / real-projected norm so the integrator update
-// P -= F * ep * HMC_MOMENTUM_DENOMINATOR is symplectic against dq/dt = P.
+// Momentum conjugate to each aux field has the same site-tensor type and the
+// same projection constraints.  Quadratic kinetic piece is (1/2) Tr P^2 (or
+// (P)^2 for scalars), accumulated into FieldSquareNorm with the standard
+// scalar-field minus sign that mirrors TXQCDCompositeImpl.
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDField.h>
 #include <Grid/qcd/action/gauge/GaugeImplementations.h>
@@ -20,75 +20,66 @@ NAMESPACE_BEGIN(Grid);
 
 // ---------- field-type projectors ----------
 
-// Real projection: X <- 0.5 * (X + conjugate(X)).  For vComplex storage this
-// zeros the imaginary part component-wise, leaving the physical real DOF.
-template <class LatticeT>
-inline void DtxqcdRealProjectInPlace(LatticeT &X) {
-  X = 0.5 * (X + conjugate(X));
-}
-
-// Real Gaussian: complex Gaussian fill, then real-project.  Variance: gaussian
-// fills re,im each ~ N(0,1); after projection the real part has variance 1.
-// (Half the RNG work is wasted on the imag part — acceptable for v1.)
-template <class LatticeT>
-inline void DtxqcdRealGaussian(GridParallelRNG &pRNG, LatticeT &X) {
-  gaussian(pRNG, X);
-  DtxqcdRealProjectInPlace(X);
-}
-
-// Hermitian projection / Gaussian for d, n (iScalar<iScalar<iMatrix<vComplex,Nc>>>).
-template <class LatticeMat>
-inline void DtxqcdHermitianProjectInPlace(LatticeMat &X) {
+// Hermitize + traceless project on a CF-matrix lattice field.  Operates on the
+// combined (a,i)(b,j) 6x6 index space: M_{(a,i)(b,j)} <- 0.5 (M + adj(M)) then
+// subtract Tr(M)/NfNc on the diagonal.
+inline void DtxqcdHermitizeAndTracelessCFInPlace(LatticeDtxqcdSigma &X) {
+  // Step 1: Hermitize on the combined index.  Grid's adj() on
+  // iMatrix<iMatrix<vComplex, Nc>, Nf> does the right thing -- it conjugates
+  // and transposes both the outer (flavor) and inner (color) iMatrix layers,
+  // which is exactly the combined-index Hermitian conjugate.
   X = 0.5 * (X + adj(X));
-}
 
-template <class LatticeMat>
-inline void DtxqcdHermitianGaussian(GridParallelRNG &pRNG, LatticeMat &X) {
-  gaussian(pRNG, X);
-  DtxqcdHermitianProjectInPlace(X);
-}
-
-// Antisymmetrize the (mu,nu) tensor of t^A_{mu,nu}: t_{mu,nu} = -t_{nu,mu},
-// diagonal zero.  Operates per Pauli component on the real-projected field.
-inline void DtxqcdAntisymmetrizeTensor(LatticeDtxqcdT &T) {
-  autoView(T_v, T, CpuWrite);
-  GridBase *grid = T.Grid();
+  // Step 2: subtract the combined-index trace.  Need Tr = sum_{a,i} X(a,a)(i,i).
+  // Built per-site with a thread_for; only DtxqcdNfNc diagonal entries.
+  autoView(Xv, X, CpuWrite);
+  GridBase *grid = X.Grid();
   thread_for(ss, grid->oSites(), {
-    for (int mu = 0; mu < Nd; ++mu) {
-      T_v[ss]()(mu, mu) = Zero();
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        auto upper = T_v[ss]()(mu, nu);
-        auto lower = T_v[ss]()(nu, mu);
-        auto anti = 0.5 * (upper - lower);
-        T_v[ss]()(mu, nu) =  anti;
-        T_v[ss]()(nu, mu) = -anti;
+    auto tr_v = Xv[ss]()(0, 0)(0, 0);
+    zeroit(tr_v);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int i = 0; i < Nc; ++i) {
+        tr_v = tr_v + Xv[ss]()(a, a)(i, i);
+      }
+    }
+    auto shift = tr_v * (1.0 / RealD(DtxqcdNfNc));
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int i = 0; i < Nc; ++i) {
+        Xv[ss]()(a, a)(i, i) = Xv[ss]()(a, a)(i, i) - shift;
       }
     }
   });
 }
 
-// Gaussian draw for t^A_{mu,nu}: complex Gaussian → real-project per Pauli
-// component → antisymmetrize in (mu,nu) → rescale by sqrt(2) so that the
-// independent DOFs of the antisym representation end up with unit variance
-// (the antisym projector halves per-DOF variance).
-inline void DtxqcdGaussianAntisymTensor(GridParallelRNG &pRNG,
-                                        LatticeDtxqcdT &T) {
-  gaussian(pRNG, T);
-  DtxqcdRealProjectInPlace(T);
-  DtxqcdAntisymmetrizeTensor(T);
-  T = T * std::sqrt(2.0);
+// Gaussian sample for CF matrix: complex Gaussian fill of all NfNc^2 entries,
+// then Hermitian + traceless project.  Variance of the resulting Hermitian
+// matrix entries: off-diagonal ~ N(0, 1/2) in re/im each; diagonal ~ N(0, 1)
+// real -- standard for symmetric Hermitian Gaussian (GUE) ensemble.
+inline void DtxqcdHermitianCFGaussian(GridParallelRNG &pRNG,
+                                       LatticeDtxqcdSigma &X) {
+  gaussian(pRNG, X);
+  DtxqcdHermitizeAndTracelessCFInPlace(X);
 }
 
-// Squared norms.  For real-projected fields, norm2 collapses to sum of real^2
-// (imag=0).  Antisymmetric tensor: (1/2) norm2 (each (mu,nu) counted twice
-// in the full mu,nu sum).
-template <class LatticeT>
-inline RealD DtxqcdTripletSquareNorm(LatticeT &X) { return norm2(X); }
+// Real projection for singlet scalar (zero out imag part of the vComplex
+// container).  Same idiom as the v1 triplet real-projection.
+inline void DtxqcdRealScalarProjectInPlace(LatticeDtxqcdS &X) {
+  X = 0.5 * (X + conjugate(X));
+}
 
-template <class LatticeMat>
-inline RealD DtxqcdHermitianSquareNorm(LatticeMat &X) { return norm2(X); }
+// Gaussian sample for singlet scalar: standard complex Gaussian fill then
+// real-project.  Variance of the resulting real part = 1.
+inline void DtxqcdRealScalarGaussian(GridParallelRNG &pRNG, LatticeDtxqcdS &X) {
+  gaussian(pRNG, X);
+  DtxqcdRealScalarProjectInPlace(X);
+}
 
-inline RealD DtxqcdTensorSquareNorm(LatticeDtxqcdT &T) { return norm2(T) / 2.0; }
+// Squared norms.  For Hermitian CF matrices, norm2 sums |M_{ij,ab}|^2 (this
+// equals Tr(M^dag M) = Tr(M^2) for Hermitian M).
+inline RealD DtxqcdCFSquareNorm(LatticeDtxqcdSigma &X) { return norm2(X); }
+
+// For real-projected scalar, norm2 is the sum of (real part)^2.
+inline RealD DtxqcdScalarSquareNorm(LatticeDtxqcdS &X) { return norm2(X); }
 
 // ---------- FieldImplementation static interface ----------
 
@@ -108,23 +99,23 @@ class DTXQCDCompositeImpl {
     // P -= F * ep * HMC_MOMENTUM_DENOMINATOR is balanced against dq/dt = P
     // for each aux slot.
     RealD scale = ::sqrt(HMC_MOMENTUM_DENOMINATOR);
-    DtxqcdRealGaussian(pRNG, P.sigma);  P.sigma = scale * P.sigma;
-    DtxqcdRealGaussian(pRNG, P.pi);     P.pi    = scale * P.pi;
-    DtxqcdGaussianAntisymTensor(pRNG, P.t);  P.t = scale * P.t;
-    DtxqcdHermitianGaussian(pRNG, P.d); P.d     = scale * P.d;
-    DtxqcdHermitianGaussian(pRNG, P.n); P.n     = scale * P.n;
+    DtxqcdHermitianCFGaussian(pRNG, P.sigma);  P.sigma = scale * P.sigma;
+    DtxqcdHermitianCFGaussian(pRNG, P.pi);     P.pi    = scale * P.pi;
+    DtxqcdHermitianCFGaussian(pRNG, P.d);      P.d     = scale * P.d;
+    DtxqcdHermitianCFGaussian(pRNG, P.n);      P.n     = scale * P.n;
+    DtxqcdRealScalarGaussian(pRNG, P.s);       P.s     = scale * P.s;
+    DtxqcdRealScalarGaussian(pRNG, P.p);       P.p     = scale * P.p;
   }
 
   static inline Field projectForce(Field &Fforce) {
     Field out(Fforce.Grid());
     out.U = PeriodicGimplR::projectForce(Fforce.U);
-    out.sigma = Fforce.sigma;  DtxqcdRealProjectInPlace(out.sigma);
-    out.pi    = Fforce.pi;     DtxqcdRealProjectInPlace(out.pi);
-    out.t     = Fforce.t;
-    DtxqcdRealProjectInPlace(out.t);
-    DtxqcdAntisymmetrizeTensor(out.t);
-    out.d     = Fforce.d;      DtxqcdHermitianProjectInPlace(out.d);
-    out.n     = Fforce.n;      DtxqcdHermitianProjectInPlace(out.n);
+    out.sigma = Fforce.sigma;  DtxqcdHermitizeAndTracelessCFInPlace(out.sigma);
+    out.pi    = Fforce.pi;     DtxqcdHermitizeAndTracelessCFInPlace(out.pi);
+    out.d     = Fforce.d;      DtxqcdHermitizeAndTracelessCFInPlace(out.d);
+    out.n     = Fforce.n;      DtxqcdHermitizeAndTracelessCFInPlace(out.n);
+    out.s     = Fforce.s;      DtxqcdRealScalarProjectInPlace(out.s);
+    out.p     = Fforce.p;      DtxqcdRealScalarProjectInPlace(out.p);
     return out;
   }
 
@@ -132,104 +123,88 @@ class DTXQCDCompositeImpl {
     PeriodicGimplR::update_field(P.U, U.U, ep);
     U.sigma = U.sigma + P.sigma * ep;
     U.pi    = U.pi    + P.pi    * ep;
-    U.t     = U.t     + P.t     * ep;
     U.d     = U.d     + P.d     * ep;
     U.n     = U.n     + P.n     * ep;
+    U.s     = U.s     + P.s     * ep;
+    U.p     = U.p     + P.p     * ep;
   }
 
   static inline RealD FieldSquareNorm(Field &U) {
     // Gauge momenta: antihermitian, Tr(P^2) < 0 naturally.
-    // Aux momenta: real-projected / Hermitian, Tr(P^2) > 0; scalar-field
+    // Aux momenta: Hermitian / real-projected, Tr(P^2) > 0; scalar-field
     // convention requires -Tr(P^2)/2 so dH/dt vanishes.
     RealD total = PeriodicGimplR::FieldSquareNorm(U.U);
-    total -= DtxqcdTripletSquareNorm(U.sigma)  / 2.0;
-    total -= DtxqcdTripletSquareNorm(U.pi)     / 2.0;
-    total -= DtxqcdTensorSquareNorm(U.t)       / 2.0;
-    total -= DtxqcdHermitianSquareNorm(U.d)    / 2.0;
-    total -= DtxqcdHermitianSquareNorm(U.n)    / 2.0;
+    total -= DtxqcdCFSquareNorm(U.sigma)  / 2.0;
+    total -= DtxqcdCFSquareNorm(U.pi)     / 2.0;
+    total -= DtxqcdCFSquareNorm(U.d)      / 2.0;
+    total -= DtxqcdCFSquareNorm(U.n)      / 2.0;
+    total -= DtxqcdScalarSquareNorm(U.s)  / 2.0;
+    total -= DtxqcdScalarSquareNorm(U.p)  / 2.0;
     return total;
   }
 
   static inline void Project(Field &U) {
     PeriodicGimplR::Project(U.U);
-    DtxqcdRealProjectInPlace(U.sigma);
-    DtxqcdRealProjectInPlace(U.pi);
-    DtxqcdRealProjectInPlace(U.t);
-    DtxqcdAntisymmetrizeTensor(U.t);
-    DtxqcdHermitianProjectInPlace(U.d);
-    DtxqcdHermitianProjectInPlace(U.n);
+    DtxqcdHermitizeAndTracelessCFInPlace(U.sigma);
+    DtxqcdHermitizeAndTracelessCFInPlace(U.pi);
+    DtxqcdHermitizeAndTracelessCFInPlace(U.d);
+    DtxqcdHermitizeAndTracelessCFInPlace(U.n);
+    DtxqcdRealScalarProjectInPlace(U.s);
+    DtxqcdRealScalarProjectInPlace(U.p);
   }
 
   static inline void HotConfiguration(GridParallelRNG &pRNG, Field &U) {
     PeriodicGimplR::HotConfiguration(pRNG, U.U);
-    DtxqcdRealGaussian(pRNG, U.sigma);
-    DtxqcdRealGaussian(pRNG, U.pi);
-    DtxqcdGaussianAntisymTensor(pRNG, U.t);
-    DtxqcdHermitianGaussian(pRNG, U.d);
-    DtxqcdHermitianGaussian(pRNG, U.n);
+    DtxqcdHermitianCFGaussian(pRNG, U.sigma);
+    DtxqcdHermitianCFGaussian(pRNG, U.pi);
+    DtxqcdHermitianCFGaussian(pRNG, U.d);
+    DtxqcdHermitianCFGaussian(pRNG, U.n);
+    DtxqcdRealScalarGaussian(pRNG, U.s);
+    DtxqcdRealScalarGaussian(pRNG, U.p);
   }
 
   static inline void TepidConfiguration(GridParallelRNG &pRNG, Field &U) {
     PeriodicGimplR::TepidConfiguration(pRNG, U.U);
     U.sigma = Zero();
     U.pi    = Zero();
-    U.t     = Zero();
     U.d     = Zero();
     U.n     = Zero();
+    U.s     = Zero();
+    U.p     = Zero();
   }
 
   static inline void ColdConfiguration(GridParallelRNG &pRNG, Field &U) {
     PeriodicGimplR::ColdConfiguration(pRNG, U.U);
     U.sigma = Zero();
     U.pi    = Zero();
-    U.t     = Zero();
     U.d     = Zero();
     U.n     = Zero();
+    U.s     = Zero();
+    U.p     = Zero();
   }
 
   // Fill all aux slots with mean-zero Gaussian samples at the physical
-  // saddle variance Var = 1/lambda^2 per independent component.  Same
-  // pattern as TXQCDCompositeImpl::FillAuxFields (without the optional
-  // Sigma saddle shift -- DTXQCD has no analogue of the TXQCD <q-bar q>
-  // saddle structure at this stage; if/when a non-trivial saddle is
-  // identified for the diquark-tensor variant, add a Sigma overload here).
-  //
-  // For sigma^A, pi^A, t^A: stored as triplets, real-projected, so the
-  // base DtxqcdRealGaussian gives Var=1 per real DOF and we scale by 1/lambda.
-  // For d, n: Hermitian color matrices, DtxqcdHermitianGaussian Var=1/2 per
-  // real DOF; we still scale by 1/lambda to match TXQCD's HermitianGaussian
-  // convention.
+  // saddle variance Var = 1/lambda^2 per independent component.  The
+  // CF Hermitian fields each have NfNc^2 - 1 = 35 independent DOFs; the
+  // singlet scalars each have 1 DOF.  AUX_FLUCT_LAMBDA optionally
+  // decouples the init fluctuation width from the physical lambda (cf.
+  // v1 use case in the deleted TXQCD analog).
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
                                     RealD lambda) {
-    // Optional fluctuation-scale decoupling, mirroring TXQCD's
-    // AUX_FLUCT_LAMBDA: set the env var to use width 1/lambda_var while
-    // the action still couples at the physical lambda.  The DTXQCD use
-    // case is cold-start initialisation -- at the production lambda (~3)
-    // the per-site 48x48 Mee picks up near-zero eigenvalues from outlier
-    // aux sites and Mpc^dag Mpc lambda_max explodes (measured 6e6 vs
-    // ~30 at lambda=10 on a 4^3 x 8 cold gauge).  Starting at the larger
-    // fluctuation-lambda 10-30 keeps the operator well-conditioned for
-    // the first few trajectories while the HMC dynamics evolve toward
-    // the physical width.
     RealD lambda_var = lambda;
     if (const char *e = std::getenv("AUX_FLUCT_LAMBDA"); e && *e) {
       lambda_var = std::atof(e);
     }
-    RealD s = 1.0 / lambda_var;
-    DtxqcdRealGaussian(pRNG, U.sigma);  U.sigma = s * U.sigma;
-    DtxqcdRealGaussian(pRNG, U.pi);     U.pi    = s * U.pi;
-    DtxqcdGaussianAntisymTensor(pRNG, U.t);
-    U.t = (s / std::sqrt(2.0)) * U.t;
-    DtxqcdHermitianGaussian(pRNG, U.d); U.d     = s * U.d;
-    DtxqcdHermitianGaussian(pRNG, U.n); U.n     = s * U.n;
+    RealD scale = 1.0 / lambda_var;
+    DtxqcdHermitianCFGaussian(pRNG, U.sigma);  U.sigma = scale * U.sigma;
+    DtxqcdHermitianCFGaussian(pRNG, U.pi);     U.pi    = scale * U.pi;
+    DtxqcdHermitianCFGaussian(pRNG, U.d);      U.d     = scale * U.d;
+    DtxqcdHermitianCFGaussian(pRNG, U.n);      U.n     = scale * U.n;
+    DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale * U.s;
+    DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale * U.p;
   }
 
-  // Weak-field gauge + thermal aux init.  This is the recommended cold-start
-  // for DTXQCD HMC: U links near identity (scale wf_scale ~ 0.1) plus aux
-  // fields drawn at their physical Var=1/lambda^2 saddle width.  Avoids the
-  // exact-aux=0 spectral degeneracy that makes the doubled M block-diagonal
-  // (and breaks multi-shift CG convergence on cold starts).  Direct sibling
-  // of TXQCDCompositeImpl::ThermalAuxConfiguration.
+  // Weak-field gauge + thermal aux init.  Same recipe as v1.
   static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
                                               RealD lambda,
                                               double wf_scale = 0.1) {

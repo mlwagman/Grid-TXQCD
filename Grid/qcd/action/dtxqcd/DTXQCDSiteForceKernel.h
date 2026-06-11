@@ -1,28 +1,33 @@
 #pragma once
-// Per-site DTXQCD aux/gauge-clover force kernels, parameterized over a
+// Per-site v2 DTXQCD aux/gauge-clover force kernels.  Parameterised over a
 // "weight-matrix lookup" callable Inv(R, C) -> ComplexD that abstracts what
-// stands in for M_ee_48^{-1}(x) in the trace formula.
+// stands in for M_ee_48^{-1}(x) (or the per-site rank-1 RHMC bilinear) in the
+// trace formula.
 //
-// Two callers:
+// Two callers (unchanged from v1):
 //   * DTXQCDLogDetCloverEOAction:
-//        Inv(R, C) is literally the (R, C) entry of the per-site 48x48 inverse
-//        of M_ee_48(x).  Force formula at each even site x:
-//             dS/dX(x) = -Tr( M^{-1}(x) * dM(x)/dX )
-//                      = -sum_{R,C} dM_{RC}/dX(x) * M^{-1}_{CR}(x)
-//        (so the "Inv(row, col)" passed in is the matrix entry M^{-1}[row][col],
-//        which appears multiplied by dM[col][row] in the trace expression.)
+//        Inv(R, C) = M^{-1}(x)[R][C].
+//        dS_LD/dX(x) = -sum_{R,C} dM_{RC}/dX(x) * Inv(C, R)
+//        (note the C<->R swap inside Inv -- that's the trace formula's
+//        M^{-1}_{C, R} read off as Inv(R, C) since we work with Inv keyed by
+//        the original (row, col) of M; the kernel handles the bookkeeping.)
 //
-//   * DTXQCDWilsonCloverRationalEOAction (per rational pole k):
-//        Inv(R, C) = conj(Y(x)[R]) * X(x)[C]  (a rank-1 bilinear), giving
-//             -2 Re < Y, dMpc/dX  X > = -2 Re sum_{R,C} dM_{RC}/dX * conj(Y_R) X_C
-//        at each odd site (with the analogous (Z, W) for the even-block term).
-//        The factor "-2 Re" is applied by the caller AFTER the kernel runs
-//        (kernel returns the unconjugated sum); see comments at end of file.
+//   * DTXQCDWilsonCloverRationalEOAction:
+//        Inv(R, C) = (0.5)*(conj(Y[C])*X[R] + conj(X[C])*Y[R])  -- symmetrised
+//        Wirtinger bilinear, after the multishift-CG solutions.
 //
-// The kernel updates per-site scalar-object force slots in-place (additive
-// in caller; the helpers assume callers have zeroed them or scaled them).
-// For LogDet the slots are overwritten (= per-site value), for RHMC they are
-// summed across poles with a coefficient.
+// Output kernels write WITHOUT the overall caller-supplied scaling (LogDet -1
+// or RHMC -2 alpha_k).  Caller multiplies after.
+//
+// v1 -> v2 changes:
+//   * sigma, pi, d, n force outputs now CF matrices (DtxqcdSiteCFMatrix) per
+//     site, not Pauli-triplet vectors.  Output type matches the input field
+//     scalar_object.
+//   * Drop tensor t force (no t field in v2).
+//   * Add singlet s, p force outputs.
+//   * +X/-X sign-flip between upper and lower diagonal blocks means the sigma
+//     and pi force contributions from the two blocks SUBTRACT instead of
+//     summing (v1 had same sign in both blocks).
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxFieldTypes.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
@@ -35,174 +40,180 @@ namespace DtxqcdSiteForceKernel {
 // have to repeat the typedef boilerplate.
 using SigSobj = typename LatticeDtxqcdSigma::vector_object::scalar_object;
 using PiSobj  = typename LatticeDtxqcdPi::vector_object::scalar_object;
-using TSobj   = typename LatticeDtxqcdT::vector_object::scalar_object;
 using DSobj   = typename LatticeDtxqcdD::vector_object::scalar_object;
 using NSobj   = typename LatticeDtxqcdN::vector_object::scalar_object;
+using SSobj   = typename LatticeDtxqcdS::vector_object::scalar_object;
+using PSobj   = typename LatticeDtxqcdP::vector_object::scalar_object;
 using CMsobj  = typename LatticeColourMatrix::vector_object::scalar_object;
 
 static constexpr int kDim24 = kDtxqcdSiteDim24;
 
 // ----------------------------------------------------------------------
-// Aux-field force kernel.  The factor "-coeff_*" prefactors are determined
-// inside the kernel from the dM/dX coefficients (1/sqrt(2), 2, i, ...).
-// The kernel writes WITHOUT the overall caller-supplied scaling; the caller
-// folds in the LogDet (-1) or RHMC (-2 Re alpha_k) afterwards.
+// Aux-field force kernel for the v2 roster (sigma, pi, d, n, s, p).
 //
-// Output convention (LogDet-style): each per-site sobj stores
-//     F_X(x) = -sum_{R,C} dM_{RC}/dX(x) * Inv(R, C)
-// so for LogDet, dS_LD/dX = sum_x F_X(x); and for RHMC, the caller multiplies
-// by 2 alpha_k and takes Re(...) per slot, then sums over poles.
+// dS/dX = -sum_{R,C} dM_{R,C}/dX * Inv(R, C)
+// (Inv(R, C) is keyed in the original M index convention; see header above.)
 //
-// (For RHMC: dS_RHMC/dX = -sum_k alpha_k * 2 Re sum_x [-F_X(x)]; i.e. the kernel
-// returns -dS/dX up to those scalar factors, with the bilinear-Inv plugged in.)
+// Block layout in M48:
+//   upper-left  block 0: rows/cols 0..23   -- (mass+4)I + X
+//   upper-right block 0,1: cols 24..47    -- d gamma5 + n
+//   lower-left  block 1,0:                 -- d gamma5 + n
+//   lower-right block 1: rows/cols 24..47  -- (mass+4)I - X
 // ----------------------------------------------------------------------
 template <class InvLookup>
 inline void AuxForceAt(InvLookup Inv,
                        const DtxqcdSpinMatrices &spin,
                        SigSobj &sig_force,
                        PiSobj  &pi_force,
-                       TSobj   &t_force,
                        DSobj   &d_force,
-                       NSobj   &n_force) {
-  const auto &tau = DtxqcdPauliEigen();
-  const ComplexD inv_sqrt2(1.0 / std::sqrt(2.0), 0.0);
-
+                       NSobj   &n_force,
+                       SSobj   &s_force,
+                       PSobj   &p_force) {
   sig_force = Zero();
   pi_force  = Zero();
-  t_force   = Zero();
   d_force   = Zero();
   n_force   = Zero();
+  s_force   = Zero();
+  p_force   = Zero();
 
-  // ---- sigma^A force ----------------------------------------------------
-  for (int A = 0; A < DtxqcdNTriplet; ++A) {
-    ComplexD val(0, 0);
-    for (int a = 0; a < DtxqcdNf; ++a)
-      for (int b = 0; b < DtxqcdNf; ++b) {
-        ComplexD tab = tau[A](a, b);
-        if (tab == ComplexD(0, 0)) continue;
-        ComplexD s(0, 0);
-        for (int alpha = 0; alpha < Ns; ++alpha)
-          for (int i = 0; i < Nc; ++i) {
-            int row_b = DtxqcdSiteIdx24(b, alpha, i);
-            int col_a = DtxqcdSiteIdx24(a, alpha, i);
-            s += Inv(row_b, col_a)
-               + Inv(kDim24 + row_b, kDim24 + col_a);
+  // ---- sigma^{ij}_{ab} force ---------------------------------------------
+  //
+  // sigma enters M with +1 on upper diagonal, -1 on lower diagonal, diagonal
+  // in spin (delta_{alpha, beta}).  So:
+  //
+  //   dM_{(a, alpha, i, blk), (b, alpha, j, blk)} / dsigma^{ij}_{ab}
+  //     = +1 (blk=0) or -1 (blk=1)
+  //
+  //   F_sigma^{ij}_{ab} = -sum_alpha [ Inv((a,alpha,i,0), (b,alpha,j,0))
+  //                                  - Inv((a,alpha,i,1), (b,alpha,j,1)) ]
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    for (int b = 0; b < DtxqcdNf; ++b) {
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = 0; j < Nc; ++j) {
+          ComplexD val(0, 0);
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            int ra = DtxqcdSiteIdx24(a, alpha, i);
+            int cb = DtxqcdSiteIdx24(b, alpha, j);
+            val += Inv(ra, cb) - Inv(kDim24 + ra, kDim24 + cb);
           }
-        val += tab * s;
+          sig_force()(a, b)(i, j) = -val;
+        }
       }
-    sig_force()()(A) = -inv_sqrt2 * val;
+    }
   }
 
-  // ---- pi^A force --------------------------------------------------------
-  for (int A = 0; A < DtxqcdNTriplet; ++A) {
-    ComplexD val(0, 0);
-    for (int a = 0; a < DtxqcdNf; ++a)
-      for (int b = 0; b < DtxqcdNf; ++b) {
-        ComplexD tab = tau[A](a, b);
-        if (tab == ComplexD(0, 0)) continue;
-        ComplexD inner(0, 0);
-        for (int alpha = 0; alpha < Ns; ++alpha)
-          for (int beta = 0; beta < Ns; ++beta) {
-            ComplexD g5 = spin.gamma5(alpha, beta);
-            if (g5 == ComplexD(0, 0)) continue;
-            for (int i = 0; i < Nc; ++i) {
-              int row_b_beta  = DtxqcdSiteIdx24(b, beta,  i);
-              int col_a_alpha = DtxqcdSiteIdx24(a, alpha, i);
-              inner += g5 * (Inv(row_b_beta, col_a_alpha)
-                           + Inv(kDim24 + row_b_beta,
-                                 kDim24 + col_a_alpha));
+  // ---- pi^{ij}_{ab} force ------------------------------------------------
+  //
+  // pi enters M with +/- gamma5(alpha, beta), upper/lower diagonal:
+  //
+  //   F_pi^{ij}_{ab} = -sum_{alpha,beta} gamma5(alpha, beta)
+  //                  * [ Inv((a,alpha,i,0), (b,beta,j,0))
+  //                    - Inv((a,alpha,i,1), (b,beta,j,1)) ]
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    for (int b = 0; b < DtxqcdNf; ++b) {
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = 0; j < Nc; ++j) {
+          ComplexD val(0, 0);
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int beta = 0; beta < Ns; ++beta) {
+              ComplexD g5 = spin.gamma5(alpha, beta);
+              if (g5 == ComplexD(0, 0)) continue;
+              int ra = DtxqcdSiteIdx24(a, alpha, i);
+              int cb = DtxqcdSiteIdx24(b, beta,  j);
+              val += g5 * (Inv(ra, cb) - Inv(kDim24 + ra, kDim24 + cb));
             }
           }
-        val += tab * inner;
-      }
-    pi_force()()(A) = -inv_sqrt2 * val;
-  }
-
-  // ---- t^A_{mu,nu} force -------------------------------------------------
-  const ComplexD ci(0.0, 1.0);
-  for (int mu = 0; mu < Nd; ++mu) {
-    for (int nu = mu + 1; nu < Nd; ++nu) {
-      int p_idx = -1;
-      {
-        int k = 0;
-        for (int m2 = 0; m2 < Nd; ++m2)
-          for (int n2 = m2 + 1; n2 < Nd; ++n2) {
-            if (m2 == mu && n2 == nu) p_idx = k;
-            ++k;
-          }
-      }
-      for (int A = 0; A < DtxqcdNTriplet; ++A) {
-        ComplexD val(0, 0);
-        for (int a = 0; a < DtxqcdNf; ++a)
-          for (int b = 0; b < DtxqcdNf; ++b) {
-            ComplexD tab = tau[A](a, b);
-            if (tab == ComplexD(0, 0)) continue;
-            ComplexD inner(0, 0);
-            for (int alpha = 0; alpha < Ns; ++alpha)
-              for (int beta = 0; beta < Ns; ++beta) {
-                ComplexD smn = spin.sigma_munu[p_idx](alpha, beta);
-                if (smn == ComplexD(0, 0)) continue;
-                for (int i = 0; i < Nc; ++i) {
-                  int row_b_beta  = DtxqcdSiteIdx24(b, beta,  i);
-                  int col_a_alpha = DtxqcdSiteIdx24(a, alpha, i);
-                  inner += smn * (Inv(row_b_beta, col_a_alpha)
-                                - Inv(kDim24 + row_b_beta,
-                                      kDim24 + col_a_alpha));
-                }
-              }
-            val += tab * inner;
-          }
-        ComplexD t_A = -ci * val;
-        t_force()(mu, nu)(A) =  t_A;
-        t_force()(nu, mu)(A) = -t_A;
-      }
-    }
-  }
-
-  // ---- d^{ij} force (off-diagonal, +2 gamma5) ---------------------------
-  for (int k = 0; k < Nc; ++k) {
-    for (int l = 0; l < Nc; ++l) {
-      ComplexD val(0, 0);
-      for (int a = 0; a < DtxqcdNf; ++a)
-        for (int alpha = 0; alpha < Ns; ++alpha)
-          for (int beta = 0; beta < Ns; ++beta) {
-            ComplexD g5 = spin.gamma5(alpha, beta);
-            if (g5 == ComplexD(0, 0)) continue;
-            int u_a_alpha_k = DtxqcdSiteIdx24(a, alpha, k);
-            int u_a_beta_l  = DtxqcdSiteIdx24(a, beta,  l);
-            val += g5 * (Inv(kDim24 + u_a_beta_l, u_a_alpha_k)
-                       + Inv(u_a_beta_l, kDim24 + u_a_alpha_k));
-          }
-      d_force()()(k, l) = ComplexD(-2.0, 0.0) * val;
-    }
-  }
-
-  // ---- n^{ij} force (off-diagonal, +2 identity) -------------------------
-  for (int k = 0; k < Nc; ++k) {
-    for (int l = 0; l < Nc; ++l) {
-      ComplexD val(0, 0);
-      for (int a = 0; a < DtxqcdNf; ++a)
-        for (int alpha = 0; alpha < Ns; ++alpha) {
-          int u_a_alpha_k = DtxqcdSiteIdx24(a, alpha, k);
-          int u_a_alpha_l = DtxqcdSiteIdx24(a, alpha, l);
-          val += Inv(kDim24 + u_a_alpha_l, u_a_alpha_k)
-               + Inv(u_a_alpha_l, kDim24 + u_a_alpha_k);
+          pi_force()(a, b)(i, j) = -val;
         }
-      n_force()()(k, l) = ComplexD(-2.0, 0.0) * val;
+      }
     }
+  }
+
+  // ---- d^{ij}_{ab} force (off-diagonal, +gamma5, both upper-right and lower-left)
+  //
+  //   dM_{(a,alpha,i,0), (b,beta,j,1)} / dd^{ij}_{ab} = +gamma5(alpha, beta)
+  //   dM_{(a,alpha,i,1), (b,beta,j,0)} / dd^{ij}_{ab} = +gamma5(alpha, beta)
+  //
+  //   F_d^{ij}_{ab} = -sum_{alpha,beta} gamma5(alpha, beta)
+  //               * [ Inv((a,alpha,i,0), (b,beta,j,1))
+  //                 + Inv((a,alpha,i,1), (b,beta,j,0)) ]
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    for (int b = 0; b < DtxqcdNf; ++b) {
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = 0; j < Nc; ++j) {
+          ComplexD val(0, 0);
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            for (int beta = 0; beta < Ns; ++beta) {
+              ComplexD g5 = spin.gamma5(alpha, beta);
+              if (g5 == ComplexD(0, 0)) continue;
+              int ra = DtxqcdSiteIdx24(a, alpha, i);
+              int cb = DtxqcdSiteIdx24(b, beta,  j);
+              val += g5 * (Inv(ra, kDim24 + cb) + Inv(kDim24 + ra, cb));
+            }
+          }
+          d_force()(a, b)(i, j) = -val;
+        }
+      }
+    }
+  }
+
+  // ---- n^{ij}_{ab} force (off-diagonal, +identity in spin) -----------------
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    for (int b = 0; b < DtxqcdNf; ++b) {
+      for (int i = 0; i < Nc; ++i) {
+        for (int j = 0; j < Nc; ++j) {
+          ComplexD val(0, 0);
+          for (int alpha = 0; alpha < Ns; ++alpha) {
+            int ra = DtxqcdSiteIdx24(a, alpha, i);
+            int cb = DtxqcdSiteIdx24(b, alpha, j);
+            val += Inv(ra, kDim24 + cb) + Inv(kDim24 + ra, cb);
+          }
+          n_force()(a, b)(i, j) = -val;
+        }
+      }
+    }
+  }
+
+  // ---- s singlet force (diagonal in (a==b, i==j), spin scalar, +/-) -------
+  //
+  //   F_s = -sum_a sum_alpha sum_i [ Inv((a,alpha,i,0), (a,alpha,i,0))
+  //                                - Inv((a,alpha,i,1), (a,alpha,i,1)) ]
+  {
+    ComplexD val(0, 0);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int alpha = 0; alpha < Ns; ++alpha) {
+        for (int i = 0; i < Nc; ++i) {
+          int r = DtxqcdSiteIdx24(a, alpha, i);
+          val += Inv(r, r) - Inv(kDim24 + r, kDim24 + r);
+        }
+      }
+    }
+    s_force()()() = -val;
+  }
+
+  // ---- p singlet force (diagonal in (a==b, i==j), gamma5 in spin, +/-) ----
+  {
+    ComplexD val(0, 0);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int alpha = 0; alpha < Ns; ++alpha) {
+        for (int beta = 0; beta < Ns; ++beta) {
+          ComplexD g5 = spin.gamma5(alpha, beta);
+          if (g5 == ComplexD(0, 0)) continue;
+          for (int i = 0; i < Nc; ++i) {
+            int ra = DtxqcdSiteIdx24(a, alpha, i);
+            int cb = DtxqcdSiteIdx24(a, beta,  i);
+            val += g5 * (Inv(ra, cb) - Inv(kDim24 + ra, kDim24 + cb));
+          }
+        }
+      }
+    }
+    p_force()()() = -val;
   }
 }
 
 // ----------------------------------------------------------------------
-// Per-site clover_sigma builder (dS/dF_{mu,nu, (i, j)} at site x), for the
-// Cmunu chain rule.  Same conventions as LogDet: result is
-//     cs(i, j) = -0.5 * csw * conj(   sum sigma(a, b)
-//                                       * [ Inv(b, j-col-upper, a, i-col-upper)
-//                                         - Inv(b, i-col-lower, a, j-col-lower) ] )
-// The conj() and -0.5 csw factors arise from Convention-B Cmunu input
-// (anti-Hermitian sigma_Grid) and Convention-A HMC integrator.  Caller's
-// final force gets an additional -0.5 from the Cmunu chain rule, applied
-// AFTER this kernel.
+// Per-site clover_sigma builder (unchanged from v1 -- clover only acts in
+// color and spin, never flavor; structure is identical).
 // ----------------------------------------------------------------------
 template <class InvLookup>
 inline void CloverSigmaAt(InvLookup Inv,

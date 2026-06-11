@@ -34,9 +34,10 @@ class DTXQCDGaugeActionAdapter : public Action<DTXQCDField> {
     inner.deriv(U.U, dSdU.U);
     dSdU.sigma = Zero();
     dSdU.pi    = Zero();
-    dSdU.t     = Zero();
     dSdU.d     = Zero();
     dSdU.n     = Zero();
+    dSdU.s     = Zero();
+    dSdU.p     = Zero();
   }
 
   GaugeAction &underlying() { return inner; }

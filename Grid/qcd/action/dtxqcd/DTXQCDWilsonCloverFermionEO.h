@@ -69,25 +69,28 @@ class DTXQCDWilsonCloverFermionEO {
                               RealD csw,
                               const LatticeDtxqcdSigma &sigma,
                               const LatticeDtxqcdPi    &pi,
-                              const LatticeDtxqcdT     &t,
                               const LatticeDtxqcdD     &d,
-                              const LatticeDtxqcdN     &n)
+                              const LatticeDtxqcdN     &n,
+                              const LatticeDtxqcdS     &s,
+                              const LatticeDtxqcdP     &p)
       : mass_(mass),
         csw_(csw),
         sigma_(sigma),
         pi_(pi),
-        t_(t),
         d_(d),
         n_(n),
+        s_(s),
+        p_(p),
         grid_(grid),
         rbgrid_(rbgrid),
         Umu_(U),
         meooe_(U, grid, rbgrid, mass),
         sigma_e_(&rbgrid), sigma_o_(&rbgrid),
         pi_e_(&rbgrid),    pi_o_(&rbgrid),
-        t_e_(&rbgrid),     t_o_(&rbgrid),
         d_e_(&rbgrid),     d_o_(&rbgrid),
         n_e_(&rbgrid),     n_o_(&rbgrid),
+        s_e_(&rbgrid),     s_o_(&rbgrid),
+        p_e_(&rbgrid),     p_o_(&rbgrid),
         inv_e_(&rbgrid),   inv_o_(&rbgrid),
         spin_(grid) {
     ImportFields();
@@ -111,12 +114,14 @@ class DTXQCDWilsonCloverFermionEO {
     pickCheckerboard(Odd,  sigma_o_, sigma_);
     pickCheckerboard(Even, pi_e_,    pi_);
     pickCheckerboard(Odd,  pi_o_,    pi_);
-    pickCheckerboard(Even, t_e_,     t_);
-    pickCheckerboard(Odd,  t_o_,     t_);
     pickCheckerboard(Even, d_e_,     d_);
     pickCheckerboard(Odd,  d_o_,     d_);
     pickCheckerboard(Even, n_e_,     n_);
     pickCheckerboard(Odd,  n_o_,     n_);
+    pickCheckerboard(Even, s_e_,     s_);
+    pickCheckerboard(Odd,  s_o_,     s_);
+    pickCheckerboard(Even, p_e_,     p_);
+    pickCheckerboard(Odd,  p_o_,     p_);
 
     // F_{mu,nu} from U (full grid) + per-CB copies (csw != 0 only).
     BuildFieldStrength();
@@ -165,17 +170,18 @@ class DTXQCDWilsonCloverFermionEO {
       int cb = in.upper.f[0].Checkerboard();
       const auto &sig = (cb == Even) ? sigma_e_ : sigma_o_;
       const auto &pp  = (cb == Even) ? pi_e_    : pi_o_;
-      const auto &tt  = (cb == Even) ? t_e_     : t_o_;
       const auto &dd  = (cb == Even) ? d_e_     : d_o_;
       const auto &nn  = (cb == Even) ? n_e_     : n_o_;
+      const auto &ss  = (cb == Even) ? s_e_     : s_o_;
+      const auto &qq  = (cb == Even) ? p_e_     : p_o_;
       const auto *fs  = (csw_ != 0.0)
                          ? ((cb == Even) ? &FS_e_ : &FS_o_)
                          : nullptr;
-      DtxqcdApplyMooeeDoubled(mass_, sig, pp, tt, dd, nn,
+      DtxqcdApplyMooeeDoubled(mass_, sig, pp, dd, nn, ss, qq,
                               in.upper, in.lower, out.upper, out.lower,
                               csw_, fs);
     } else {
-      DtxqcdApplyMooeeDoubled(mass_, sigma_, pi_, t_, d_, n_,
+      DtxqcdApplyMooeeDoubled(mass_, sigma_, pi_, d_, n_, s_, p_,
                               in.upper, in.lower, out.upper, out.lower,
                               csw_, (csw_ != 0.0 ? &FS_ : nullptr));
     }
@@ -294,8 +300,8 @@ class DTXQCDWilsonCloverFermionEO {
     GridBase *grid = in.Grid();
 
     DTXQCDFermionNf delta_u(grid), delta_l(grid);
-    DtxqcdApplyDeltaDiag(sigma_, pi_, t_, in.upper, delta_u);
-    DtxqcdApplyDeltaDiagLower(sigma_, pi_, t_, in.lower, delta_l);
+    DtxqcdApplyDeltaDiag     (sigma_, pi_, s_, p_, in.upper, delta_u);
+    DtxqcdApplyDeltaDiagLower(sigma_, pi_, s_, p_, in.lower, delta_l);
 
     DTXQCDFermionNf cross_u(grid), cross_l(grid);
     DtxqcdApplyDnCross(d_, n_, in.lower, cross_u);
@@ -349,7 +355,7 @@ class DTXQCDWilsonCloverFermionEO {
     thread_for(idx, Nsite, {
       const Coordinate &coord = coords[idx];
       DtxqcdSiteAux aux =
-          DtxqcdSiteAux::Extract(sigma_, pi_, t_, d_, n_, coord);
+          DtxqcdSiteAux::Extract(sigma_, pi_, d_, n_, s_, p_, coord);
       Eigen::MatrixXcd M_upper, M_lower, M_off, M48;
       if (csw_ != 0.0) {
         DtxqcdSiteClover clover = DtxqcdSiteClover::Extract(FS_, coord);
@@ -609,9 +615,10 @@ class DTXQCDWilsonCloverFermionEO {
   RealD csw_;
   const LatticeDtxqcdSigma &sigma_;
   const LatticeDtxqcdPi    &pi_;
-  const LatticeDtxqcdT     &t_;
   const LatticeDtxqcdD     &d_;
   const LatticeDtxqcdN     &n_;
+  const LatticeDtxqcdS     &s_;
+  const LatticeDtxqcdP     &p_;
   GridCartesian            &grid_;
   GridRedBlackCartesian    &rbgrid_;
   GaugeField               &Umu_;
@@ -622,9 +629,10 @@ class DTXQCDWilsonCloverFermionEO {
 
   LatticeDtxqcdSigma sigma_e_, sigma_o_;
   LatticeDtxqcdPi    pi_e_,    pi_o_;
-  LatticeDtxqcdT     t_e_,     t_o_;
   LatticeDtxqcdD     d_e_,     d_o_;
   LatticeDtxqcdN     n_e_,     n_o_;
+  LatticeDtxqcdS     s_e_,     s_o_;
+  LatticeDtxqcdP     p_e_,     p_o_;
 
   InvField inv_e_, inv_o_;
 

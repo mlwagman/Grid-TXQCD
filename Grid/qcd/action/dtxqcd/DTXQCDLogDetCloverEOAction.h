@@ -120,9 +120,10 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
 
     using DtxqcdSiteForceKernel::SigSobj;
     using DtxqcdSiteForceKernel::PiSobj;
-    using DtxqcdSiteForceKernel::TSobj;
     using DtxqcdSiteForceKernel::DSobj;
     using DtxqcdSiteForceKernel::NSobj;
+    using DtxqcdSiteForceKernel::SSobj;
+    using DtxqcdSiteForceKernel::PSobj;
 
     // clover_sigma_full[mn] holds dS/dF_{mu,nu, (i, j)} per (mu<nu) pair as a
     // LatticeColourMatrix, evaluated only on EVEN sites (zero on odd).  Fed
@@ -153,14 +154,15 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
             // -(1/sqrt 2) / -2 / -i prefactors).  See DTXQCDSiteForceKernel.h.
             SigSobj sig_force;
             PiSobj  pi_force;
-            TSobj   t_force;
             DSobj   d_force;
             NSobj   n_force;
+            SSobj   s_force;
+            PSobj   p_force;
             auto InvLookup =
                 [&Inv](int r, int c) -> ComplexD { return Inv(r, c); };
             DtxqcdSiteForceKernel::AuxForceAt(InvLookup, spin_, sig_force,
-                                              pi_force, t_force, d_force,
-                                              n_force);
+                                              pi_force, d_force, n_force,
+                                              s_force, p_force);
 
             // ---- Clover Sigma per (mu<nu) -------------------------------
             // dS/dF_{mu,nu, (i, j)}(x) at site x for the Cmunu chain rule.
@@ -176,9 +178,10 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
             // Poke per-site forces into the full-volume lattice slots.
             pokeSite(sig_force, dSdU.sigma, coord);
             pokeSite(pi_force,  dSdU.pi,    coord);
-            pokeSite(t_force,   dSdU.t,     coord);
             pokeSite(d_force,   dSdU.d,     coord);
             pokeSite(n_force,   dSdU.n,     coord);
+            pokeSite(s_force,   dSdU.s,     coord);
+            pokeSite(p_force,   dSdU.p,     coord);
           }
 
     // ---- Gauge clover force via Cmunu chain rule ------------------------
@@ -233,9 +236,10 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
     // contributions (aux + gauge) by 1/2.  See header comment.
     dSdU.sigma = ComplexD(0.5, 0.0) * dSdU.sigma;
     dSdU.pi    = ComplexD(0.5, 0.0) * dSdU.pi;
-    dSdU.t     = ComplexD(0.5, 0.0) * dSdU.t;
     dSdU.d     = ComplexD(0.5, 0.0) * dSdU.d;
     dSdU.n     = ComplexD(0.5, 0.0) * dSdU.n;
+    dSdU.s     = ComplexD(0.5, 0.0) * dSdU.s;
+    dSdU.p     = ComplexD(0.5, 0.0) * dSdU.p;
     dSdU.U     = ComplexD(0.5, 0.0) * dSdU.U;
   }
 
@@ -260,7 +264,7 @@ class DTXQCDLogDetCloverEOAction : public Action<DTXQCDField> {
                          const Coordinate &coord,
                          Eigen::MatrixXcd &M48) {
     DtxqcdSiteAux aux =
-        DtxqcdSiteAux::Extract(U.sigma, U.pi, U.t, U.d, U.n, coord);
+        DtxqcdSiteAux::Extract(U.sigma, U.pi, U.d, U.n, U.s, U.p, coord);
     Eigen::MatrixXcd M_upper, M_lower, M_off;
     if (csw_ != 0.0) {
       DtxqcdSiteClover clover = DtxqcdSiteClover::Extract(FS, coord);

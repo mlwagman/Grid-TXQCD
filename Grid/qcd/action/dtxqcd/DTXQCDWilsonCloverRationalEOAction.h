@@ -314,7 +314,8 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   DTXQCDWilsonCloverFermionEO MakeEOp(const DTXQCDField &U) {
     DTXQCDField &Unc = const_cast<DTXQCDField &>(U);
     return DTXQCDWilsonCloverFermionEO(Unc.U, grid_, rbgrid_, mass_, csw_,
-                                       Unc.sigma, Unc.pi, Unc.t, Unc.d, Unc.n);
+                                       Unc.sigma, Unc.pi, Unc.d, Unc.n,
+                                       Unc.s,     Unc.p);
   }
 
   // Multishift-CG + linear combination: out = norm * in + sum_k residues[k] * xk[k]
@@ -442,9 +443,10 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
                             std::vector<LatticeColourMatrix> &clover_sigma_full) {
     using DtxqcdSiteForceKernel::SigSobj;
     using DtxqcdSiteForceKernel::PiSobj;
-    using DtxqcdSiteForceKernel::TSobj;
     using DtxqcdSiteForceKernel::DSobj;
     using DtxqcdSiteForceKernel::NSobj;
+    using DtxqcdSiteForceKernel::SSobj;
+    using DtxqcdSiteForceKernel::PSobj;
     using DtxqcdSiteForceKernel::CMsobj;
 
     Coordinate gd(grid_.GlobalDimensions());
@@ -489,50 +491,41 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
 
             SigSobj sig_force;
             PiSobj  pi_force;
-            TSobj   t_force;
             DSobj   d_force;
             NSobj   n_force;
+            SSobj   s_force;
+            PSobj   p_force;
             DtxqcdSiteForceKernel::AuxForceAt(Bil, spin_, sig_force,
-                                               pi_force, t_force,
-                                               d_force, n_force);
+                                               pi_force, d_force, n_force,
+                                               s_force, p_force);
 
-            // Accumulate into dSdU (peek + add scaled + poke).
+            // Accumulate into dSdU (peek + add scaled + poke).  For the four
+            // CF Hermitian fields we iterate the combined (a, b, i, j) index.
+            auto AddCF = [&](LatticeDtxqcdSigma &dst, const SigSobj &fv) {
+              SigSobj cur; peekSite(cur, dst, coord);
+              for (int a = 0; a < DtxqcdNf; ++a)
+                for (int b = 0; b < DtxqcdNf; ++b)
+                  for (int i = 0; i < Nc; ++i)
+                    for (int j = 0; j < Nc; ++j)
+                      cur()(a, b)(i, j) =
+                          cur()(a, b)(i, j) + coef * fv()(a, b)(i, j);
+              pokeSite(cur, dst, coord);
+            };
+            AddCF(dSdU.sigma, sig_force);
+            AddCF(dSdU.pi,    pi_force);
+            AddCF(dSdU.d,     d_force);
+            AddCF(dSdU.n,     n_force);
+
+            // Singlet scalars.
             {
-              SigSobj cur; peekSite(cur, dSdU.sigma, coord);
-              for (int A = 0; A < DtxqcdNTriplet; ++A)
-                cur()()(A) = cur()()(A) + coef * sig_force()()(A);
-              pokeSite(cur, dSdU.sigma, coord);
+              SSobj cur; peekSite(cur, dSdU.s, coord);
+              cur()()() = cur()()() + coef * s_force()()();
+              pokeSite(cur, dSdU.s, coord);
             }
             {
-              PiSobj cur; peekSite(cur, dSdU.pi, coord);
-              for (int A = 0; A < DtxqcdNTriplet; ++A)
-                cur()()(A) = cur()()(A) + coef * pi_force()()(A);
-              pokeSite(cur, dSdU.pi, coord);
-            }
-            {
-              TSobj cur; peekSite(cur, dSdU.t, coord);
-              for (int mu = 0; mu < Nd; ++mu)
-                for (int nu = 0; nu < Nd; ++nu)
-                  for (int A = 0; A < DtxqcdNTriplet; ++A)
-                    cur()(mu, nu)(A) =
-                        cur()(mu, nu)(A) + coef * t_force()(mu, nu)(A);
-              pokeSite(cur, dSdU.t, coord);
-            }
-            {
-              DSobj cur; peekSite(cur, dSdU.d, coord);
-              for (int kk = 0; kk < Nc; ++kk)
-                for (int ll = 0; ll < Nc; ++ll)
-                  cur()()(kk, ll) =
-                      cur()()(kk, ll) + coef * d_force()()(kk, ll);
-              pokeSite(cur, dSdU.d, coord);
-            }
-            {
-              NSobj cur; peekSite(cur, dSdU.n, coord);
-              for (int kk = 0; kk < Nc; ++kk)
-                for (int ll = 0; ll < Nc; ++ll)
-                  cur()()(kk, ll) =
-                      cur()()(kk, ll) + coef * n_force()()(kk, ll);
-              pokeSite(cur, dSdU.n, coord);
+              PSobj cur; peekSite(cur, dSdU.p, coord);
+              cur()()() = cur()()() + coef * p_force()()();
+              pokeSite(cur, dSdU.p, coord);
             }
 
             // Clover sigma contribution (csw != 0 only).

@@ -1,24 +1,32 @@
 #pragma once
-// Checkpointer for the DTXQCD composite Field (gauge + 5 aux fields).
+// Checkpointer for the v2 DTXQCD composite Field (gauge + 4 CF-Hermitian
+// aux fields + 2 singlet scalars).
 //
 // Writes:
 //   <config_prefix>.N         gauge, NERSC binary (interoperable with stock Grid)
-//   <config_prefix>_daux.N    packed aux sidecar (DTXQCD-specific layout)
+//   <config_prefix>_daux.N    packed aux sidecar (DTXQCD v2 layout)
 //   <rng_prefix>.N            RNG state (NERSC writer)
 //
-// Sidecar magic 'DTXA' (0x44545841) co-exists with TXQCD's 'TXQA' so the two
-// actions can live in the same checkpoint tree without collision.
+// Sidecar magic 'DTX2' (0x44545832) is intentionally distinct from v1's
+// 'DTXA' (0x44545841) so v1 configs are rejected at read time.  No v1
+// backward-read path; v1 configs were partial-stat with the wrong action.
 //
-// Packed layout per site (42 doubles = 336 bytes):
-//   sigma:  3 reals (Pauli triplet real parts)
-//   pi:     3 reals
-//   t:      6 (mu<nu) x 3 = 18 reals
-//   d:      Nc^2 = 9 reals (Hermitian: diag re, then upper-tri re,im)
-//   n:      Nc^2 = 9 reals
+// Packed layout per site (146 doubles = 1168 bytes):
+//   sigma:  36 reals  (6 diag + 15 off-diag (re, im) pairs)
+//   pi:     36 reals
+//   d:      36 reals
+//   n:      36 reals
+//   s:       1 real
+//   p:       1 real
 //
-// Multi-rank layout follows TXQCDCheckpointer's v3: each rank writes its
-// rank-local lex-ordered slice at offset 16 + my_rank * local_bytes via
-// MPI-IO collective.
+// Each Hermitian CF matrix is packed under the combined index
+// k = a*Nc + i (k1 = row, k2 = col).  On read the field is re-Hermitized
+// and re-traceless-projected via DTXQCDCompositeImpl::Project so small
+// numerical drift in the stored values is absorbed.
+//
+// Multi-rank layout follows v1: each rank writes its rank-local
+// lex-ordered slice at offset 16 + my_rank * local_bytes via MPI-IO
+// collective.
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDCompositeImpl.h>
 #include <cstring>
@@ -32,18 +40,16 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
  private:
   CheckpointerParameters Params;
 
-  static constexpr uint32_t kAuxMagic   = 0x44545841;  // 'DTXA'
-  static constexpr uint32_t kAuxVersion = 1;
+  static constexpr uint32_t kAuxMagic   = 0x44545832;  // 'DTX2'
+  static constexpr uint32_t kAuxVersion = 2;
 
-  static constexpr int kTripletPacked = DtxqcdNTriplet;          // 3
-  static constexpr int kSigmaPacked   = kTripletPacked;           // 3
-  static constexpr int kPiPacked      = kTripletPacked;           // 3
-  static constexpr int kNtPairs       = Nd * (Nd - 1) / 2;       // 6
-  static constexpr int kTPacked       = kNtPairs * kTripletPacked; // 18
-  static constexpr int kDPacked       = Nc * Nc;                   // 9
-  static constexpr int kNPacked       = Nc * Nc;                   // 9
+  static constexpr int kCFDim       = DtxqcdNfNc;                       // 6
+  static constexpr int kCFPacked    = kCFDim                            // diag
+                                    + kCFDim * (kCFDim - 1);            // off-diag re,im
+  static_assert(kCFPacked == 36, "kCFPacked should be NfNc^2 = 36");
+  static constexpr int kScalarPacked = 1;
   static constexpr int kSiteDoubles =
-      kSigmaPacked + kPiPacked + kTPacked + kDPacked + kNPacked;   // 42
+      4 * kCFPacked + 2 * kScalarPacked;                                // 146
 
   std::string aux_filename(int traj) const {
     std::ostringstream os;
@@ -51,83 +57,93 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
     return os.str();
   }
 
-  // Pack a Pauli triplet (iScalar<iScalar<iVector<ctype,K>>>) as K doubles
-  // — the real part of each component (imag is held to zero on disk).
-  template <int K, class ctype>
-  static void PackTriplet(const iScalar<iScalar<iVector<ctype, K>>> &V,
-                          double *buf) {
-    for (int a = 0; a < K; ++a) buf[a] = V()()(a).real();
+  // ----- per-site CF Hermitian pack/unpack -----
+  //
+  // Combined index k = a*Nc + i for both row and column.  Diagonal entries
+  // are stored as 6 reals first, then 15 off-diagonal upper-triangle
+  // entries as (re, im) pairs.
+  template <class CFSobj>
+  static void PackCFHermitian(const CFSobj &M, double *buf) {
+    int kk = 0;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int i = 0; i < Nc; ++i) {
+        buf[kk++] = M()(a, a)(i, i).real();
+      }
+    }
+    for (int k1 = 0; k1 < kCFDim; ++k1) {
+      int a1 = k1 / Nc, i1 = k1 % Nc;
+      for (int k2 = k1 + 1; k2 < kCFDim; ++k2) {
+        int a2 = k2 / Nc, i2 = k2 % Nc;
+        auto z = M()(a1, a2)(i1, i2);
+        buf[kk++] = z.real();
+        buf[kk++] = z.imag();
+      }
+    }
   }
-  template <int K, class ctype>
-  static void UnpackTriplet(const double *buf,
-                            iScalar<iScalar<iVector<ctype, K>>> &V) {
-    for (int a = 0; a < K; ++a) V()()(a) = ctype(buf[a], 0.0);
+  template <class CFSobj>
+  static void UnpackCFHermitian(const double *buf, CFSobj &M) {
+    using SC = std::remove_reference_t<decltype(M()(0, 0)(0, 0))>;
+    // Zero everything first; off-diag lower fills via conjugate below.
+    for (int a = 0; a < DtxqcdNf; ++a)
+      for (int b = 0; b < DtxqcdNf; ++b)
+        for (int i = 0; i < Nc; ++i)
+          for (int j = 0; j < Nc; ++j)
+            M()(a, b)(i, j) = SC(0.0, 0.0);
+    int kk = 0;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int i = 0; i < Nc; ++i) {
+        M()(a, a)(i, i) = SC(buf[kk++], 0.0);
+      }
+    }
+    for (int k1 = 0; k1 < kCFDim; ++k1) {
+      int a1 = k1 / Nc, i1 = k1 % Nc;
+      for (int k2 = k1 + 1; k2 < kCFDim; ++k2) {
+        int a2 = k2 / Nc, i2 = k2 % Nc;
+        double re = buf[kk++], im = buf[kk++];
+        M()(a1, a2)(i1, i2) = SC(re, im);
+        M()(a2, a1)(i2, i1) = SC(re, -im);
+      }
+    }
   }
 
-  // Pack/unpack a Hermitian matrix — same convention as TXQCDCheckpointer.
-  //   [M_00.re, M_11.re, ..., M_01.re, M_01.im, M_02.re, M_02.im, ...]
-  template <int N, class ctype>
-  static void PackHermitian(const iScalar<iScalar<iMatrix<ctype, N>>> &M,
-                            double *buf) {
-    int k = 0;
-    for (int i = 0; i < N; ++i) buf[k++] = M()()(i, i).real();
-    for (int i = 0; i < N; ++i)
-      for (int j = i + 1; j < N; ++j) {
-        buf[k++] = M()()(i, j).real();
-        buf[k++] = M()()(i, j).imag();
-      }
+  template <class ScalarSobj>
+  static void PackScalar(const ScalarSobj &S, double *buf) {
+    buf[0] = S()()().real();
   }
-  template <int N, class ctype>
-  static void UnpackHermitian(const double *buf,
-                              iScalar<iScalar<iMatrix<ctype, N>>> &M) {
-    int k = 0;
-    for (int i = 0; i < N; ++i) M()()(i, i) = ctype(buf[k++], 0.0);
-    for (int i = 0; i < N; ++i)
-      for (int j = i + 1; j < N; ++j) {
-        double re = buf[k++], im = buf[k++];
-        M()()(i, j) = ctype(re, im);
-        M()()(j, i) = ctype(re, -im);
-      }
+  template <class ScalarSobj>
+  static void UnpackScalar(const double *buf, ScalarSobj &S) {
+    using SC = std::remove_reference_t<decltype(S()()())>;
+    S()()() = SC(buf[0], 0.0);
   }
 
-  template <class SigSobj, class PiSobj, class TSobj, class DSobj, class NSobj>
+  template <class SigSobj, class PiSobj, class DSobj, class NSobj,
+            class SSobj, class PSobj>
   static void PackSite(const SigSobj &sigma, const PiSobj &pi,
-                       const TSobj &t, const DSobj &d, const NSobj &n,
+                       const DSobj &d, const NSobj &n,
+                       const SSobj &s, const PSobj &p,
                        double *buf) {
     int off = 0;
-    PackTriplet<kTripletPacked>(sigma, buf + off);  off += kSigmaPacked;
-    PackTriplet<kTripletPacked>(pi,    buf + off);  off += kPiPacked;
-    for (int mu = 0; mu < Nd; ++mu)
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        iScalar<iScalar<iVector<ComplexD, kTripletPacked>>> triplet;
-        for (int a = 0; a < kTripletPacked; ++a) triplet()()(a) = t()(mu, nu)(a);
-        PackTriplet<kTripletPacked>(triplet, buf + off);
-        off += kTripletPacked;
-      }
-    PackHermitian<Nc>(d, buf + off);  off += kDPacked;
-    PackHermitian<Nc>(n, buf + off);  off += kNPacked;
+    PackCFHermitian(sigma, buf + off); off += kCFPacked;
+    PackCFHermitian(pi,    buf + off); off += kCFPacked;
+    PackCFHermitian(d,     buf + off); off += kCFPacked;
+    PackCFHermitian(n,     buf + off); off += kCFPacked;
+    PackScalar(s,          buf + off); off += kScalarPacked;
+    PackScalar(p,          buf + off); off += kScalarPacked;
   }
 
-  template <class SigSobj, class PiSobj, class TSobj, class DSobj, class NSobj>
+  template <class SigSobj, class PiSobj, class DSobj, class NSobj,
+            class SSobj, class PSobj>
   static void UnpackSite(const double *buf,
-                         SigSobj &sigma, PiSobj &pi, TSobj &t,
-                         DSobj &d, NSobj &n) {
+                         SigSobj &sigma, PiSobj &pi,
+                         DSobj &d, NSobj &n,
+                         SSobj &s, PSobj &p) {
     int off = 0;
-    UnpackTriplet<kTripletPacked>(buf + off, sigma);  off += kSigmaPacked;
-    UnpackTriplet<kTripletPacked>(buf + off, pi);     off += kPiPacked;
-    t = Zero();
-    for (int mu = 0; mu < Nd; ++mu)
-      for (int nu = mu + 1; nu < Nd; ++nu) {
-        iScalar<iScalar<iVector<ComplexD, kTripletPacked>>> triplet;
-        UnpackTriplet<kTripletPacked>(buf + off, triplet);
-        off += kTripletPacked;
-        for (int a = 0; a < kTripletPacked; ++a) {
-          t()(mu, nu)(a) =  triplet()()(a);
-          t()(nu, mu)(a) = -triplet()()(a);
-        }
-      }
-    UnpackHermitian<Nc>(buf + off, d);  off += kDPacked;
-    UnpackHermitian<Nc>(buf + off, n);  off += kNPacked;
+    UnpackCFHermitian(buf + off, sigma); off += kCFPacked;
+    UnpackCFHermitian(buf + off, pi);    off += kCFPacked;
+    UnpackCFHermitian(buf + off, d);     off += kCFPacked;
+    UnpackCFHermitian(buf + off, n);     off += kCFPacked;
+    UnpackScalar     (buf + off, s);     off += kScalarPacked;
+    UnpackScalar     (buf + off, p);     off += kScalarPacked;
   }
 
  public:
@@ -157,20 +173,22 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
 
     typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
     typedef typename LatticeDtxqcdPi::vector_object::scalar_object    PiSobj;
-    typedef typename LatticeDtxqcdT::vector_object::scalar_object     TSobj;
     typedef typename LatticeDtxqcdD::vector_object::scalar_object     DSobj;
     typedef typename LatticeDtxqcdN::vector_object::scalar_object     NSobj;
+    typedef typename LatticeDtxqcdS::vector_object::scalar_object     SSobj;
+    typedef typename LatticeDtxqcdP::vector_object::scalar_object     PSobj;
 
     std::vector<SigSobj> sig_s;  unvectorizeToLexOrdArray(sig_s, U.sigma);
     std::vector<PiSobj>  pi_s;   unvectorizeToLexOrdArray(pi_s,  U.pi);
-    std::vector<TSobj>   t_s;    unvectorizeToLexOrdArray(t_s,   U.t);
     std::vector<DSobj>   d_s;    unvectorizeToLexOrdArray(d_s,   U.d);
     std::vector<NSobj>   n_s;    unvectorizeToLexOrdArray(n_s,   U.n);
+    std::vector<SSobj>   s_s;    unvectorizeToLexOrdArray(s_s,   U.s);
+    std::vector<PSobj>   p_s;    unvectorizeToLexOrdArray(p_s,   U.p);
 
     uint64_t nsites = sig_s.size();
     std::vector<double> buf(nsites * kSiteDoubles);
     thread_for(x, nsites, {
-      PackSite(sig_s[x], pi_s[x], t_s[x], d_s[x], n_s[x],
+      PackSite(sig_s[x], pi_s[x], d_s[x], n_s[x], s_s[x], p_s[x],
                &buf[x * kSiteDoubles]);
     });
     BinaryIO::htobe64_v((void *)buf.data(), buf.size() * sizeof(double));
@@ -288,7 +306,10 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
 
     if (magic != kAuxMagic) {
       std::cout << GridLogError << "DTXQCDCheckpointer: bad aux magic in "
-                << auxfile << std::endl;
+                << auxfile << " (got 0x" << std::hex << magic << std::dec
+                << ", expected DTX2 = 0x44545832).  This may be a v1 'DTXA'"
+                   " config; v2 does not support reading them."
+                << std::endl;
       abort();
     }
     if (version != kAuxVersion) {
@@ -312,26 +333,33 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
 
     typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
     typedef typename LatticeDtxqcdPi::vector_object::scalar_object    PiSobj;
-    typedef typename LatticeDtxqcdT::vector_object::scalar_object     TSobj;
     typedef typename LatticeDtxqcdD::vector_object::scalar_object     DSobj;
     typedef typename LatticeDtxqcdN::vector_object::scalar_object     NSobj;
+    typedef typename LatticeDtxqcdS::vector_object::scalar_object     SSobj;
+    typedef typename LatticeDtxqcdP::vector_object::scalar_object     PSobj;
 
     std::vector<SigSobj> sig_s(local_nsites);
     std::vector<PiSobj>  pi_s(local_nsites);
-    std::vector<TSobj>   t_s(local_nsites);
     std::vector<DSobj>   d_s(local_nsites);
     std::vector<NSobj>   n_s(local_nsites);
+    std::vector<SSobj>   s_s(local_nsites);
+    std::vector<PSobj>   p_s(local_nsites);
 
     thread_for(x, local_nsites, {
       UnpackSite(&buf[x * kSiteDoubles],
-                 sig_s[x], pi_s[x], t_s[x], d_s[x], n_s[x]);
+                 sig_s[x], pi_s[x], d_s[x], n_s[x], s_s[x], p_s[x]);
     });
 
     vectorizeFromLexOrdArray(sig_s, U.sigma);
     vectorizeFromLexOrdArray(pi_s,  U.pi);
-    vectorizeFromLexOrdArray(t_s,   U.t);
     vectorizeFromLexOrdArray(d_s,   U.d);
     vectorizeFromLexOrdArray(n_s,   U.n);
+    vectorizeFromLexOrdArray(s_s,   U.s);
+    vectorizeFromLexOrdArray(p_s,   U.p);
+
+    // Re-apply Hermitian + traceless + real-projection to absorb any
+    // minor numerical drift from the disk round trip.
+    DTXQCDCompositeImpl::Project(U);
 
     std::cout << GridLogMessage << "DTXQCDCheckpointer: restored packed daux "
               << auxfile << std::endl;
