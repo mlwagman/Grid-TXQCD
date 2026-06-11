@@ -79,13 +79,13 @@ inline void AuxForceAt(InvLookup Inv,
   // ---- sigma^{ij}_{ab} force ---------------------------------------------
   //
   // sigma enters M with +1 on upper diagonal, -1 on lower diagonal, diagonal
-  // in spin (delta_{alpha, beta}).  So:
-  //
-  //   dM_{(a, alpha, i, blk), (b, alpha, j, blk)} / dsigma^{ij}_{ab}
-  //     = +1 (blk=0) or -1 (blk=1)
-  //
-  //   F_sigma^{ij}_{ab} = -sum_alpha [ Inv((a,alpha,i,0), (b,alpha,j,0))
-  //                                  - Inv((a,alpha,i,1), (b,alpha,j,1)) ]
+  // in spin.  Trace formula
+  //   dS/dsigma^{ij}_{ab} = -sum_{R,C} dM_{R,C}/dsigma^{ij}_{ab} * Inv(C, R)
+  // with dM_{(a,alpha,i,blk), (b,alpha,j,blk)} / dsigma^{ij}_{ab} = +- 1, gives
+  //   F_sigma^{ij}_{ab} = -sum_alpha [ Inv((b,alpha,j,0), (a,alpha,i,0))
+  //                                  - Inv((b,alpha,j,1), (a,alpha,i,1)) ]
+  // i.e. the first Inv index has (b, j) (column of dM) and the second has
+  // (a, i) (row of dM).
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -94,7 +94,7 @@ inline void AuxForceAt(InvLookup Inv,
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(b, alpha, j);
-            val += Inv(ra, cb) - Inv(kDim24 + ra, kDim24 + cb);
+            val += Inv(cb, ra) - Inv(kDim24 + cb, kDim24 + ra);
           }
           sig_force()(a, b)(i, j) = -val;
         }
@@ -104,11 +104,11 @@ inline void AuxForceAt(InvLookup Inv,
 
   // ---- pi^{ij}_{ab} force ------------------------------------------------
   //
-  // pi enters M with +/- gamma5(alpha, beta), upper/lower diagonal:
-  //
+  //   dM/dpi^{ij}_{ab} = +- gamma5(alpha, beta) at
+  //     (a, alpha, i, blk) row -- (b, beta, j, blk) column.
   //   F_pi^{ij}_{ab} = -sum_{alpha,beta} gamma5(alpha, beta)
-  //                  * [ Inv((a,alpha,i,0), (b,beta,j,0))
-  //                    - Inv((a,alpha,i,1), (b,beta,j,1)) ]
+  //                  * [ Inv((b,beta,j,0), (a,alpha,i,0))
+  //                    - Inv((b,beta,j,1), (a,alpha,i,1)) ]
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -120,7 +120,7 @@ inline void AuxForceAt(InvLookup Inv,
               if (g5 == ComplexD(0, 0)) continue;
               int ra = DtxqcdSiteIdx24(a, alpha, i);
               int cb = DtxqcdSiteIdx24(b, beta,  j);
-              val += g5 * (Inv(ra, cb) - Inv(kDim24 + ra, kDim24 + cb));
+              val += g5 * (Inv(cb, ra) - Inv(kDim24 + cb, kDim24 + ra));
             }
           }
           pi_force()(a, b)(i, j) = -val;
@@ -129,14 +129,14 @@ inline void AuxForceAt(InvLookup Inv,
     }
   }
 
-  // ---- d^{ij}_{ab} force (off-diagonal, +gamma5, both upper-right and lower-left)
+  // ---- d^{ij}_{ab} force (off-diagonal, +gamma5 in spin) -----------------
   //
   //   dM_{(a,alpha,i,0), (b,beta,j,1)} / dd^{ij}_{ab} = +gamma5(alpha, beta)
   //   dM_{(a,alpha,i,1), (b,beta,j,0)} / dd^{ij}_{ab} = +gamma5(alpha, beta)
   //
   //   F_d^{ij}_{ab} = -sum_{alpha,beta} gamma5(alpha, beta)
-  //               * [ Inv((a,alpha,i,0), (b,beta,j,1))
-  //                 + Inv((a,alpha,i,1), (b,beta,j,0)) ]
+  //               * [ Inv((b,beta,j,1), (a,alpha,i,0))
+  //                 + Inv((b,beta,j,0), (a,alpha,i,1)) ]
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -148,7 +148,7 @@ inline void AuxForceAt(InvLookup Inv,
               if (g5 == ComplexD(0, 0)) continue;
               int ra = DtxqcdSiteIdx24(a, alpha, i);
               int cb = DtxqcdSiteIdx24(b, beta,  j);
-              val += g5 * (Inv(ra, kDim24 + cb) + Inv(kDim24 + ra, cb));
+              val += g5 * (Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra));
             }
           }
           d_force()(a, b)(i, j) = -val;
@@ -158,6 +158,9 @@ inline void AuxForceAt(InvLookup Inv,
   }
 
   // ---- n^{ij}_{ab} force (off-diagonal, +identity in spin) -----------------
+  //
+  //   F_n^{ij}_{ab} = -sum_alpha [ Inv((b,alpha,j,1), (a,alpha,i,0))
+  //                              + Inv((b,alpha,j,0), (a,alpha,i,1)) ]
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -166,7 +169,7 @@ inline void AuxForceAt(InvLookup Inv,
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(b, alpha, j);
-            val += Inv(ra, kDim24 + cb) + Inv(kDim24 + ra, cb);
+            val += Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra);
           }
           n_force()(a, b)(i, j) = -val;
         }
