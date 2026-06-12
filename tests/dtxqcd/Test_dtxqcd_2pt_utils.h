@@ -14,6 +14,7 @@
 #include "../txqcd/Test_txqcd_2pt_utils.h"
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDAuxCorrelator.h>
 
 namespace DtxqcdTest2pt {
 
@@ -78,17 +79,29 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
   GridRedBlackCartesian &rbgrid_;
   GridParallelRNG       &prng_;
   RealD mass_;
+  RealD lambda_;
   int   n_vev_noise_;
   std::vector<RealD> norm_sigma_, norm_pi_, norm_d_, norm_n_, norm_s_, norm_p_;
   std::vector<RealD> vev_trminv_;
+  // Per-traj aux wall-wall correlators (length T or Nf²·T each).  Outer dim
+  // accumulates trajectories since last flush; flushed at meas_skip intervals.
+  std::vector<std::vector<ComplexD>>
+      aux_C_pi_plus_, aux_C_pi_minus_, aux_C_pi_zero_,
+      aux_C_a0_plus_, aux_C_a0_minus_, aux_C_a0_zero_,
+      aux_C_s_, aux_C_p_, aux_C_trsig_, aux_C_trpi_,
+      aux_C_trsig_s_, aux_C_trpi_p_;
+  std::vector<std::vector<ComplexD>>
+      aux_wall_sig_ab_, aux_wall_pi_ab_,
+      aux_wall_s_, aux_wall_p_, aux_wall_trsig_, aux_wall_trpi_;
 
   DtxqcdDiagnostics(const std::string &prefix, int interval,
                     std::vector<ActionRef> acts,
                     GridCartesian &grid, GridRedBlackCartesian &rbgrid,
-                    GridParallelRNG &prng, RealD mass, int n_vev_noise)
+                    GridParallelRNG &prng, RealD mass, RealD lambda,
+                    int n_vev_noise)
       : HmcDiagWriter(prefix, interval, std::move(acts), true),
         grid_(grid), rbgrid_(rbgrid), prng_(prng),
-        mass_(mass), n_vev_noise_(n_vev_noise) {}
+        mass_(mass), lambda_(lambda), n_vev_noise_(n_vev_noise) {}
 
   RealD get_plaq(DTXQCDField &U) override {
     return WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
@@ -124,6 +137,28 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     norm_s_    .push_back(norm2(U.s)     / V);
     norm_p_    .push_back(norm2(U.p)     / V);
     vev_trminv_.push_back(compute_trminv(U.U));
+    // Aux wall-wall correlators (collective sliceSum — must run on every
+    // rank).  Cost ≪1% of a trajectory.
+    DtxqcdAuxWallCorrelators awc =
+        DtxqcdComputeAuxWallCorrelators(U, lambda_);
+    aux_C_pi_plus_  .push_back(std::move(awc.C_pi_plus));
+    aux_C_pi_minus_ .push_back(std::move(awc.C_pi_minus));
+    aux_C_pi_zero_  .push_back(std::move(awc.C_pi_zero));
+    aux_C_a0_plus_  .push_back(std::move(awc.C_a0_plus));
+    aux_C_a0_minus_ .push_back(std::move(awc.C_a0_minus));
+    aux_C_a0_zero_  .push_back(std::move(awc.C_a0_zero));
+    aux_C_s_        .push_back(std::move(awc.C_s));
+    aux_C_p_        .push_back(std::move(awc.C_p));
+    aux_C_trsig_    .push_back(std::move(awc.C_trsig));
+    aux_C_trpi_     .push_back(std::move(awc.C_trpi));
+    aux_C_trsig_s_  .push_back(std::move(awc.C_trsig_s));
+    aux_C_trpi_p_   .push_back(std::move(awc.C_trpi_p));
+    aux_wall_sig_ab_.push_back(std::move(awc.wall_sig_ab_flat));
+    aux_wall_pi_ab_ .push_back(std::move(awc.wall_pi_ab_flat));
+    aux_wall_s_     .push_back(std::move(awc.wall_s));
+    aux_wall_p_     .push_back(std::move(awc.wall_p));
+    aux_wall_trsig_ .push_back(std::move(awc.wall_trsig));
+    aux_wall_trpi_  .push_back(std::move(awc.wall_trpi));
   }
 
   void flush(int traj) override {
@@ -143,6 +178,25 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     write(wr, "norm_s",     norm_s_);
     write(wr, "norm_p",     norm_p_);
     write(wr, "vev_trminv", vev_trminv_);
+    // Aux wall-wall correlators (one row per traj since last flush)
+    write(wr, "aux_C_pi_plus",  aux_C_pi_plus_);
+    write(wr, "aux_C_pi_minus", aux_C_pi_minus_);
+    write(wr, "aux_C_pi_zero",  aux_C_pi_zero_);
+    write(wr, "aux_C_a0_plus",  aux_C_a0_plus_);
+    write(wr, "aux_C_a0_minus", aux_C_a0_minus_);
+    write(wr, "aux_C_a0_zero",  aux_C_a0_zero_);
+    write(wr, "aux_C_s",        aux_C_s_);
+    write(wr, "aux_C_p",        aux_C_p_);
+    write(wr, "aux_C_trsig",    aux_C_trsig_);
+    write(wr, "aux_C_trpi",     aux_C_trpi_);
+    write(wr, "aux_C_trsig_s",  aux_C_trsig_s_);
+    write(wr, "aux_C_trpi_p",   aux_C_trpi_p_);
+    write(wr, "aux_wall_sig_ab", aux_wall_sig_ab_);
+    write(wr, "aux_wall_pi_ab",  aux_wall_pi_ab_);
+    write(wr, "aux_wall_s",      aux_wall_s_);
+    write(wr, "aux_wall_p",      aux_wall_p_);
+    write(wr, "aux_wall_trsig",  aux_wall_trsig_);
+    write(wr, "aux_wall_trpi",   aux_wall_trpi_);
     std::vector<std::string> names;
     for (auto &a : actions_) names.push_back(a.name);
     write(wr, "action_names", names);
@@ -154,6 +208,14 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     norm_d_.clear();     norm_n_.clear();
     norm_s_.clear();     norm_p_.clear();
     vev_trminv_.clear();
+    aux_C_pi_plus_.clear();  aux_C_pi_minus_.clear(); aux_C_pi_zero_.clear();
+    aux_C_a0_plus_.clear();  aux_C_a0_minus_.clear(); aux_C_a0_zero_.clear();
+    aux_C_s_.clear();        aux_C_p_.clear();
+    aux_C_trsig_.clear();    aux_C_trpi_.clear();
+    aux_C_trsig_s_.clear();  aux_C_trpi_p_.clear();
+    aux_wall_sig_ab_.clear(); aux_wall_pi_ab_.clear();
+    aux_wall_s_.clear();      aux_wall_p_.clear();
+    aux_wall_trsig_.clear();  aux_wall_trpi_.clear();
 
     std::cout << GridLogMessage << "HMC diagnostics written to " << fname
               << std::endl;

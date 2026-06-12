@@ -314,7 +314,7 @@ int main(int argc, char **argv) {
         {"LogDet",        &LogDet},
         {"AuxGaussian",   &AuxAction},
         {"Gauge",         &GaugeAction}
-    }, Grid, RBGrid, pRNG, mass, n_vev_noise);
+    }, Grid, RBGrid, pRNG, mass_run, lambda_run, n_vev_noise);
 
     std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt, &diag};
     HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
