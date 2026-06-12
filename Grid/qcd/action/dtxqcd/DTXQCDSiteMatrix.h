@@ -227,8 +227,12 @@ inline void DtxqcdBuildDiagBlock24(double mass,
 
 // Add the clover contribution to a 24x24 diagonal block:
 //   upper:  M += -(csw/2) sum_{mu<nu} F_{mu,nu} sigma_{mu,nu}_Grid  (delta in flavor)
-//   lower:  M += +(csw/2) sum_{mu<nu} F^T_{mu,nu} sigma_{mu,nu}_Grid
-// Unchanged from v1.
+//   lower:  M += -(csw/2) sum_{mu<nu} F^T_{mu,nu} sigma_{mu,nu}_Grid
+//
+// v2 corrected (2026-06-12): the lower-block clover prefactor changed from
+// +0.5*csw to -0.5*csw to match the corrected M_lower = -C D^T C + X
+// convention (= D[U*] + X including clover).  The old +0.5*csw was tied to
+// the original M_lower = C D^T C - X form which is now superseded.
 inline void DtxqcdAddCloverToDiagBlock24(
     double csw,
     const DtxqcdSiteClover &clover,
@@ -236,7 +240,7 @@ inline void DtxqcdAddCloverToDiagBlock24(
     Eigen::MatrixXcd &M,
     bool lower_block = false) {
   if (csw == 0.0) return;
-  const double prefactor = lower_block ? +0.5 * csw : -0.5 * csw;
+  const double prefactor = -0.5 * csw;
   for (int p = 0; p < 6; ++p) {
     Eigen::Matrix3cd F = lower_block
                               ? Eigen::Matrix3cd(clover.F_munu[p].transpose())
@@ -277,17 +281,24 @@ inline void DtxqcdBuildLowerBlock24(double mass,
                                     Eigen::MatrixXcd &M,
                                     double csw = 0.0,
                                     const DtxqcdSiteClover *clover = nullptr) {
-  DtxqcdBuildDiagBlock24(mass, aux, spin, M, -1.0);
+  // Corrected v2 (2026-06-12): M_lower = -C D^T C + X (with +X, NOT -X).
+  // Original Eq 305 had the wrong sign C D^T C - X; the corrected derivation
+  // confirms the lower block has +X (matching the upper block).  -C D^T C =
+  // D[U*] for the kinetic part (verified for mass + Wilson hopping + clover
+  // when the clover prefactor sign is correctly handled).
+  DtxqcdBuildDiagBlock24(mass, aux, spin, M, +1.0);
   if (csw != 0.0 && clover != nullptr)
     DtxqcdAddCloverToDiagBlock24(csw, *clover, spin, M, /*lower_block=*/true);
 }
 
-// Off-diagonal block: d^{ij}_{ab} gamma5 + n^{ij}_{ab}.  No factor of 2 (v2).
-// Acts on combined (flavor, color) index, diagonal in spin (n piece) or
-// gamma5 in spin (d piece).
+// Off-diagonal block: sqrt(2) * (d^{ij}_{ab} gamma5 + n^{ij}_{ab}).  v2
+// corrected (2026-06-12): the doubled Dirac off-diagonal carries a sqrt(2)
+// factor per the corrected dtxqcd_v2.tex Eq 22-25 (the earlier no-factor
+// form was wrong; v1 had factor 2, v2 corrected is sqrt(2)).
 inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
                                       const DtxqcdSpinMatrices& spin,
                                       Eigen::MatrixXcd& M) {
+  const ComplexD sqrt2(std::sqrt(2.0), 0.0);
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
@@ -295,8 +306,8 @@ inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
         for (int j = 0; j < Nc; ++j) {
           int kab1 = DtxqcdSiteAux::Kab(a, i);
           int kab2 = DtxqcdSiteAux::Kab(b, j);
-          ComplexD d_ij_ab = aux.d(kab1, kab2);
-          ComplexD n_ij_ab = aux.n(kab1, kab2);
+          ComplexD d_ij_ab = sqrt2 * aux.d(kab1, kab2);
+          ComplexD n_ij_ab = sqrt2 * aux.n(kab1, kab2);
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int row = DtxqcdSiteIdx24(a, alpha, i);
             // n: diagonal in spin

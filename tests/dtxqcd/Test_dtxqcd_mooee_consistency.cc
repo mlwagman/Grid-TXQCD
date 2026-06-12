@@ -193,15 +193,23 @@ int main(int argc, char **argv) {
             << "  rel = "
             << (upper_lower_diff_at_origin / std::max(upper_norm_at_origin, 1.0))
             << std::endl;
-  if (upper_lower_diff_at_origin <
+  // v2 corrected (2026-06-12): both upper and lower diagonal blocks now
+  // have +X (per M_lower = -C D^T C + X).  With csw=0 in this test, the
+  // mass diagonal and the X insertion are identical between upper and
+  // lower, so M_upper EQUALS M_lower from aux alone.  (Upper/lower
+  // distinction comes back in once csw != 0 via the F vs F^T clover; the
+  // mooee_clover_consistency sibling test exercises that.)
+  if (upper_lower_diff_at_origin >
       1e-6 * std::max(upper_norm_at_origin, 1.0)) {
     std::cout << GridLogError
-              << "[FAIL] M_upper = M_lower from aux alone — tensor sign-flip"
-              << " in DtxqcdBuildLowerBlock24 has been lost" << std::endl;
+              << "[FAIL] M_upper != M_lower from aux alone — v2 corrected"
+              << " convention requires +X in BOTH blocks (csw=0 case)"
+              << std::endl;
     exitcode = 1;
   } else {
     std::cout << GridLogMessage
-              << "[ok] aux fields alone produce distinct upper/lower blocks"
+              << "[ok] aux fields alone produce IDENTICAL upper/lower blocks"
+              << " (csw=0, +X in both per corrected v2 Eq 22-25)"
               << std::endl;
   }
 

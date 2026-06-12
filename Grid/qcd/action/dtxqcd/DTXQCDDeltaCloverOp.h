@@ -105,10 +105,11 @@ inline void DtxqcdApplyCloverUpper(
   DtxqcdApplyCloverGeneric(-0.5 * csw, FS, in, out);
 }
 
-// Lower-block clover (corrected Cstar construction M_22 = C^T D^T C):
-//   C^T D_clover^T C = -(csw/2) (C^T sigma^T C) F^T = -(csw/2)(-sigma) F^T
-//                    = +(csw/2) F^T sigma_{mu,nu}
-// Sign FLIPPED relative to upper, F replaced by its color transpose.
+// Lower-block clover (v2 corrected 2026-06-12, M_lower = -C D^T C + X):
+//   -C D_clover^T C = -(csw/2) F^T sigma_{mu,nu}
+// (same -csw/2 sign as upper; the earlier +0.5*csw was tied to the old
+// M_lower = C D^T C - X form which is now superseded).  F replaced by
+// its color transpose because of the C-transpose.
 // Transposes FS on the fly; for repeated applies, pre-transpose with
 // DtxqcdTransposeFS and call DtxqcdApplyCloverGeneric directly.
 inline void DtxqcdApplyCloverLower(
@@ -116,7 +117,7 @@ inline void DtxqcdApplyCloverLower(
     const std::vector<LatticeColourMatrix> &FS,
     const DTXQCDFermionNf &in, DTXQCDFermionNf &out) {
   std::vector<LatticeColourMatrix> FT = DtxqcdTransposeFS(FS);
-  DtxqcdApplyCloverGeneric(+0.5 * csw, FT, in, out);
+  DtxqcdApplyCloverGeneric(-0.5 * csw, FT, in, out);
 }
 
 NAMESPACE_END(Grid);

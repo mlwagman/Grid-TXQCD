@@ -130,23 +130,27 @@ inline void DtxqcdApplyDeltaDiag(const LatticeDtxqcdSigma &sigma,
   DtxqcdApplyX(sigma, pi, s, p, in, out, +1.0);
 }
 
-// Apply -X (lower block).
+// Apply +X (lower block).  v2 corrected (2026-06-12): the lower block now
+// has +X (same sign as upper), matching M_lower = -C D^T C + X.  Old impl
+// applied -X following the superseded M_lower = C D^T C - X form.
 inline void DtxqcdApplyDeltaDiagLower(const LatticeDtxqcdSigma &sigma,
                                       const LatticeDtxqcdPi    &pi,
                                       const LatticeDtxqcdS     &s,
                                       const LatticeDtxqcdP     &p,
                                       const DTXQCDFermionNf    &in,
                                       DTXQCDFermionNf          &out) {
-  DtxqcdApplyX(sigma, pi, s, p, in, out, -1.0);
+  DtxqcdApplyX(sigma, pi, s, p, in, out, +1.0);
 }
 
-// Apply the off-diagonal d gamma5 + n insertion (OVERWRITE).  Same color-
-// flavor matrix structure as X; entered without the singlet pieces:
+// Apply the off-diagonal sqrt(2) * (d gamma5 + n) insertion (OVERWRITE).
+// Same color-flavor matrix structure as X; entered without the singlet pieces:
 //
-//   out[a]_alpha(i) = sum_{b,j} (d^{ij}_{ab})  (gamma5 in[b])_alpha(j)
-//                   + sum_{b,j} (n^{ij}_{ab})           in[b]_alpha(j)
+//   out[a]_alpha(i) = sqrt(2) * sum_{b,j} (d^{ij}_{ab})  (gamma5 in[b])_alpha(j)
+//                   + sqrt(2) * sum_{b,j} (n^{ij}_{ab})           in[b]_alpha(j)
 //
-// (v1 had a factor of 2 on d, n; v2 absorbs it -- see dtxqcd_v2.tex Eq. 307.)
+// v2 corrected (2026-06-12): factor sqrt(2) per dtxqcd_v2.tex Eq 22-25.
+// (v1 had factor 2; the earlier "v2 absorbs it" comment was based on an
+// incorrect derivation, since corrected.)
 inline void DtxqcdApplyDnCross(const LatticeDtxqcdD     &d,
                                 const LatticeDtxqcdN     &n,
                                 const DTXQCDFermionNf    &in,
@@ -154,6 +158,7 @@ inline void DtxqcdApplyDnCross(const LatticeDtxqcdD     &d,
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
   int cb = in.f[0].Checkerboard();
+  const RealD sqrt2 = std::sqrt(2.0);
 
   std::array<LatticeFermion, DtxqcdNf> g5_in =
       DTXQCDFermionNf::MakeArray(grid, std::make_index_sequence<DtxqcdNf>{});
@@ -170,7 +175,7 @@ inline void DtxqcdApplyDnCross(const LatticeDtxqcdD     &d,
       acc = acc + d_ab * g5_in[b];
       acc = acc + n_ab * in.f[b];
     }
-    out.f[a] = acc;
+    out.f[a] = sqrt2 * acc;
     out.f[a].Checkerboard() = cb;
   }
 }

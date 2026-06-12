@@ -78,14 +78,11 @@ inline void AuxForceAt(InvLookup Inv,
 
   // ---- sigma^{ij}_{ab} force ---------------------------------------------
   //
-  // sigma enters M with +1 on upper diagonal, -1 on lower diagonal, diagonal
-  // in spin.  Trace formula
-  //   dS/dsigma^{ij}_{ab} = -sum_{R,C} dM_{R,C}/dsigma^{ij}_{ab} * Inv(C, R)
-  // with dM_{(a,alpha,i,blk), (b,alpha,j,blk)} / dsigma^{ij}_{ab} = +- 1, gives
+  // v2 corrected (2026-06-12): sigma enters M with +1 in BOTH upper and lower
+  // diagonal (previously +1 / -1; the old -1 in the lower was tied to the
+  // superseded M_lower = C D^T C - X form).  Trace formula now:
   //   F_sigma^{ij}_{ab} = -sum_alpha [ Inv((b,alpha,j,0), (a,alpha,i,0))
-  //                                  - Inv((b,alpha,j,1), (a,alpha,i,1)) ]
-  // i.e. the first Inv index has (b, j) (column of dM) and the second has
-  // (a, i) (row of dM).
+  //                                  + Inv((b,alpha,j,1), (a,alpha,i,1)) ]
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -94,7 +91,7 @@ inline void AuxForceAt(InvLookup Inv,
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(b, alpha, j);
-            val += Inv(cb, ra) - Inv(kDim24 + cb, kDim24 + ra);
+            val += Inv(cb, ra) + Inv(kDim24 + cb, kDim24 + ra);
           }
           sig_force()(a, b)(i, j) = -val;
         }
@@ -104,11 +101,10 @@ inline void AuxForceAt(InvLookup Inv,
 
   // ---- pi^{ij}_{ab} force ------------------------------------------------
   //
-  //   dM/dpi^{ij}_{ab} = +- gamma5(alpha, beta) at
-  //     (a, alpha, i, blk) row -- (b, beta, j, blk) column.
+  // v2 corrected: dM/dpi has +gamma5 in BOTH upper and lower diagonal.
   //   F_pi^{ij}_{ab} = -sum_{alpha,beta} gamma5(alpha, beta)
   //                  * [ Inv((b,beta,j,0), (a,alpha,i,0))
-  //                    - Inv((b,beta,j,1), (a,alpha,i,1)) ]
+  //                    + Inv((b,beta,j,1), (a,alpha,i,1)) ]
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -120,7 +116,7 @@ inline void AuxForceAt(InvLookup Inv,
               if (g5 == ComplexD(0, 0)) continue;
               int ra = DtxqcdSiteIdx24(a, alpha, i);
               int cb = DtxqcdSiteIdx24(b, beta,  j);
-              val += g5 * (Inv(cb, ra) - Inv(kDim24 + cb, kDim24 + ra));
+              val += g5 * (Inv(cb, ra) + Inv(kDim24 + cb, kDim24 + ra));
             }
           }
           pi_force()(a, b)(i, j) = -val;
@@ -129,14 +125,13 @@ inline void AuxForceAt(InvLookup Inv,
     }
   }
 
-  // ---- d^{ij}_{ab} force (off-diagonal, +gamma5 in spin) -----------------
+  // ---- d^{ij}_{ab} force (off-diagonal, +sqrt(2)*gamma5 in spin) ---------
   //
-  //   dM_{(a,alpha,i,0), (b,beta,j,1)} / dd^{ij}_{ab} = +gamma5(alpha, beta)
-  //   dM_{(a,alpha,i,1), (b,beta,j,0)} / dd^{ij}_{ab} = +gamma5(alpha, beta)
-  //
-  //   F_d^{ij}_{ab} = -sum_{alpha,beta} gamma5(alpha, beta)
+  // v2 corrected: off-diagonal has +sqrt(2) factor on d (and n) blocks.
+  //   F_d^{ij}_{ab} = -sqrt(2) * sum_{alpha,beta} gamma5(alpha, beta)
   //               * [ Inv((b,beta,j,1), (a,alpha,i,0))
   //                 + Inv((b,beta,j,0), (a,alpha,i,1)) ]
+  const RealD sqrt2 = std::sqrt(2.0);
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -151,16 +146,17 @@ inline void AuxForceAt(InvLookup Inv,
               val += g5 * (Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra));
             }
           }
-          d_force()(a, b)(i, j) = -val;
+          d_force()(a, b)(i, j) = -sqrt2 * val;
         }
       }
     }
   }
 
-  // ---- n^{ij}_{ab} force (off-diagonal, +identity in spin) -----------------
+  // ---- n^{ij}_{ab} force (off-diagonal, +sqrt(2)*identity in spin) -------
   //
-  //   F_n^{ij}_{ab} = -sum_alpha [ Inv((b,alpha,j,1), (a,alpha,i,0))
-  //                              + Inv((b,alpha,j,0), (a,alpha,i,1)) ]
+  // v2 corrected: same sqrt(2) factor as d.
+  //   F_n^{ij}_{ab} = -sqrt(2) * sum_alpha [ Inv((b,alpha,j,1), (a,alpha,i,0))
+  //                                        + Inv((b,alpha,j,0), (a,alpha,i,1)) ]
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -171,30 +167,34 @@ inline void AuxForceAt(InvLookup Inv,
             int cb = DtxqcdSiteIdx24(b, alpha, j);
             val += Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra);
           }
-          n_force()(a, b)(i, j) = -val;
+          n_force()(a, b)(i, j) = -sqrt2 * val;
         }
       }
     }
   }
 
-  // ---- s singlet force (diagonal in (a==b, i==j), spin scalar, +/-) -------
+  // ---- s singlet force (diagonal in (a==b, i==j), spin scalar) -----------
   //
+  // v2 corrected: +s in BOTH upper and lower diagonals (no sign flip on
+  // the lower).
   //   F_s = -sum_a sum_alpha sum_i [ Inv((a,alpha,i,0), (a,alpha,i,0))
-  //                                - Inv((a,alpha,i,1), (a,alpha,i,1)) ]
+  //                                + Inv((a,alpha,i,1), (a,alpha,i,1)) ]
   {
     ComplexD val(0, 0);
     for (int a = 0; a < DtxqcdNf; ++a) {
       for (int alpha = 0; alpha < Ns; ++alpha) {
         for (int i = 0; i < Nc; ++i) {
           int r = DtxqcdSiteIdx24(a, alpha, i);
-          val += Inv(r, r) - Inv(kDim24 + r, kDim24 + r);
+          val += Inv(r, r) + Inv(kDim24 + r, kDim24 + r);
         }
       }
     }
     s_force()()() = -val;
   }
 
-  // ---- p singlet force (diagonal in (a==b, i==j), gamma5 in spin, +/-) ----
+  // ---- p singlet force (diagonal in (a==b, i==j), gamma5 in spin) --------
+  //
+  // v2 corrected: +p gamma5 in BOTH upper and lower diagonals.
   {
     ComplexD val(0, 0);
     for (int a = 0; a < DtxqcdNf; ++a) {
@@ -205,7 +205,7 @@ inline void AuxForceAt(InvLookup Inv,
           for (int i = 0; i < Nc; ++i) {
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(a, beta,  i);
-            val += g5 * (Inv(ra, cb) - Inv(kDim24 + ra, kDim24 + cb));
+            val += g5 * (Inv(ra, cb) + Inv(kDim24 + ra, kDim24 + cb));
           }
         }
       }
@@ -223,6 +223,9 @@ inline void CloverSigmaAt(InvLookup Inv,
                           const DtxqcdSpinMatrices &spin,
                           RealD csw,
                           std::array<CMsobj, 6> &clover_sigma) {
+  // v2 corrected (2026-06-12): lower-block clover prefactor changed from
+  // +(csw/2) F^T sigma to -(csw/2) F^T sigma to match M_lower = -C D^T C + X.
+  // The trace combination is now (+upper +lower) rather than (+upper -lower).
   for (int p_idx = 0; p_idx < 6; ++p_idx) {
     CMsobj cs;
     cs = Zero();
@@ -239,7 +242,7 @@ inline void CloverSigmaAt(InvLookup Inv,
               int row_l = DtxqcdSiteIdx24(a, beta,  i_c);
               int col_l = DtxqcdSiteIdx24(a, alpha, j_c);
               val += smn * Inv(row_u, col_u);
-              val -= smn * Inv(kDim24 + row_l, kDim24 + col_l);
+              val += smn * Inv(kDim24 + row_l, kDim24 + col_l);
             }
           }
         }
