@@ -20,35 +20,22 @@ NAMESPACE_BEGIN(Grid);
 
 // ---------- field-type projectors ----------
 
-// Hermitize + traceless project on a CF-matrix lattice field.  Operates on the
-// combined (a,i)(b,j) 6x6 index space: M_{(a,i)(b,j)} <- 0.5 (M + adj(M)) then
-// subtract Tr(M)/NfNc on the diagonal.
+// Hermitize-only projection on a CF-matrix lattice field, operating on the
+// combined (a,i)(b,j) 6x6 index space: M_{(a,i)(b,j)} <- 0.5 (M + adj(M)).
+//
+// 2026-06-12: Removed the traceless step.  In TXQCD the trace of sigma carries
+// the qqbar singlet condensate (⟨Tr sigma⟩ = Sigma/lambda^2).  In v2 DTXQCD the
+// trace was being pinned to zero by the per-site subtraction below, redirecting
+// the condensate onto the separate s singlet field with a non-trivial
+// renormalization factor (the s coefficient in S_aux = (lambda^2/2) s^2 should
+// be 6*(lambda^2/2) to match X = sigma_traceless + s*I in Tr X^2).  Cleaner to
+// drop the traceless constraint here and let sigma carry the full Hermitian
+// degrees of freedom (matching TXQCD).  The s and p singlet slots remain in
+// the field but become redundant trace modes; we leave them in for now since
+// they still contribute to S_aux additively without breaking anything.  The
+// name is kept for grep-compatibility; the function is now Hermitize-only.
 inline void DtxqcdHermitizeAndTracelessCFInPlace(LatticeDtxqcdSigma &X) {
-  // Step 1: Hermitize on the combined index.  Grid's adj() on
-  // iMatrix<iMatrix<vComplex, Nc>, Nf> does the right thing -- it conjugates
-  // and transposes both the outer (flavor) and inner (color) iMatrix layers,
-  // which is exactly the combined-index Hermitian conjugate.
   X = 0.5 * (X + adj(X));
-
-  // Step 2: subtract the combined-index trace.  Need Tr = sum_{a,i} X(a,a)(i,i).
-  // Built per-site with a thread_for; only DtxqcdNfNc diagonal entries.
-  autoView(Xv, X, CpuWrite);
-  GridBase *grid = X.Grid();
-  thread_for(ss, grid->oSites(), {
-    auto tr_v = Xv[ss]()(0, 0)(0, 0);
-    zeroit(tr_v);
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      for (int i = 0; i < Nc; ++i) {
-        tr_v = tr_v + Xv[ss]()(a, a)(i, i);
-      }
-    }
-    auto shift = tr_v * (1.0 / RealD(DtxqcdNfNc));
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      for (int i = 0; i < Nc; ++i) {
-        Xv[ss]()(a, a)(i, i) = Xv[ss]()(a, a)(i, i) - shift;
-      }
-    }
-  });
 }
 
 // Gaussian sample for CF matrix: complex Gaussian fill of all NfNc^2 entries,
@@ -183,14 +170,21 @@ class DTXQCDCompositeImpl {
     U.p     = Zero();
   }
 
-  // Fill all aux slots with mean-zero Gaussian samples at the physical
-  // saddle variance Var = 1/lambda^2 per independent component.  The
-  // CF Hermitian fields each have NfNc^2 - 1 = 35 independent DOFs; the
-  // singlet scalars each have 1 DOF.  AUX_FLUCT_LAMBDA optionally
-  // decouples the init fluctuation width from the physical lambda (cf.
-  // v1 use case in the deleted TXQCD analog).
+  // Fill all aux slots with Gaussian samples at the physical saddle
+  // variance Var = 1/lambda^2 per independent component, plus optional
+  // mean shift to the singlet saddle.  AUX_FLUCT_LAMBDA optionally
+  // decouples the init fluctuation width from the physical lambda.
+  //
+  // Sigma is the chiral condensate (Σ ≈ −⟨q̄q⟩ from Hutchinson on the
+  // initial gauge with stout smearing + AP-time BC).  Saddle relations
+  // (CF-Hermitian σ + singlet s, both coupling to the same singlet
+  // bilinear in v2; see DTXQCDCompositeImpl preamble note 2026-06-12):
+  //   ⟨σ^{ij}_{ab}⟩_diag = Σ / λ²   (per (i,a) diagonal entry)
+  //   ⟨s⟩                = Σ / λ²
+  //   ⟨Tr σ⟩             = N_F N_C · Σ / λ²  = 6 · Σ / λ²
+  // π, d, n, p stay mean-zero (parity-odd / non-singlet).
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
-                                    RealD lambda) {
+                                    RealD lambda, RealD Sigma = 0.0) {
     RealD lambda_var = lambda;
     if (const char *e = std::getenv("AUX_FLUCT_LAMBDA"); e && *e) {
       lambda_var = std::atof(e);
@@ -202,14 +196,34 @@ class DTXQCDCompositeImpl {
     DtxqcdHermitianCFGaussian(pRNG, U.n);      U.n     = scale * U.n;
     DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale * U.s;
     DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale * U.p;
+
+    if (Sigma != 0.0) {
+      const RealD shift = Sigma / (lambda * lambda);
+      // σ diagonal shift: each (i,a) diagonal entry → +Σ/λ²
+      typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
+      SigSobj sigma_id;  sigma_id = Zero();
+      for (int a = 0; a < DtxqcdNf; ++a)
+        for (int i = 0; i < Nc; ++i)
+          sigma_id()(a, a)(i, i) = shift;
+      LatticeDtxqcdSigma shift_sigma(U.sigma.Grid());
+      shift_sigma = sigma_id;
+      U.sigma = U.sigma + shift_sigma;
+      // s singlet shift: scalar → +Σ/λ²
+      typedef typename LatticeDtxqcdS::vector_object::scalar_object SSobj;
+      SSobj s_id;  s_id()()() = shift;
+      LatticeDtxqcdS shift_s(U.s.Grid());
+      shift_s = s_id;
+      U.s = U.s + shift_s;
+    }
   }
 
   // Weak-field gauge + thermal aux init.  Same recipe as v1.
   static inline void ThermalAuxConfiguration(GridParallelRNG &pRNG, Field &U,
                                               RealD lambda,
-                                              double wf_scale = 0.1) {
+                                              double wf_scale = 0.1,
+                                              RealD Sigma = 0.0) {
     GenerateWeakFieldGauge(pRNG, U, wf_scale);
-    FillAuxFields(pRNG, U, lambda);
+    FillAuxFields(pRNG, U, lambda, Sigma);
   }
 
   // Weak-field gauge initializer matching TXQCDCompositeImpl convention

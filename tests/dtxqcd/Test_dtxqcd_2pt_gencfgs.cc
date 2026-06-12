@@ -38,7 +38,14 @@ int main(int argc, char **argv) {
   GridCartesian        Grid(latt, simd, mpi);
   GridRedBlackCartesian RBGrid(&Grid);
 
-  int total_traj = n_therm + n_prod;
+  // Env knob N_PROD overrides the production-trajectory count (n_prod);
+  // similarly N_THERM overrides n_therm.  Lets us launch long-running streams
+  // (e.g. 2000 configs) without recompiling.
+  int n_therm_run = n_therm;
+  int n_prod_run  = n_prod;
+  if (const char *t = std::getenv("N_THERM"); t && *t) n_therm_run = std::atoi(t);
+  if (const char *p = std::getenv("N_PROD");  p && *p) n_prod_run  = std::atoi(p);
+  int total_traj = n_therm_run + n_prod_run;
 
   // ==================== DTXQCD ====================
   if (dtxqcd_configs_exist()) {
@@ -203,7 +210,63 @@ int main(int argc, char **argv) {
       // doubled M well-conditioned on the cold gauge while HMC evolves
       // the aux toward the physical 1/lambda width.
       if (std::getenv("AUX_FLUCT_LAMBDA") == nullptr) setenv("AUX_FLUCT_LAMBDA", "10.0", 0);
-      DTXQCDCompositeImpl::ThermalAuxConfiguration(pRNG, U, lambda_run, /*wf=*/0.1);
+      // AUX_INIT / AUX_INIT_AUTO: shift σ diagonal and s to the SD saddle
+      // ⟨σ^{ij}_{ab}⟩_diag = ⟨s⟩ = Σ/λ² where Σ = ⟨Tr M^{-1}⟩/V is the
+      // chiral condensate.  Skips the slow trace-mode equilibration at
+      // small λ (relaxation rate λ²/Nf Nc ⇒ hundreds of trajectories for
+      // λ < 1).  Mirrors TXQCD AUX_INIT pattern in gen_txqcd_cfgs.cc.
+      //   AUX_INIT=value  → Σ set explicitly
+      //   AUX_INIT_AUTO=1 → measure Σ = vev_trminv on the weak-field gauge
+      //                     via Hutchinson on the action's Wilson operator
+      //                     (no stout, mass_run, csw=0).
+      // Default: no shift (Σ=0), preserves prior behavior for streams that
+      // don't set either knob.
+      RealD Sigma_init = 0.0;
+      bool sigma_auto = false;
+      if (const char *si = std::getenv("AUX_INIT"); si && *si) {
+        Sigma_init = std::atof(si);
+      } else if (const char *sa = std::getenv("AUX_INIT_AUTO");
+                 sa && std::atoi(sa) != 0) {
+        sigma_auto = true;
+      }
+      // Step 1: weak-field gauge first (so we can measure on it).
+      DTXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, /*wf=*/0.1);
+      if (sigma_auto) {
+        // Measure Σ = ⟨Tr M^{-1}⟩/(2V) via Hutchinson on the unsmeared
+        // weak-field gauge using the action's Wilson operator (csw=0,
+        // periodic BC).  Use a separate RNG so the main pRNG state used
+        // for aux generation is unchanged from a non-AUX path.
+        WilsonImplParams impl_p;  // default: all-periodic
+        typedef WilsonFermion<WilsonImplR> MeasFermOp;
+        MeasFermOp Dw(U.U, Grid, RBGrid, mass_run, impl_p);
+        MdagMLinearOperator<MeasFermOp, LatticeFermion> HermOp(Dw);
+        ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+        const RealD V = (RealD)Grid.gSites();
+        GridParallelRNG noisePRNG(&Grid);
+        noisePRNG.SeedFixedIntegers({110, 120, 130, 140, 150});
+        const int n_noise = 8;
+        RealD acc = 0.0;
+        for (int h = 0; h < n_noise; ++h) {
+          LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
+          gaussian(noisePRNG, eta);
+          Dw.Mdag(eta, b);
+          x = Zero();
+          CG(HermOp, b, x);
+          acc += innerProduct(eta, x).real() / (2.0 * V);
+        }
+        Sigma_init = acc / n_noise;
+        std::cout << GridLogMessage
+                  << "[AUX_INIT_AUTO] Σ = vev_trminv = " << Sigma_init
+                  << "  → ⟨σ_diag⟩=⟨s⟩=" << (Sigma_init / (lambda_run * lambda_run))
+                  << std::endl;
+      } else if (Sigma_init != 0.0) {
+        std::cout << GridLogMessage
+                  << "[AUX_INIT] Σ = " << Sigma_init
+                  << "  → ⟨σ_diag⟩=⟨s⟩=" << (Sigma_init / (lambda_run * lambda_run))
+                  << std::endl;
+      }
+      // Step 2: fill aux with Gaussian + saddle shift.
+      DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
       if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {
         std::cout << GridLogMessage << "Zeroing d, n diquark fields at init" << std::endl;
         U.d = Zero();
@@ -220,7 +283,7 @@ int main(int argc, char **argv) {
       }
     }
 
-    int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
+    int no_metrop = (start_traj < n_therm_run) ? (n_therm_run - start_traj) : 0;
     if (const char *nm = std::getenv("NO_METROP"); nm && *nm) {
       no_metrop = std::atoi(nm);
     }
@@ -311,7 +374,7 @@ int main(int argc, char **argv) {
     MD.MDsteps = 10;
     MD.trajL   = 0.5;
 
-    int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
+    int no_metrop = (start_traj < n_therm_run) ? (n_therm_run - start_traj) : 0;
     if (const char *nm = std::getenv("NO_METROP"); nm && *nm) {
       no_metrop = std::atoi(nm);
     }

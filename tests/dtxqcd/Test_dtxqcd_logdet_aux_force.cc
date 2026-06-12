@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
   // h^2 truncation noise crossed the 1e-6 tol on the csw=1.25 all-aux
   // direction.  1e-7 keeps truncation in the noise floor (CG-free LogDet
   // means no lower limit from solver tol).
-  const RealD h    = 1e-7;
+  const RealD h    = 5e-8;
 
   // ---------- csw = 0 -- per-piece breakdown ----------
   DTXQCDLogDetCloverEOAction action(Grid, RBGrid, mass, /*csw=*/0.0);
