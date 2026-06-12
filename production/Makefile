@@ -4,8 +4,12 @@
 GRID_BUILD_DIR ?= ../build-gpu
 GRID_CONFIG = $(GRID_BUILD_DIR)/grid-config
 CXX      = $(shell $(GRID_CONFIG) --cxx)
-CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I$(GRID_BUILD_DIR)/Grid
-LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L$(GRID_BUILD_DIR)/Grid
+# Laptop build (homebrew OpenSSL/HDF5/etc.) needs the brew include/lib paths
+# that the system configure missed but Grid/util/Sha.h needs.  Harmless on
+# Linux production builds (the directories don't exist there).
+BREW_PREFIX ?= /opt/homebrew/opt
+CXXFLAGS = $(shell $(GRID_CONFIG) --cxxflags) -I.. -I$(GRID_BUILD_DIR)/Grid -I$(BREW_PREFIX)/openssl@3/include
+LDFLAGS  = $(shell $(GRID_CONFIG) --ldflags) -L$(GRID_BUILD_DIR)/Grid -L$(BREW_PREFIX)/openssl@3/lib
 LIBS     = $(shell $(GRID_CONFIG) --libs)
 
 # QUDA backend.  Enabled by default — all HMC and measurement binaries link
@@ -33,9 +37,9 @@ ifneq ($(QUDA_PREFIX),)
 endif
 
 PROGRAMS = gen_dtxqcd_cfgs gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
-           meas_conn_txqcd meas_conn_qcd meas_conn_weakfield meas_conn_weakfield_nf2 \
+           meas_conn_txqcd meas_conn_qcd meas_conn_dtxqcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
-           meas_aux_txqcd compare compute_plaq compute_vev \
+           meas_aux_txqcd meas_aux_dtxqcd meas_baryon_dtxqcd compare compute_plaq compute_vev \
            eigspec_diag eigspec_diag_nf2 \
            test_quda_init test_quda_roundtrip test_quda_inverter \
            test_quda_clover_mg \
