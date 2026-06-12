@@ -30,6 +30,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
+#include <Grid/qcd/utils/CovariantSmearing.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TXQCDProduction;
@@ -66,13 +67,26 @@ DtxqcdIsoSingletDiquark(const LatticeDtxqcdD &dF) {
 //   - colour vector η^{k'} = Σ_{i',j'} d_iso^{i'j'}(x',0) · ε^{i'j'k'}
 // where ε^{i'j'k'} is the standard 3x3 Levi-Civita symbol.
 
-// Helper: build ε^{ijk} d_iso^{ij}(x) colour vector and restrict to t_src.
+// Helper: build ε^{ijk} (d_iso^{ij})*(x) colour vector and restrict to t_src.
+// For the BARYON SOURCE side we use the Hermitian conjugate of the diquark
+// (i.e. of the operator that appears in B̄ = ε d† q̄), so the source wall is
+// built from d_iso* = adj(d_iso).  For anti-Hermitian d_iso (which is what
+// the flavor-antisymmetric ε^{ab} d^{ij}_{ab} projection gives) adj(d_iso) =
+// −d_iso, so structurally this is a sign flip on the source.  We keep the
+// two cases separate for clarity / future-proofing for non-anti-Hermitian d.
+//
+// `conj_field` controls the conjugation:
+//   false: ε^{ijk} d_iso^{ij}(x)    -- use at sink (Eq 36)
+//   true : ε^{ijk} (d_iso^{ij})*(x) -- use at source (corresponds to d† in B̄)
 inline LatticeColourVector
-DiquarkEpsilonWall(const LatticeColourMatrix &d_iso, int t_src) {
+DiquarkEpsilonWall(const LatticeColourMatrix &d_iso, int t_src,
+                   bool conj_field = false) {
   GridBase *g = d_iso.Grid();
+  LatticeColourMatrix d_use = conj_field ? LatticeColourMatrix(adj(d_iso))
+                                          : d_iso;
   LatticeColourVector wall(g);
   wall = Zero();
-  autoView(dv, d_iso, CpuRead);
+  autoView(dv, d_use, CpuRead);
   autoView(wv, wall,  CpuWrite);
   thread_for(ss, g->oSites(), {
     auto d = dv[ss]()();
@@ -118,27 +132,29 @@ inline void BuildBaryonWallSourceProj(LatticeFermion &eta,
                                        const LatticeColourMatrix &d_iso,
                                        int spin_sign, int t_src) {
   GridBase *g = d_iso.Grid();
-  LatticeColourVector wall = DiquarkEpsilonWall(d_iso, t_src);
+  // Source uses d†_iso (conjugation matches the B̄ creation operator at the
+  // source time in ⟨B(t_sink) B̄(t_src)⟩).  Sink uses d_iso as-is (Eq 36).
+  LatticeColourVector wall = DiquarkEpsilonWall(d_iso, t_src,
+                                                 /*conj_field=*/true);
   LatticeFermion eta_raw(g);
   eta_raw = Zero();
   for (int beta = 0; beta < Ns; ++beta) pokeSpin(eta_raw, wall, beta);
   eta = ApplyPosParitySpinProj(eta_raw, spin_sign);
 }
 
-// Sink contraction with positive-parity spin-(up|down) projection at sink.
-//   S^{(B)}_{±}(t) = Σ_x ε^{ijk} d_iso^{ij}(x,t) · Σ_β [P_± ψ]^k_β(x,t)
-// Sum over spin index β at sink is the spin trace of the (rank-1) projected
-// propagator: by trace cyclicity this equals Tr[P_± · S^{(B)}].
+// Sink contraction with positive-parity spin-(up|down) projection.  Uses
+//   S^{(B)}(t) = Σ_x ε^{ijk} d_iso^{ij}(x, t) · Σ_β [P_+ ψ]^k_β(x, t)
+// per Eq 36.  Sink wall is built from d_iso (NO conjugation; the source
+// side carries the d† factor matching B̄ at t_src).
 inline std::vector<ComplexD>
 BaryonSinkContractProj(const LatticeColourMatrix &d_iso,
                        const LatticeFermion &psi, int spin_sign) {
   GridBase *g = d_iso.Grid();
-  // Sink-side diquark·ε wall (no t-restriction — we sliceSum over t).
-  LatticeColourVector wall = DiquarkEpsilonWall(d_iso, /*t_src=*/-1);
-  // Apply positive-parity spin projector at sink
+  LatticeColourVector wall = DiquarkEpsilonWall(d_iso, /*t_src=*/-1,
+                                                 /*conj_field=*/false);
   LatticeFermion psi_proj = ApplyPosParitySpinProj(psi, spin_sign);
   // Contract: at each site, sum over the 4 spinor components of
-  //   wall^k · ψ_proj^k_β  → ε^{ijk} d^{ij}(x) · Σ_β ψ_proj^k_β(x)
+  //   wall^k · ψ_proj^k_β  → ε^{ijk} (d^{ji}_{ba}(x))* · Σ_β ψ_proj^k_β(x)
   LatticeComplex Cn(g);
   Cn = Zero();
   for (int beta = 0; beta < Ns; ++beta) {
@@ -204,6 +220,29 @@ int main(int argc, char **argv) {
 
   // Build the isosinglet diquark colour field once for this cfg.
   LatticeColourMatrix d_iso = DtxqcdIsoSingletDiquark(U.d);
+
+  // Optional Gaussian wavefunction smearing on source + sink fermions.
+  // Equivalent to smearing the diquark wall via the gauge-covariant identity
+  // ⟨smeared d^{ij} | ψ^k⟩ = ⟨d^{ij} | smeared ψ^k⟩ (for spatial-only smearing).
+  // SMEAR_WIDTH=0 (default) disables smearing.
+  const RealD smear_width =
+      TXQCDProduction::detail::env_real("SMEAR_WIDTH", 0.0);
+  const int   smear_niter =
+      TXQCDProduction::detail::env_int("SMEAR_NITER", 30);
+  const bool do_smear = (smear_width > 0.0 && smear_niter > 0);
+  // Extract gauge links for the covariant Laplacian used in GaussianSmear.
+  std::vector<LatticeColourMatrix> Umu_links(Nd, U.U.Grid());
+  if (do_smear) {
+    for (int mu = 0; mu < Nd; ++mu)
+      Umu_links[mu] = PeekIndex<LorentzIndex>(U.U, mu);
+    std::cout << GridLogMessage << "[baryon smear] width=" << smear_width
+              << " niter=" << smear_niter
+              << " (spatial Gaussian, dir orthog=" << (Nd - 1) << ")"
+              << std::endl;
+  } else {
+    std::cout << GridLogMessage << "[baryon smear] disabled "
+              << "(SMEAR_WIDTH=0 or SMEAR_NITER=0)" << std::endl;
+  }
 
   // Build the FULL DOUBLED DTXQCD Wilson-clover Dirac operator on the gauge
   // + aux fields.  This includes the flavour-dependent σ^{ij}_{ab} insertion
@@ -275,6 +314,12 @@ int main(int argc, char **argv) {
         // Build raw single-flavour fermion source (plain LatticeFermion):
         LatticeFermion eta_f(&Grid);
         BuildBaryonWallSourceProj(eta_f, d_iso, spin_signs[si], t_src);
+        // Apply Gaussian wavefunction smearing to the source (= smearing the
+        // diquark source field; commutes with spatial integration).
+        if (do_smear) {
+          CovariantSmearing<PeriodicGimplR>::GaussianSmear(
+              Umu_links, eta_f, smear_width, smear_niter, Nd - 1);
+        }
         RealD nrm = norm2(eta_f);
         std::cout << GridLogMessage << "[baryon] t_src=" << t_src
                   << " flavor=" << (fi == 0 ? "u" : "d")
@@ -288,7 +333,13 @@ int main(int argc, char **argv) {
         Mop.Mdag(eta, b);
         DtxqcdCG(b, psi);
         // Extract upper.f[fi] for sink contraction (same flavour at source/sink)
-        SB_2d[fi][si][t_src] = BaryonSinkContractProj(d_iso, psi.upper.f[fi],
+        LatticeFermion psi_q = psi.upper.f[fi];
+        // Apply Gaussian wavefunction smearing to the sink quark field.
+        if (do_smear) {
+          CovariantSmearing<PeriodicGimplR>::GaussianSmear(
+              Umu_links, psi_q, smear_width, smear_niter, Nd - 1);
+        }
+        SB_2d[fi][si][t_src] = BaryonSinkContractProj(d_iso, psi_q,
                                                       spin_signs[si]);
       }
     }
