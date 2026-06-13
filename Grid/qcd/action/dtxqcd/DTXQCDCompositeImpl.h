@@ -176,13 +176,15 @@ class DTXQCDCompositeImpl {
   // decouples the init fluctuation width from the physical lambda.
   //
   // Sigma is the chiral condensate (Σ ≈ −⟨q̄q⟩ from Hutchinson on the
-  // initial gauge with stout smearing + AP-time BC).  Saddle relations
-  // (CF-Hermitian σ + singlet s, both coupling to the same singlet
-  // bilinear in v2; see DTXQCDCompositeImpl preamble note 2026-06-12):
-  //   ⟨σ^{ij}_{ab}⟩_diag = Σ / λ²   (per (i,a) diagonal entry)
-  //   ⟨s⟩                = Σ / λ²
-  //   ⟨Tr σ⟩             = N_F N_C · Σ / λ²  = 6 · Σ / λ²
+  // initial gauge with stout smearing + AP-time BC).  Equilibrium saddle
+  // values (confirmed from λ=5,10 production data 2026-06-12):
+  //   ⟨s⟩                = N_F · Σ / λ²       (flavor-trace SD identity)
+  //   ⟨Tr σ⟩             = N_F · Σ / λ²       (same as ⟨s⟩, both singlet)
+  //   ⟨σ^{ij}_{ab}⟩_diag = Σ / (N_C · λ²)     (per (i,a) entry; sum to ⟨Trσ⟩)
   // π, d, n, p stay mean-zero (parity-odd / non-singlet).
+  // PRIOR BUG (pre-2026-06-13): code used per-entry shift Σ/λ² for both σ
+  // and s, giving ⟨s⟩ = Σ/λ² (factor N_F=2 too small) and ⟨Trσ⟩ = N_F·N_C·Σ/λ²
+  // (factor N_C=3 too large).  Corrected here.
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
                                     RealD lambda, RealD Sigma = 0.0) {
     RealD lambda_var = lambda;
@@ -198,19 +200,22 @@ class DTXQCDCompositeImpl {
     DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale * U.p;
 
     if (Sigma != 0.0) {
-      const RealD shift = Sigma / (lambda * lambda);
-      // σ diagonal shift: each (i,a) diagonal entry → +Σ/λ²
+      // σ per-entry shift = Σ/(N_C λ²)  → ⟨Trσ⟩ = N_F · Σ/λ²
+      const RealD sigma_shift = Sigma / (Nc * lambda * lambda);
+      // s shift = N_F · Σ/λ²
+      const RealD s_shift = DtxqcdNf * Sigma / (lambda * lambda);
+      // σ diagonal shift
       typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
       SigSobj sigma_id;  sigma_id = Zero();
       for (int a = 0; a < DtxqcdNf; ++a)
         for (int i = 0; i < Nc; ++i)
-          sigma_id()(a, a)(i, i) = shift;
+          sigma_id()(a, a)(i, i) = sigma_shift;
       LatticeDtxqcdSigma shift_sigma(U.sigma.Grid());
       shift_sigma = sigma_id;
       U.sigma = U.sigma + shift_sigma;
-      // s singlet shift: scalar → +Σ/λ²
+      // s singlet shift
       typedef typename LatticeDtxqcdS::vector_object::scalar_object SSobj;
-      SSobj s_id;  s_id()()() = shift;
+      SSobj s_id;  s_id()()() = s_shift;
       LatticeDtxqcdS shift_s(U.s.Grid());
       shift_s = s_id;
       U.s = U.s + shift_s;

@@ -257,12 +257,14 @@ int main(int argc, char **argv) {
         Sigma_init = acc / n_noise;
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO] Σ = vev_trminv = " << Sigma_init
-                  << "  → ⟨σ_diag⟩=⟨s⟩=" << (Sigma_init / (lambda_run * lambda_run))
+                  << "  → ⟨s⟩=⟨Trσ⟩=N_F·Σ/λ²=" << (DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  (per-entry σ_diag=" << (Sigma_init / (Nc * lambda_run * lambda_run)) << ")"
                   << std::endl;
       } else if (Sigma_init != 0.0) {
         std::cout << GridLogMessage
                   << "[AUX_INIT] Σ = " << Sigma_init
-                  << "  → ⟨σ_diag⟩=⟨s⟩=" << (Sigma_init / (lambda_run * lambda_run))
+                  << "  → ⟨s⟩=⟨Trσ⟩=N_F·Σ/λ²=" << (DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  (per-entry σ_diag=" << (Sigma_init / (Nc * lambda_run * lambda_run)) << ")"
                   << std::endl;
       }
       // Step 2: fill aux with Gaussian + saddle shift.
