@@ -104,10 +104,14 @@ int main(int argc, char **argv) {
     // Wall slices (raw, not lambda-scaled)
     write(wr, "aux_wall_sig_ab", awc.wall_sig_ab_flat);
     write(wr, "aux_wall_pi_ab",  awc.wall_pi_ab_flat);
+    write(wr, "aux_wall_d_ab",   awc.wall_d_ab_flat);
+    write(wr, "aux_wall_n_ab",   awc.wall_n_ab_flat);
     write(wr, "aux_wall_s",      awc.wall_s);
     write(wr, "aux_wall_p",      awc.wall_p);
     write(wr, "aux_wall_trsig",  awc.wall_trsig);
     write(wr, "aux_wall_trpi",   awc.wall_trpi);
+    write(wr, "aux_wall_trd",    awc.wall_trd);
+    write(wr, "aux_wall_trn",    awc.wall_trn);
 
     write(wr, "traj",   traj);
     write(wr, "lambda", lam);

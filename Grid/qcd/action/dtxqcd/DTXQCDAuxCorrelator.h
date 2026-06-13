@@ -180,8 +180,11 @@ struct DtxqcdAuxWallCorrelators {
   // Per-cfg wall slices (raw, NOT λ-scaled)
   std::vector<ComplexD> wall_sig_ab_flat;   // Nf² × T
   std::vector<ComplexD> wall_pi_ab_flat;    // Nf² × T
+  std::vector<ComplexD> wall_d_ab_flat;     // Nf² × T  (diquark)
+  std::vector<ComplexD> wall_n_ab_flat;     // Nf² × T  (n field)
   std::vector<ComplexD> wall_s, wall_p;
   std::vector<ComplexD> wall_trsig, wall_trpi;
+  std::vector<ComplexD> wall_trd, wall_trn;
 };
 
 // Compute all aux wall-wall correlators for one config.  MUST be called on
@@ -256,18 +259,34 @@ DtxqcdComputeAuxWallCorrelators(const DTXQCDField &U, RealD lambda) {
   DtxqcdScaleVec(r.C_trsig_s, lam4);
   DtxqcdScaleVec(r.C_trpi_p,  lam4);
 
+  // ---- d, n diquark wall slices (raw, not λ-scaled).  These should average
+  // to zero on a healthy ensemble; nonzero ensemble means signal a diquark
+  // condensate ("TXQCD downfall" pathology).
+  LatticeDtxqcdFlavorMat DCT = DtxqcdColorTrace(U.d);
+  LatticeDtxqcdFlavorMat NCT = DtxqcdColorTrace(U.n);
+  auto d_ab = DtxqcdSliceSumFlavorAll(DCT);
+  auto n_ab = DtxqcdSliceSumFlavorAll(NCT);
+
   // ---- Wall slices (raw, not λ-scaled) ----
   r.wall_sig_ab_flat.assign(Nf2 * T, ComplexD(0.0));
   r.wall_pi_ab_flat .assign(Nf2 * T, ComplexD(0.0));
+  r.wall_d_ab_flat  .assign(Nf2 * T, ComplexD(0.0));
+  r.wall_n_ab_flat  .assign(Nf2 * T, ComplexD(0.0));
   for (int ab = 0; ab < Nf2; ++ab)
     for (int t = 0; t < T; ++t) {
       r.wall_sig_ab_flat[ab * T + t] = sig_ab[ab][t];
       r.wall_pi_ab_flat [ab * T + t] = pi_ab [ab][t];
+      r.wall_d_ab_flat  [ab * T + t] = d_ab  [ab][t];
+      r.wall_n_ab_flat  [ab * T + t] = n_ab  [ab][t];
     }
   r.wall_s     = std::move(s_slice);
   r.wall_p     = std::move(p_slice);
   r.wall_trsig = std::move(trsig_slice);
   r.wall_trpi  = std::move(trpi_slice);
+
+  // Tr d, Tr n = d_{11} + d_{22} per slice (flavor trace of color-traced d)
+  r.wall_trd = DtxqcdAddVec(d_ab[i_11], d_ab[i_22], 1.0, 1.0);
+  r.wall_trn = DtxqcdAddVec(n_ab[i_11], n_ab[i_22], 1.0, 1.0);
 
   return r;
 }
