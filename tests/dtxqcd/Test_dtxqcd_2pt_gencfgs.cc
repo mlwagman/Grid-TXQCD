@@ -266,14 +266,14 @@ int main(int argc, char **argv) {
         Sigma_init = acc / n_noise;
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO] Σ = vev_trminv = " << Sigma_init
-                  << "  → ⟨s⟩ = 2·N_F·Σ/λ² = "
-                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  → ⟨s⟩ = N_F·Σ/(2λ²) = "
+                  << (DtxqcdNf * Sigma_init / (2.0 * lambda_run * lambda_run))
                   << "  ⟨Tr σ⟩ = 0 (traceless by construction)" << std::endl;
       } else if (Sigma_init != 0.0) {
         std::cout << GridLogMessage
                   << "[AUX_INIT] Σ = " << Sigma_init
-                  << "  → ⟨s⟩ = 2·N_F·Σ/λ² = "
-                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  → ⟨s⟩ = N_F·Σ/(2λ²) = "
+                  << (DtxqcdNf * Sigma_init / (2.0 * lambda_run * lambda_run))
                   << "  ⟨Tr σ⟩ = 0 (traceless by construction)" << std::endl;
       }
       // Step 2: fill aux with Gaussian + saddle shift.
@@ -334,7 +334,10 @@ int main(int argc, char **argv) {
           }
           acc += innerProduct(eta, x).real() / (2.0 * V);
         }
-        return (acc / n_noise_iter) / 2.0;
+        // Per-quark Σ: full doubled trace ÷ (2·N_F).  Matches plain-Wilson
+        // convention at aux=0 (verified Test_dtxqcd_trminv_zeroaux ratio = 4
+        // = 2·N_F for N_F=2).
+        return (acc / n_noise_iter) / (2.0 * DtxqcdNf);
       };
       if (sigma_auto) {
         int aux_iter_max = 15;
@@ -387,8 +390,8 @@ int main(int argc, char **argv) {
         DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO converged] Σ* = " << Sigma_init
-                  << "  → ⟨s⟩* = 2·Nf·Σ*/λ² = "
-                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  → ⟨s⟩* = Nf·Σ*/(2λ²) = "
+                  << (DtxqcdNf * Sigma_init / (2.0 * lambda_run * lambda_run))
                   << std::endl;
       }
       if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {

@@ -95,6 +95,7 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
       aux_C_trsig_s_, aux_C_trpi_p_;
   std::vector<std::vector<ComplexD>>
       aux_wall_sig_ab_, aux_wall_pi_ab_,
+      aux_wall_d_ab_,   aux_wall_n_ab_,
       aux_wall_s_, aux_wall_p_, aux_wall_trsig_, aux_wall_trpi_;
   // Per-traj lowest signed eigenvalues of γ5·M48 (Hermitian), tracking
   // Pfaffian sign changes.  Each row is the lowest N_EV_TRACK |λ| Ritz
@@ -195,25 +196,79 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     return WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
   }
 
-  // Volume-averaged Tr M^{-1} via Hutchinson stochastic estimator, same
-  // structure as TXQCD / QCD diagnostics.  Acts on the gauge field only,
-  // so the DTXQCD aux fields don't enter here -- this is a "QCD"-like
-  // observable evaluated on the DTXQCD-generated gauge background.
-  RealD compute_trminv(LatticeGaugeField &Uvev) {
-    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_);
-    MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
-    ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+  // Σ_DTXQCD via Hutchinson stochastic estimator on the FULL doubled M48
+  // operator (built from the current gauge + aux configuration).  This is
+  // the physical ⟨q̄q⟩ that the fermion measure actually sees, in contrast
+  // to the pre-2026-06-15 implementation that used plain Wilson on the
+  // gauge field alone (which is only correct at λ → ∞ where aux fields
+  // → 0).  Cost: one MdagM CG per Hutchinson noise.
+  //
+  // Normalisation: Tr M48⁻¹ runs over the doubled fermion space (2·V·Ns·Nc·Nf
+  // entries for upper+lower blocks).  We return acc / (2·V) to match the
+  // earlier convention where /2 accounted for the Nf factor of WilsonFermion;
+  // for the doubled M48 the "Nf factor" is 2·Nf because there are 2 doubled
+  // blocks each of Nf flavor, so the same /2 captures the per-quark Σ.
+  // Reader: this is the natural value to compare with Σ_bare (plain QCD
+  // ⟨q̄q⟩ on the same gauge) — they agree as λ → ∞.
+  // Σ_DTXQCD per quark via Hutchinson on M48.  Returns
+  //   Σ ≡ (1/V·2·N_F) Tr M48⁻¹
+  // i.e. the full doubled trace divided out by the doubling factor
+  // (2 = upper+lower blocks) and N_F (flavor copies).  This matches the
+  // plain-Wilson Σ convention at aux=0 (verified by
+  // Test_dtxqcd_trminv_zeroaux: ratio = 2·N_F up to noise).  The /(2V)
+  // factor inside the noise loop is the standard plain-Wilson
+  // normalization; the extra /(2·N_F) here makes it per-quark.
+  RealD compute_trminv(DTXQCDField &U) {
+    DTXQCDWilsonCloverFermionEO Dw(U.U, grid_, rbgrid_, mass_, /*csw=*/0.0,
+                                    U.sigma, U.pi, U.d, U.n, U.s, U.p);
     RealD V = (RealD)grid_.gSites();
     RealD acc = 0.0;
+    const RealD cg_tol = 1e-8;
     for (int h = 0; h < n_vev_noise_; ++h) {
-      LatticeFermion eta(&grid_), b(&grid_), x(&grid_);
-      gaussian(prng_, eta);
+      DTXQCDFermionDoubled eta(&grid_), b(&grid_), x(&grid_);
+      DTXQCDFermionDoubled r(&grid_), p(&grid_), Ap(&grid_), tmp(&grid_);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        gaussian(prng_, eta.upper.f[a]);
+        gaussian(prng_, eta.lower.f[a]);
+      }
       Dw.Mdag(eta, b);
       x = Zero();
-      CG(HermOp, b, x);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        r.upper.f[a] = b.upper.f[a]; r.lower.f[a] = b.lower.f[a];
+        p.upper.f[a] = b.upper.f[a]; p.lower.f[a] = b.lower.f[a];
+      }
+      RealD r2 = norm2(r), b2 = norm2(b);
+      RealD tol2 = cg_tol * cg_tol * b2;
+      // Custom CG on M†M (same pattern as the AUX_INIT bisection's helper —
+      // DTXQCDFermionDoubled doesn't satisfy the Lattice<vobj> concept that
+      // Grid's stock ConjugateGradient requires).
+      for (int k = 0; k < cg_max; ++k) {
+        Dw.M(p, tmp);
+        Dw.Mdag(tmp, Ap);
+        RealD pAp = innerProduct(p, Ap).real();
+        RealD alpha = r2 / pAp;
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          x.upper.f[a] = x.upper.f[a] + alpha * p.upper.f[a];
+          x.lower.f[a] = x.lower.f[a] + alpha * p.lower.f[a];
+          r.upper.f[a] = r.upper.f[a] - alpha * Ap.upper.f[a];
+          r.lower.f[a] = r.lower.f[a] - alpha * Ap.lower.f[a];
+        }
+        RealD r2_new = norm2(r);
+        if (r2_new < tol2) { r2 = r2_new; break; }
+        RealD beta = r2_new / r2;
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          p.upper.f[a] = r.upper.f[a] + beta * p.upper.f[a];
+          p.lower.f[a] = r.lower.f[a] + beta * p.lower.f[a];
+        }
+        r2 = r2_new;
+      }
+      // η† M⁻¹ η = η† x stochastically estimates Tr M⁻¹.  Divide by 2V to
+      // match the prior convention (factor 2 captures the doubled-block
+      // count, V is volume).
       acc += innerProduct(eta, x).real() / (2.0 * V);
     }
-    return acc / n_vev_noise_;
+    // Per-quark normalization: full doubled trace ÷ (2·N_F).
+    return acc / (n_vev_noise_ * 2.0 * DtxqcdNf);
   }
 
   void record_aux(DTXQCDField &U) override {
@@ -224,7 +279,7 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     norm_n_    .push_back(norm2(U.n)     / V);
     norm_s_    .push_back(norm2(U.s)     / V);
     norm_p_    .push_back(norm2(U.p)     / V);
-    vev_trminv_.push_back(compute_trminv(U.U));
+    vev_trminv_.push_back(compute_trminv(U));
     // Aux wall-wall correlators (collective sliceSum — must run on every
     // rank).  Cost ≪1% of a trajectory.
     DtxqcdAuxWallCorrelators awc =
@@ -243,6 +298,8 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     aux_C_trpi_p_   .push_back(std::move(awc.C_trpi_p));
     aux_wall_sig_ab_.push_back(std::move(awc.wall_sig_ab_flat));
     aux_wall_pi_ab_ .push_back(std::move(awc.wall_pi_ab_flat));
+    aux_wall_d_ab_  .push_back(std::move(awc.wall_d_ab_flat));
+    aux_wall_n_ab_  .push_back(std::move(awc.wall_n_ab_flat));
     aux_wall_s_     .push_back(std::move(awc.wall_s));
     aux_wall_p_     .push_back(std::move(awc.wall_p));
     aux_wall_trsig_ .push_back(std::move(awc.wall_trsig));
@@ -335,6 +392,8 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     write(wr, "aux_C_trpi_p",   aux_C_trpi_p_);
     write(wr, "aux_wall_sig_ab", aux_wall_sig_ab_);
     write(wr, "aux_wall_pi_ab",  aux_wall_pi_ab_);
+    write(wr, "aux_wall_d_ab",   aux_wall_d_ab_);
+    write(wr, "aux_wall_n_ab",   aux_wall_n_ab_);
     write(wr, "aux_wall_s",      aux_wall_s_);
     write(wr, "aux_wall_p",      aux_wall_p_);
     write(wr, "aux_wall_trsig",  aux_wall_trsig_);
@@ -357,6 +416,7 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
     aux_C_trsig_.clear();    aux_C_trpi_.clear();
     aux_C_trsig_s_.clear();  aux_C_trpi_p_.clear();
     aux_wall_sig_ab_.clear(); aux_wall_pi_ab_.clear();
+    aux_wall_d_ab_.clear();   aux_wall_n_ab_.clear();
     aux_wall_s_.clear();      aux_wall_p_.clear();
     aux_wall_trsig_.clear();  aux_wall_trpi_.clear();
     g5M_evals_.clear();

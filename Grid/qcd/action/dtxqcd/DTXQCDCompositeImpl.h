@@ -257,9 +257,14 @@ class DTXQCDCompositeImpl {
   // 2026-06-15 redesign — σ, π are traceless, s, p have halved Gaussian
   // coefficient (λ²/4).  Saddle now puts the entire singlet condensate
   // into s alone (no Tr σ contribution since σ is forced traceless):
-  //   ⟨s⟩      = 2 · N_F · Σ / λ²    (doubled vs old since coefficient halved)
+  //   ⟨s⟩      = N_F · Σ / (2 λ²)    (per-quark Σ convention)
   //   ⟨Tr σ⟩   = 0                    (traceless by construction)
   // π, d, n, p stay mean-zero.
+  //
+  // Σ here is the per-quark chiral condensate (matches plain-Wilson Σ
+  // at aux=0); compute_trminv on the doubled M48 returns this same
+  // convention after dividing by 2·N_F (the doubling factor verified
+  // by Test_dtxqcd_trminv_zeroaux: ratio = 2·N_F).
   //
   // Pre-2026-06-15 (and superseded): both s and Tr σ each shifted by
   // N_F·Σ/λ², doubling the effective singlet coupling.  Their sum
@@ -287,9 +292,9 @@ class DTXQCDCompositeImpl {
     DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale_sp * U.p;
 
     if (Sigma != 0.0) {
-      // s shift = 2 · N_F · Σ / λ²  (doubled to match halved-coeff saddle).
+      // s shift = N_F · Σ / (2 λ²)  with Σ in per-quark convention.
       // σ traceless → no σ shift; the entire singlet condensate sits in s.
-      const RealD s_shift = 2.0 * DtxqcdNf * Sigma / (lambda * lambda);
+      const RealD s_shift = DtxqcdNf * Sigma / (2.0 * lambda * lambda);
       typedef typename LatticeDtxqcdS::vector_object::scalar_object SSobj;
       SSobj s_id;  s_id()()() = s_shift;
       LatticeDtxqcdS shift_s(U.s.Grid());
