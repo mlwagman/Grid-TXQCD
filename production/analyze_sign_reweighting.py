@@ -4,15 +4,18 @@ DTXQCD Pfaffian-sign reweighting analysis.
 
 Reads hmc_diagnostics.<traj>.h5 files produced by Test_dtxqcd_2pt_gencfgs
 (after commit 9fe39fbb) and:
-  - derives per-traj sign s_n = (-1)^{n_neg(g5M_evals[n])}
-  - reports <s> ± σ, effective sample size N_eff = N·<s>²
+  - derives per-traj signPf_n = (-1)^{n_neg(g5M_evals[n])}
+  - reports <signPf> ± σ, effective sample size N_eff = N·<signPf>²
   - histograms |λ|_min and flags trajs near the sign boundary
-  - emits an optional `signs.<traj>.h5` sidecar with the per-traj sign
+  - emits an optional `signs.<traj>.h5` sidecar with the per-traj signPf
     array, ready to be multiplied into any downstream observable
 
+Naming: `signPf` is used everywhere instead of `s` to avoid clashing
+with the aux singlet scalar field `s` in the DTXQCD action.
+
 For a measured observable O_n stored elsewhere (e.g. meas_conn h5):
-  <O>_phys = mean(s*O) / mean(s)
-with errors via jackknife over the joint (s, O) ensemble.
+  <O>_phys = mean(signPf*O) / mean(signPf)
+with errors via jackknife over the joint (signPf, O) ensemble.
 
 Usage:
   ./analyze_sign_reweighting.py <ensemble_dir> [--emit-signs]
@@ -89,27 +92,28 @@ def main():
     N = len(trajs)
     K = evals.shape[1]
 
-    signs = np.empty(N, dtype=np.int8)
+    signPf = np.empty(N, dtype=np.int8)
     n_neg = np.empty(N, dtype=np.int32)
     abs_min = np.empty(N, dtype=np.float64)
     for i in range(N):
-        s, nn, am = per_traj_sign(evals[i])
-        signs[i] = s
+        sp, nn, am = per_traj_sign(evals[i])
+        signPf[i] = sp
         n_neg[i] = nn
         abs_min[i] = am
 
-    n_pos = int(np.sum(signs > 0))
-    n_neg_traj = int(np.sum(signs < 0))
-    s_mean, s_err = jackknife_mean_err(signs.astype(np.float64))
-    N_eff = N * (s_mean ** 2) if abs(s_mean) > 0 else 0.0
+    n_pos = int(np.sum(signPf > 0))
+    n_neg_traj = int(np.sum(signPf < 0))
+    signPf_mean, signPf_err = jackknife_mean_err(signPf.astype(np.float64))
+    N_eff = N * (signPf_mean ** 2) if abs(signPf_mean) > 0 else 0.0
 
     print(f"Ensemble: {args.ensemble_dir}")
     print(f"  Trajs:    {N}  (range {trajs[0]}..{trajs[-1]}, "
           f"step {int(trajs[1]-trajs[0]) if N>1 else '-'})")
     print(f"  K=lowest: {K}")
-    print(f"  Sign breakdown: {n_pos}/{N} (+), {n_neg_traj}/{N} (−)")
-    print(f"  ⟨s⟩  = {s_mean:+.5f} ± {s_err:.5f}")
-    print(f"  N_eff = N·⟨s⟩² = {N_eff:.1f}    (penalty {N/max(N_eff,1e-12):.2f}×)")
+    print(f"  signPf breakdown: {n_pos}/{N} (+), {n_neg_traj}/{N} (−)")
+    print(f"  ⟨signPf⟩  = {signPf_mean:+.5f} ± {signPf_err:.5f}")
+    print(f"  N_eff = N·⟨signPf⟩² = {N_eff:.1f}    "
+          f"(penalty {N/max(N_eff,1e-12):.2f}×)")
     print(f"  ⟨|λ|_min⟩ = {abs_min.mean():.4f}, "
           f"min over trajs = {abs_min.min():.4f}")
 
@@ -119,33 +123,40 @@ def main():
         bad_idx = np.where(abs_min < args.min_lam_warn)[0]
         for idx in bad_idx[:10]:
             print(f"    traj {trajs[idx]}: |λ|_min={abs_min[idx]:.4f} "
-                  f"sign={int(signs[idx]):+d}")
+                  f"signPf={int(signPf[idx]):+d}")
         if len(bad_idx) > 10:
             print(f"    ...and {len(bad_idx)-10} more")
 
-    # Sign-flip events (per-step change in sign)
-    flips = int(np.sum(signs[1:] != signs[:-1]))
-    print(f"  Sign flips between adjacent trajs: {flips}")
+    # signPf-flip events (per-step change in signPf)
+    flips = int(np.sum(signPf[1:] != signPf[:-1]))
+    print(f"  signPf flips between adjacent trajs: {flips}")
 
-    # Reweighting demonstration on plaq (sign-blind, so should match)
+    # Reweighting consistency check on plaq.  signPf reweighting applies
+    # to *every* observable.  For parity-even observables (plaq, ⟨σ⟩,
+    # ⟨s⟩, ...) both signPf sectors give the same answer in the
+    # ergodic limit, so HMC and reweighted means should agree within
+    # statistical errors — this is the consistency check, not a "this
+    # doesn't need reweighting" claim.
     p_mean, p_err = jackknife_mean_err(plaq)
-    p_rw_num, _ = jackknife_mean_err(signs * plaq)
-    p_rw = p_rw_num / s_mean if abs(s_mean) > 1e-12 else float("nan")
+    p_rw_num, _ = jackknife_mean_err(signPf * plaq)
+    p_rw = (p_rw_num / signPf_mean
+            if abs(signPf_mean) > 1e-12 else float("nan"))
     print(f"  ⟨plaq⟩_HMC  = {p_mean:.6f} ± {p_err:.6f}")
-    print(f"  ⟨plaq⟩_rw   = {p_rw:.6f}    (sign-blind obs; should match HMC)")
+    print(f"  ⟨plaq⟩_rw   = {p_rw:.6f}    "
+          f"(parity-even consistency check)")
 
     if args.emit_signs:
         out = os.path.join(args.ensemble_dir,
                            f"signs.{int(trajs[-1])}.h5")
         with h5py.File(out, "w") as h:
             h["traj"] = trajs
-            h["sign"] = signs
+            h["signPf"] = signPf
             h["n_neg_lowK"] = n_neg
             h["abs_min"] = abs_min
             h["g5M_evals"] = evals
             h.attrs["K_lowest"] = K
-            h.attrs["s_mean"] = s_mean
-            h.attrs["s_err"] = s_err
+            h.attrs["signPf_mean"] = signPf_mean
+            h.attrs["signPf_err"] = signPf_err
             h.attrs["N_eff"] = N_eff
         print(f"  wrote {out}")
 

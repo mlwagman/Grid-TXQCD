@@ -267,11 +267,17 @@ struct DtxqcdDiagnostics : HmcDiagWriter<DTXQCDField> {
         if (e < 0) ++n_neg_low;
         if (std::abs(e) < abs_min) abs_min = std::abs(e);
       }
+      // signPf_lowK = (-1)^{n_neg_lowK}; the full signPf factor used in
+      // sign reweighting is the same provided no eval outside the
+      // lowest K has crossed zero (verify with wider Lanczos at
+      // thermalization end if |λ|_min approaches 0).
+      int signPf_lowK = (n_neg_low & 1) ? -1 : +1;
       std::cout << GridLogMessage << "[γ5M evals]";
       for (auto e : evs) std::cout << "  " << std::showpos << e << std::noshowpos;
       std::cout << "  |λ|_min=" << abs_min
                 << "  n_neg_lowK=" << n_neg_low
-                << "  parity_lowK=" << (n_neg_low & 1) << std::endl;
+                << "  signPf_lowK=" << std::showpos << signPf_lowK
+                << std::noshowpos << std::endl;
     }
     // Per-traj aux VEV summary to stdout — singlet means and channel norms.
     // wall_* vectors have length T; mean over t gives ⟨op⟩ at λ⁰ scaling.

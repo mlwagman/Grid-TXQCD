@@ -3,121 +3,158 @@
 Design note for handling the Pfaffian sign problem identified in low-λ
 DTXQCD HMC ensembles. Companion to `TXQCD_ARCHITECTURE.md`.
 
-## What HMC samples vs. what we want
+## The physical measure has signed Pf, HMC samples |Pf|
 
-The DTXQCD measure is
+The DTXQCD rational pseudofermion uses the Remez approximation to
+`x^(−1/4)` (see `DTXQCDWilsonCloverRationalEOAction.h:75` and
+`...FullAction.h:75`). The resulting fermion weight is
 
-    dμ ∝ |Pf(K·M₄₈)|² · e^{−S_aux} dU dσ dπ dd dn ds dp
+    w_phys ∝ Pf(K·M₄₈) · e^{−S_aux}
 
-HMC samples this correctly (action is a sum of squares; PSD verified).
-But **observables that depend on sign(Pf)** — anything carrying an odd
-number of fermion lines through M⁻¹ in a way that doesn't square the
-Pfaffian — are sampled with the wrong weight. Physical expectation:
+— signed. The 1/4 root accounts for two things at once: the Nf=2 quark
+flavor degeneracy (one √), and the doubled charge-conjugate
+construction (the other √, taking det(M₄₈) → Pf(K·M₄₈)). HMC needs a
+positive weight, so it samples
 
-    ⟨O⟩_phys = ⟨s · O⟩_HMC / ⟨s⟩_HMC,    s = sign(Pf(K·M₄₈))
+    w_HMC ∝ |Pf(K·M₄₈)| · e^{−S_aux}.
 
-Statistical penalty: var(⟨O⟩_phys) ∝ 1/⟨s⟩² · var(O). When ⟨s⟩ → 0
-this is the classic sign problem; feasibility hinges on **measuring
-⟨s⟩** on each ensemble.
+The mismatch is the *signed* Pfaffian. For **any** observable O:
 
-## Which observables need it
+    ⟨O⟩_phys = ⟨signPf · O⟩_HMC / ⟨signPf⟩_HMC,
+        signPf ≡ sign(Pf(K·M₄₈)) = (−1)^{n_neg(γ5·M₄₈)}
 
-| Observable                             | Sign reweight? | Reason |
-|---------------------------------------|----------------|--------|
-| Plaq, ⟨σ⟩, ⟨π⟩, ⟨d⟩, ⟨n⟩, ⟨s⟩, ⟨p⟩   | No             | No fermion loop; sampled correctly. |
-| Σ ≡ ⟨q̄q⟩ via Hutchinson Tr M⁻¹       | **Yes**        | Odd # of M⁻¹; sign-sensitive. |
-| Connected 2pt ⟨q̄q · q̄q⟩ (correlator)  | **Yes**        | Each M⁻¹ propagator carries sign info; product squares it only when q̄q at both ends are exactly identical, which is not the case for separated points in a doubled Pf measure. Treat as sign-dependent. |
-| Disconnected (loops × loops)           | **Yes**        | Same reason. |
-| Baryon 3-quark via doubled operator    | **Yes**        | Odd fermion line through Pf-weight. |
-| Aux 2pt (σ-σ, π-π, etc.)               | No             | Pure boson; sign-blind. |
+Statistical penalty: var(⟨O⟩_phys) ∝ 1/⟨signPf⟩² · var(O). When
+⟨signPf⟩ → 0 this is the classic sign problem; feasibility hinges on
+**measuring ⟨signPf⟩** on each ensemble.
 
-## Sign from γ5·M₄₈ spectrum
+## Which observables need reweighting
 
-`sign(Pf(K·M₄₈)) = (−1)^{n_neg(γ5·M₄₈)}`. The Lanczos diagnostic
-already committed (`9fe39fbb`) gives the **lowest K signed eigenvalues**
-per traj. Two regimes:
+**All of them.** This was not what the earlier draft of this note said,
+but it is correct: HMC literally samples a different measure, and the
+reweighting `⟨signPf·O⟩/⟨signPf⟩` is the unbiased estimator no matter
+what O is — gauge, aux, or fermionic.
 
-1. **|λ|_min stays >> 0 across all trajs**: no high modes can cross
-   zero either (they're far from the boundary), so parity_lowK is the
-   correct global parity. λ=10 scout (this session) confirmed this.
+Observed empirical pattern at λ=0.1:
+
+| Observable                            | Sensitivity to signPf flips                                    |
+|---------------------------------------|----------------------------------------------------------------|
+| `⟨π_ab⟩`, `⟨p⟩`, `⟨Trπ⟩` (parity-odd) | **HIGH** — symmetric across signPf sectors, so finite-N HMC bias is visible immediately. ⟨Trπ⟩ jumped 0.16 in one step at the λ=0.1 traj-130 flip. |
+| `⟨σ_ab⟩`, `⟨s⟩`, `⟨Trσ⟩` (parity-even) | LOW — sectors give the same value (parity-blind), so even imbalanced sampling converges. Still wrong at finite N. |
+| Plaq, gauge action observables        | LOW — gauge sector is parity-blind given symmetric aux. |
+| Σ = ⟨q̄q⟩ via Tr M⁻¹                  | HIGH — fermion-line observable; biased by sign sampling. |
+| Connected pion/nucleon 2pt            | HIGH — every propagator carries the sign.              |
+| Disconnected (loop × loop)            | HIGH                                                   |
+| Doubled-baryon 3-quark                | HIGH                                                   |
+
+The right policy: **reweight everything** with the same `signPf` array.
+Parity-even observables will look the same to within statistical
+fluctuations (consistency check on the sign tracker); parity-odd and
+fermion-line observables are where the correction actually matters.
+
+## signPf from γ5·M₄₈ spectrum
+
+`signPf = (−1)^{n_neg(γ5·M₄₈)}`. The Lanczos diagnostic committed in
+`9fe39fbb` returns the **lowest K signed eigenvalues** per traj. Two
+regimes:
+
+1. **|λ|_min stays >> 0 across all trajs**: no high mode can cross
+   zero either (they're far from the boundary), so `parity_lowK` is
+   the correct global parity. λ=10 scout (this session) confirmed:
+   30 trajs, |λ|_min ∈ [0.78, 1.18], no flips, ⟨signPf⟩ = −1 exactly.
 2. **|λ|_min approaches 0**: parity_lowK still captures the crossing,
    *provided* the eval that crosses lies in the lowest K. Empirically
-   λ=0.1 sign flips have happened in the lowest 2 evals. With K=6 we
-   have headroom but should verify by spot-checking with a wider K at
-   a thermalized configuration on each ensemble.
+   λ=0.1 flips have happened in the lowest 2 evals. K=6 has headroom
+   but should be spot-checked.
 
 **Gap-from-zero indicator**: `|λ|_min` per traj is the warning signal.
-Anything < ~0.5 means a sign-flip is in the cards next traj or two.
+< ~0.5 means a sign-flip is in the cards within a few trajs.
 
 **Verification protocol (one-shot per ensemble at thermalization)**:
 run `Test_dtxqcd_g5M_evals` with `N_EV=20 N_KRYLOV=80` on a saved
 checkpoint to confirm the (K+1)-th eigenvalue is well-separated from
-the lowest K and never crosses sign in the time history. If not,
-bump default `G5M_NEV` for that λ.
+the lowest K and never crosses sign during the run. Bump default
+`G5M_NEV` for that λ if not.
+
+## Prerequisite: is Pf actually real?
+
+`signPf = (−1)^{n_neg}` is only meaningful if Pf(K·M₄₈) is real-valued
+(so it has a well-defined sign). That follows from:
+1. `(K·M₄₈)^T = −(K·M₄₈)` — the Pfaffian antisymmetry. Validated by
+   `Test_dtxqcd_pfaffian_antisymmetry` at the single-site level after
+   the 2026-06-13 real-symmetric aux fix.
+2. `γ5·M₄₈·γ5 = M₄₈†` — γ5-Hermiticity, implies γ5·M₄₈ is Hermitian,
+   so det(γ5·M₄₈) is real, so det(M₄₈) is real, so Pf = ±√det is real.
+
+`Test_dtxqcd_pf_realness` (added this commit) runs check (2) on a
+loaded configuration — a stochastic γ5-Hermiticity probe
+`‖(γ5·M − M†·γ5)·η‖ / ‖M·η‖` — and reports the violation. If this is
+clean (< 1e-12) on the ensembles we care about, sign reweighting is
+well-defined. If it's not clean (e.g. on the pre-fix hermFULL configs),
+the reweighting setup itself is the wrong object — full complex
+reweighting `Pf/|Pf|` would be needed.
 
 ## Implementation: post-processing
 
-`production/analyze_sign_reweighting.py` (this commit) ingests
+`production/analyze_sign_reweighting.py` ingests
 `hmc_diagnostics.*.h5` files produced by `Test_dtxqcd_2pt_gencfgs` and:
 
-- derives per-traj `s_n = (−1)^{n_neg(g5M_evals[n])}`
-- computes `⟨s⟩ ± σ` and effective sample size N_eff = N·⟨s⟩²
-- writes a `signs.<traj>.h5` sidecar with per-traj signs ready to be
-  multiplied into any downstream observable
-- prints a sign-reweighting summary: ⟨s⟩, σ(s), histogram of |λ|_min,
-  flag if any |λ|_min < `MIN_LAM_WARN` (default 0.5)
+- derives per-traj `signPf_n = (−1)^{n_neg(g5M_evals[n])}`
+- computes `⟨signPf⟩ ± σ` and effective sample size N_eff = N·⟨signPf⟩²
+- writes a `signs.<traj>.h5` sidecar with per-traj signPf values ready
+  to be multiplied into any downstream observable
+- prints a reweighting summary: ⟨signPf⟩, σ(signPf), histogram of
+  |λ|_min, flags trajs near the sign boundary
 
-For a measured observable `O_n` (in a separate h5/npz), the reweighted
-mean is `mean(s·O) / mean(s)` with errors via jackknife or bootstrap
-over the joint (s, O) ensemble.
+For a measured observable `O_n` (stored in a separate h5/npz), the
+reweighted mean is
+
+    mean(signPf · O) / mean(signPf)
+
+with errors via jackknife or bootstrap over the joint ensemble.
 
 ## Diagnostic & decision plan
 
-1. **Spot-check each existing ensemble**: run the verification protocol
-   on the latest checkpoint of each λ stream. Confirm K=6 is enough.
-2. **Measure ⟨s⟩**: rerun gencfgs *from the current checkpoint forward*
-   on each existing ensemble with the new diagnostic on, accumulating
-   ~50–100 trajs. Pure observation cost is the Lanczos overhead
-   (~10–15%).
-3. **Triage by ⟨s⟩**:
-   - ⟨s⟩ ≥ 0.9 → reweight directly; stat penalty tiny.
-   - 0.5 ≤ ⟨s⟩ < 0.9 → reweight, expect ~2–4× stat loss; usable.
-   - 0.1 ≤ ⟨s⟩ < 0.5 → reweighting feasible but 10–100× stat loss;
-     consider Hasenbusch-style sign-protection (frozen-sign window) or
-     bigger ensemble.
-   - ⟨s⟩ < 0.1 → effectively a hard sign problem at this λ. Options
-     below.
-4. **Reapply to Σ_DTXQCD vs Σ_bare**: this is what motivated the
-   investigation. Reweighted Σ should restore Fierz at small λ if
-   the sign problem is the whole story.
+1. **Verify Pf realness** on each existing ensemble's latest cfg
+   (and on a "gnarly" λ=0.1 cfg near a sign flip): run
+   `Test_dtxqcd_pf_realness`. If clean, proceed; if not, treat the
+   hermFULL data as suspect and re-generate post-fix.
+2. **Spot-check K=6 sufficiency** with `Test_dtxqcd_g5M_evals N_EV=20`
+   on the same checkpoints.
+3. **Measure ⟨signPf⟩**: resume each existing λ stream for ~50–100
+   trajs with γ5M tracking on (no other run cost change).
+4. **Triage by ⟨signPf⟩**:
+   - ≥ 0.9 → reweight everything; stat penalty negligible.
+   - 0.5 ≤ |⟨signPf⟩| < 0.9 → reweight; expect 2–4× stat loss.
+   - 0.1 ≤ |⟨signPf⟩| < 0.5 → reweighting feasible but 10–100× stat
+     loss; consider longer runs.
+   - < 0.1 → effectively a hard sign problem at this λ.
+5. **Reapply to Σ_DTXQCD vs Σ_bare** at every λ. This is the original
+   motivating test: if Pf-real and sign-reweighting is the whole story,
+   reweighted Σ should restore Fierz at small λ.
 
-## Fallback strategies if ⟨s⟩ is too small
+## Fallback strategies if ⟨signPf⟩ is too small
 
 1. **Restrict comparison to "safe" λ**: report Fierz at λ ≥ 1 where
-   sign problem is mild; document the small-λ limit as algorithmically
-   inaccessible without a sign-circumventing method.
-2. **Sign-quenched (biased) Σ for small-λ**: report `⟨s·O⟩_HMC` (no
-   denominator) as the sign-quenched approximation. Useful as a
-   plausibility check but not a physics result.
+   the sign problem is mild; document the small-λ regime as
+   algorithmically inaccessible without a sign-circumventing method.
+2. **Sign-quenched (biased) report**: `⟨signPf·O⟩_HMC` (no
+   denominator) is the sign-quenched approximation. Useful as a
+   plausibility check, not a physics result.
 3. **Reflection-positivity argument**: investigate whether DTXQCD has
-   an additional discrete symmetry that would force `s_n ≥ 0` in the
-   thermodynamic limit. (Open question; out of scope for this note.)
-4. **Operator-level sign reduction**: parameterize aux fields to push
-   the spectrum further from zero (e.g., constrained-aux HMC). Adds
-   bias unless carefully done.
+   an additional discrete symmetry that would force `signPf_n ≥ 0` in
+   the thermodynamic limit. (Open question; out of scope here.)
+4. **Constrained-aux HMC**: parameterize aux fields to push the
+   spectrum further from zero. Biased unless carefully constructed.
 
 ## Concrete next steps (ordered)
 
-- [ ] Run verification protocol on `configs_2pt_dtxqcd_v2_lam0.1_*`
-      and `..._lam5_*` / `..._lam10_*` checkpoints — confirm K=6
-      sufficient or bump.
+- [ ] Run `Test_dtxqcd_pf_realness` on `hermFULL/ckpoint_lat.{120,130}`
+      to verify Pf is real on the existing λ=0.1 sign-flip data.
+- [ ] If clean: run `Test_dtxqcd_g5M_evals N_EV=20` on the same trajs
+      to confirm K=6 is enough.
 - [ ] Resume each existing λ ensemble for ~50 trajs with γ5M tracking
-      to measure ⟨s⟩.
-- [ ] Apply `analyze_sign_reweighting.py` on collected h5; produce
-      ⟨s⟩ vs λ table.
+      to measure ⟨signPf⟩.
+- [ ] Apply `analyze_sign_reweighting.py`; produce ⟨signPf⟩ vs λ table.
 - [ ] Reweight Σ_DTXQCD measurements and compare against Σ_bare —
-      test of the hypothesis that the sign problem is the whole story.
-- [ ] If Fierz is restored at, e.g., λ ≥ 1: write up and call it done
-      for the accessible λ window. If even reweighted Σ doesn't match
-      Σ_bare at some λ, there's a second source of Fierz violation
-      and we'll need a deeper diagnostic.
+      direct test of the hypothesis that the sign problem is the
+      whole story.
