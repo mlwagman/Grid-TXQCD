@@ -48,7 +48,11 @@ int main(int argc, char **argv) {
   int total_traj = n_therm_run + n_prod_run;
 
   // ==================== DTXQCD ====================
-  if (dtxqcd_configs_exist()) {
+  // Skip-existing-cfgs check uses the COMPILED defaults of n_therm/n_prod and
+  // misses our intent to extend. Bypass it when N_PROD env var is set so a
+  // launch with N_PROD=1980 can resume from existing cfgs and run further.
+  bool force_continue = std::getenv("N_PROD") != nullptr;
+  if (!force_continue && dtxqcd_configs_exist()) {
     std::cout << GridLogMessage
               << "DTXQCD configs already exist, skipping generation." << std::endl;
   } else {
@@ -103,7 +107,12 @@ int main(int argc, char **argv) {
       mass_run = std::atof(m);
     }
     std::cout << GridLogMessage << "DTXQCD mass = " << mass_run << std::endl;
-    DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta);
+    RealD beta_run = beta;
+    if (const char *b = std::getenv("BETA"); b && *b) {
+      beta_run = std::atof(b);
+    }
+    std::cout << GridLogMessage << "DTXQCD beta = " << beta_run << std::endl;
+    DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_run);
     DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lambda_run);
     // csw=0 => Wilson (no clover term).  The rational/LogDet code paths
     // skip the clover assembly when csw == 0.
@@ -257,18 +266,131 @@ int main(int argc, char **argv) {
         Sigma_init = acc / n_noise;
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO] Σ = vev_trminv = " << Sigma_init
-                  << "  → ⟨s⟩=⟨Trσ⟩=N_F·Σ/λ²=" << (DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
-                  << "  (per-entry σ_diag=" << (Sigma_init / (Nc * lambda_run * lambda_run)) << ")"
-                  << std::endl;
+                  << "  → ⟨s⟩ = 2·N_F·Σ/λ² = "
+                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  ⟨Tr σ⟩ = 0 (traceless by construction)" << std::endl;
       } else if (Sigma_init != 0.0) {
         std::cout << GridLogMessage
                   << "[AUX_INIT] Σ = " << Sigma_init
-                  << "  → ⟨s⟩=⟨Trσ⟩=N_F·Σ/λ²=" << (DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
-                  << "  (per-entry σ_diag=" << (Sigma_init / (Nc * lambda_run * lambda_run)) << ")"
-                  << std::endl;
+                  << "  → ⟨s⟩ = 2·N_F·Σ/λ² = "
+                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << "  ⟨Tr σ⟩ = 0 (traceless by construction)" << std::endl;
       }
       // Step 2: fill aux with Gaussian + saddle shift.
       DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
+      // Step 2b (AUX_INIT_AUTO only): bisect on g(Σ) = Σ - Σ_DTXQCD(Σ)
+      // to find the self-consistent saddle satisfying
+      // ⟨s⟩* = Nf·Σ_DTXQCD(⟨s⟩*)/λ², i.e., Σ_target = Σ_measured_on_op_with_that_aux.
+      // Plain Picard iteration (Σ_{n+1} = Σ_DTXQCD(Σ_n)) is unstable at small
+      // λ because |dΣ_DTXQCD/d⟨s⟩| · Nf/λ² > 1 (the map is anti-monotone with
+      // slope > 1).  Bisection is robust:
+      //   - lo: Σ=0 (no aux shift) → Σ_DTXQCD ≈ Σ_bare > 0, so g(0) < 0
+      //   - hi: Σ=Σ_bare (the conventional saddle) → Σ_DTXQCD << Σ_bare, g(hi) > 0
+      //   - midpoint bracketing converges in ~log2(Σ_bare/tol) iterations.
+      auto measure_sigma_dtxqcd = [&](RealD Sigma_at) -> RealD {
+        pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+        DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_at);
+        DTXQCDWilsonCloverFermionEO Dw_dtxqcd(U.U, Grid, RBGrid, mass_run, 0.0,
+                                               U.sigma, U.pi, U.d, U.n, U.s, U.p);
+        const RealD V = (RealD)Grid.gSites();
+        GridParallelRNG noisePRNG(&Grid);
+        noisePRNG.SeedFixedIntegers({400, 410, 420, 430, 440});
+        const int n_noise_iter = 4;
+        RealD acc = 0.0;
+        for (int h = 0; h < n_noise_iter; ++h) {
+          DTXQCDFermionDoubled eta(&Grid), b(&Grid), x(&Grid);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            gaussian(noisePRNG, eta.upper.f[a]);
+            gaussian(noisePRNG, eta.lower.f[a]);
+          }
+          Dw_dtxqcd.Mdag(eta, b);
+          DTXQCDFermionDoubled r(&Grid), p(&Grid), Ap(&Grid), tmp(&Grid);
+          x = Zero();
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            r.upper.f[a] = b.upper.f[a]; r.lower.f[a] = b.lower.f[a];
+            p.upper.f[a] = b.upper.f[a]; p.lower.f[a] = b.lower.f[a];
+          }
+          RealD r2 = norm2(r), b2 = norm2(b);
+          RealD cg_tol2 = 1e-12 * b2;
+          for (int k = 0; k < cg_max; ++k) {
+            Dw_dtxqcd.M(p, tmp);
+            Dw_dtxqcd.Mdag(tmp, Ap);
+            RealD pAp = innerProduct(p, Ap).real();
+            RealD alpha = r2 / pAp;
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              x.upper.f[a] = x.upper.f[a] + alpha * p.upper.f[a];
+              x.lower.f[a] = x.lower.f[a] + alpha * p.lower.f[a];
+              r.upper.f[a] = r.upper.f[a] - alpha * Ap.upper.f[a];
+              r.lower.f[a] = r.lower.f[a] - alpha * Ap.lower.f[a];
+            }
+            RealD r2_new = norm2(r);
+            if (r2_new < cg_tol2) break;
+            RealD beta = r2_new / r2;
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              p.upper.f[a] = r.upper.f[a] + beta * p.upper.f[a];
+              p.lower.f[a] = r.lower.f[a] + beta * p.lower.f[a];
+            }
+            r2 = r2_new;
+          }
+          acc += innerProduct(eta, x).real() / (2.0 * V);
+        }
+        return (acc / n_noise_iter) / 2.0;
+      };
+      if (sigma_auto) {
+        int aux_iter_max = 15;
+        if (const char *m = std::getenv("AUX_INIT_MAX_ITER"); m && *m)
+          aux_iter_max = std::atoi(m);
+        RealD aux_iter_tol = 1e-2;  // 1% precision on Σ
+        if (const char *t = std::getenv("AUX_INIT_TOL"); t && *t)
+          aux_iter_tol = std::atof(t);
+        RealD Sigma_lo = 0.0;
+        RealD Sigma_hi = Sigma_init;  // initial estimate from Σ_bare
+        // Verify bracket signs.
+        RealD sigma_dtxqcd_lo = measure_sigma_dtxqcd(Sigma_lo);
+        RealD g_lo = Sigma_lo - sigma_dtxqcd_lo;
+        RealD sigma_dtxqcd_hi = measure_sigma_dtxqcd(Sigma_hi);
+        RealD g_hi = Sigma_hi - sigma_dtxqcd_hi;
+        std::cout << GridLogMessage
+                  << "[AUX_INIT bracket] g(0)=" << g_lo
+                  << "  g(" << Sigma_hi << ")=" << g_hi << std::endl;
+        if (g_lo * g_hi > 0.0) {
+          std::cout << GridLogMessage
+                    << "[AUX_INIT_AUTO] bracket has same sign — fall back to Σ_bare/2"
+                    << std::endl;
+          Sigma_init = Sigma_hi / 2.0;
+        } else {
+          // Bisection.
+          for (int it = 0; it < aux_iter_max; ++it) {
+            RealD Sigma_mid = 0.5 * (Sigma_lo + Sigma_hi);
+            RealD sigma_dtxqcd_mid = measure_sigma_dtxqcd(Sigma_mid);
+            RealD g_mid = Sigma_mid - sigma_dtxqcd_mid;
+            std::cout << GridLogMessage
+                      << "[AUX_INIT iter " << it << "] Σ_mid = " << Sigma_mid
+                      << "  Σ_DTXQCD = " << sigma_dtxqcd_mid
+                      << "  g = " << g_mid << std::endl;
+            if (g_mid * g_lo < 0.0) {
+              Sigma_hi = Sigma_mid;
+              g_hi = g_mid;
+            } else {
+              Sigma_lo = Sigma_mid;
+              g_lo = g_mid;
+            }
+            if ((Sigma_hi - Sigma_lo) / std::max(0.5 * (Sigma_hi + Sigma_lo), 1e-30)
+                < aux_iter_tol) {
+              break;
+            }
+          }
+          Sigma_init = 0.5 * (Sigma_lo + Sigma_hi);
+        }
+        // Final fill with the converged Σ.
+        pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+        DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
+        std::cout << GridLogMessage
+                  << "[AUX_INIT_AUTO converged] Σ* = " << Sigma_init
+                  << "  → ⟨s⟩* = 2·Nf·Σ*/λ² = "
+                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
+                  << std::endl;
+      }
       if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {
         std::cout << GridLogMessage << "Zeroing d, n diquark fields at init" << std::endl;
         U.d = Zero();

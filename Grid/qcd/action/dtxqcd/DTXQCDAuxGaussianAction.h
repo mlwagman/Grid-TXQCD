@@ -3,8 +3,13 @@
 // Eqs. 116-128 with the four-quark cross terms integrated out):
 //
 //   S_aux = (lambda^2 / 2) sum_x [ Tr(sigma^2) + Tr(pi^2)
-//                                + Tr(d^2)     + Tr(n^2)
-//                                + s^2 + p^2 ]
+//                                + Tr(d^2)     + Tr(n^2) ]
+//         + (lambda^2 / 4) sum_x [ s^2 + p^2 ]
+//
+// 2026-06-15: halved coefficient for s, p following the (s, Tr σ)
+// redundancy resolution — see project_dtxqcd_s_sigma_redundancy.md.
+// σ, π are simultaneously enforced traceless (in CompositeImpl) so the
+// single-field Pf coupling has the natural saddle ⟨s⟩ = 2·N_F·Σ/λ².
 //
 // Sum-of-squares, manifestly positive (the v1 negative-tensor problem is
 // gone -- the t channel has been Fierz-eliminated in the v2 derivation).
@@ -49,17 +54,18 @@ class DTXQCDAuxiliaryFieldGaussianAction : public Action<DTXQCDField> {
 
   RealD S(const DTXQCDField &U) override {
     DTXQCDField &Unc = const_cast<DTXQCDField &>(U);
-    RealD n2 = norm2(Unc.sigma)
-             + norm2(Unc.pi)
-             + norm2(Unc.d)
-             + norm2(Unc.n)
-             + norm2(Unc.s)
-             + norm2(Unc.p);
-    return 0.5 * lambda * lambda * n2;
+    RealD n2_matrix = norm2(Unc.sigma)
+                    + norm2(Unc.pi)
+                    + norm2(Unc.d)
+                    + norm2(Unc.n);
+    RealD n2_scalar = norm2(Unc.s) + norm2(Unc.p);
+    return 0.5  * lambda * lambda * n2_matrix
+         + 0.25 * lambda * lambda * n2_scalar;
   }
 
   void deriv(const DTXQCDField &U, DTXQCDField &dSdU) override {
-    const RealD c = lambda * lambda;
+    const RealD c_matrix = lambda * lambda;        // dS/dX = λ² X for σ, π, d, n
+    const RealD c_scalar = 0.5 * lambda * lambda;  // dS/ds = (λ²/2) s for s, p
     dSdU.U     = Zero();
     // For Hermitian CF matrix sigma_ab^ij the action is
     //   S = (lambda^2/2) * Sum_{a,b,i,j} |sigma_ab^ij|^2
@@ -74,12 +80,12 @@ class DTXQCDAuxiliaryFieldGaussianAction : public Action<DTXQCDField> {
     // same transpose convention in its inner product, so both sides
     // were self-consistent with each other but not with the true
     // gradient flow that the HMC integrator runs).
-    dSdU.sigma = c * U.sigma;
-    dSdU.pi    = c * U.pi;
-    dSdU.d     = c * U.d;
-    dSdU.n     = c * U.n;
-    dSdU.s     = c * U.s;
-    dSdU.p     = c * U.p;
+    dSdU.sigma = c_matrix * U.sigma;
+    dSdU.pi    = c_matrix * U.pi;
+    dSdU.d     = c_matrix * U.d;
+    dSdU.n     = c_matrix * U.n;
+    dSdU.s     = c_scalar * U.s;
+    dSdU.p     = c_scalar * U.p;
   }
 
  private:
