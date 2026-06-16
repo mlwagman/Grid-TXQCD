@@ -31,7 +31,7 @@
 //   N_THERM   — thermalization trajectories (default 50)
 
 #include "Test_txqcd_2pt_clover_optlam_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonPseudoFermionAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TxqcdTest2ptCloverOptlam;
@@ -88,14 +88,32 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
-  // Non-rational 2-flavor PF: S = phi^dag (M^dag M)^{-1} phi.  At U=I, kappa~0,
-  // M ≈ (4+m)Id + small X(aux), spectrum tight — non-rational is well-behaved.
-  // No bracket to tune.
+  // RATIONAL Nf=2 PF: S = phi^dag (M^dag M)^{-1/2} phi → weight |det M_TX|.
+  // At aux=0 with internal Nf=2 flavor block: |det M_TX| = (det D_W)² = Nf=2 vanilla Wilson.
+  // This matches TXQCD's Fierz construction which is Nf=2-specific.
+  //
+  // Using the non-rational PF (|det M_TX|² = Nf=4 effective) produces a ~2%
+  // Σ_TX/Σ_W bias at finite m because the Fierz identity doesn't cancel the
+  // extra Nf=4 four-quark combinations.  See project_txqcd_fierz_is_nf2_specific.
+  //
+  // Rational bracket: M^dag M at U=I has eigenvalues ~ (m+4)².  Defaults
+  // sized for m=1000 (M²~1e6); override with RAT_LO/RAT_HI/RAT_DEGREE for
+  // smaller m runs.
+  RealD rat_lo = 1e4, rat_hi = 2e6;
+  int rat_deg  = 8;
+  if (const char *v = std::getenv("RAT_LO");     v && *v) rat_lo  = std::atof(v);
+  if (const char *v = std::getenv("RAT_HI");     v && *v) rat_hi  = std::atof(v);
+  if (const char *v = std::getenv("RAT_DEGREE"); v && *v) rat_deg = std::atoi(v);
   RealD pf_cg_tol = 1e-10;
   if (const char *v = std::getenv("CG_TOL"); v && *v) pf_cg_tol = std::atof(v);
+  OneFlavourRationalParams rat_params(rat_lo, rat_hi, cg_max, pf_cg_tol,
+                                       rat_deg, 64, 100, 1e-6);
+  std::cout << GridLogMessage
+            << "  RHMC bracket: lo=" << rat_lo << " hi=" << rat_hi
+            << " degree=" << rat_deg << std::endl;
 
-  AuxiliaryFieldGaussianAction   AuxAction(lambda_run);
-  TXQCDWilsonPseudoFermionAction PF(Grid, RBGrid, mass_run, pf_cg_tol, cg_max);
+  AuxiliaryFieldGaussianAction           AuxAction(lambda_run);
+  TXQCDWilsonRationalPseudoFermionAction PF(Grid, RBGrid, mass_run, rat_params);
 
   // FREEZE gauge by zeroing gauge momentum (TXQCD_FREEZE_GAUGE knob, read by
   // TXQCDCompositeImpl::generate_momenta).  No gauge action needed — U just
