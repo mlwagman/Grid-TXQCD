@@ -33,6 +33,7 @@
 #include "Test_txqcd_2pt_clover_optlam_utils.h"
 #include "Test_txqcd_fierz_check_utils.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TxqcdTest2ptCloverOptlam;
@@ -59,6 +60,7 @@ int main(int argc, char **argv) {
 
   if (const char *v = std::getenv("LAMBDA");   v && *v) lambda_run = std::atof(v);
   if (const char *v = std::getenv("MASS");     v && *v) mass_run   = std::atof(v);
+  if (const char *v = std::getenv("CSW");      v && *v) csw_run    = std::atof(v);
   if (const char *v = std::getenv("MDSTEPS");  v && *v) mdsteps    = std::atoi(v);
   if (const char *v = std::getenv("TRAJL");    v && *v) trajL      = std::atof(v);
   if (const char *v = std::getenv("N_THERM");  v && *v) n_therm_run = std::atoi(v);
@@ -125,8 +127,17 @@ int main(int argc, char **argv) {
             << "  RHMC bracket: lo=" << rat_lo << " hi=" << rat_hi
             << " degree=" << rat_deg << std::endl;
 
-  AuxiliaryFieldGaussianAction           AuxAction(lambda_run);
-  TXQCDWilsonRationalPseudoFermionAction PF(Grid, RBGrid, mass_run, rat_params);
+  AuxiliaryFieldGaussianAction AuxAction(lambda_run);
+  TXQCDWilsonRationalPseudoFermionAction PF_wilson(Grid, RBGrid,
+                                                    mass_run, rat_params);
+  TXQCDWilsonCloverRationalEOAction      PF_clover(Grid, RBGrid,
+                                                    mass_run, rat_params,
+                                                    csw_run);
+  Action<TXQCDField> *PF = (csw_run == 0.0)
+                            ? (Action<TXQCDField> *)&PF_wilson
+                            : (Action<TXQCDField> *)&PF_clover;
+  std::cout << GridLogMessage << "  PF: " << PF->action_name()
+            << "  csw=" << csw_run << std::endl;
 
   // FREEZE gauge by zeroing gauge momentum (TXQCD_FREEZE_GAUGE knob, read by
   // TXQCDCompositeImpl::generate_momenta).  No gauge action needed — U just
@@ -138,7 +149,7 @@ int main(int argc, char **argv) {
 
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  L1.push_back(&PF);
+  L1.push_back(PF);
   L1.push_back(&AuxAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
@@ -189,20 +200,9 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid, MD, Aset, Smear);
   Smear.set_Field(U);
 
-  CheckpointerParameters CPp;
-  CPp.config_prefix = cfg_dir + "/ckpoint_lat";
-  CPp.rng_prefix    = cfg_dir + "/ckpoint_rng";
-  CPp.saveInterval  = meas_skip_run;
-  CPp.format        = "IEEE64BIG";
-  TXQCDCheckpointer ckpt(CPp);
-
-  TxqcdTest2ptClover::TxqcdDiagnostics diag(
-      cfg_dir + "/hmc_diagnostics", meas_skip_run, {
-      {"PseudoFermion", &PF},
-      {"AuxGaussian",   &AuxAction}
-  }, Grid, RBGrid, pRNG, mass_run, csw_run, n_vev_noise);
-
-  std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt, &diag};
+  // No checkpointer / no per-traj diag — the Fierz check runs on the
+  // in-memory final HMC state.
+  std::vector<HmcObservable<TXQCDField> *> Obs = {};
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 

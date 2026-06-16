@@ -16,10 +16,13 @@
 // PASS criterion: |Σ_TX / Σ_W − 1| < PASS_TOL (default 0.02).
 //
 // Env knobs (overrides):
-//   MASS, LAMBDA, MDSTEPS, TRAJL, N_THERM, N_PROD, MEAS_SKIP
+//   MASS, LAMBDA, MDSTEPS, TRAJL, N_THERM, N_PROD
 //   RAT_LO, RAT_HI, RAT_DEGREE, CG_TOL, N_NOISE
+//   CSW       — clover coefficient (default 0; nonzero switches the
+//                HMC to TXQCDWilsonCloverRationalEOAction and the Σ_W
+//                reference to WilsonCloverFermion at the same csw)
+//   GAUGE_INIT— cold | tepid[:AMP] | hot | nersc:PATH (see helper)
 //   PASS_TOL  — relative PASS threshold (default 0.02)
-//   CFG_DIR   — output dir for HMC cfgs (default free_txqcd_light)
 //
 // Typical run: ~10–15 min at the default (m=0.1, λ=10).  Quick-mode
 // usage `MASS=1000 LAMBDA=1` reproduces the heavy-mass sanity in ~30 s.
@@ -27,6 +30,7 @@
 #include "Test_txqcd_2pt_clover_optlam_utils.h"
 #include "Test_txqcd_fierz_check_utils.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
@@ -46,17 +50,14 @@ int main(int argc, char **argv) {
   RealD trajL      = 1.0;
   int n_therm_run  = 30;
   int n_prod_run   = 40;
-  int meas_skip_run = 4;
-  std::string cfg_dir = "free_txqcd_light";
 
   if (const char *v = std::getenv("LAMBDA");    v && *v) lambda_run = std::atof(v);
   if (const char *v = std::getenv("MASS");      v && *v) mass_run   = std::atof(v);
+  if (const char *v = std::getenv("CSW");       v && *v) csw_run    = std::atof(v);
   if (const char *v = std::getenv("MDSTEPS");   v && *v) mdsteps    = std::atoi(v);
   if (const char *v = std::getenv("TRAJL");     v && *v) trajL      = std::atof(v);
   if (const char *v = std::getenv("N_THERM");   v && *v) n_therm_run = std::atoi(v);
   if (const char *v = std::getenv("N_PROD");    v && *v) n_prod_run  = std::atoi(v);
-  if (const char *v = std::getenv("MEAS_SKIP"); v && *v) meas_skip_run = std::atoi(v);
-  if (const char *v = std::getenv("CFG_DIR");   v && *v) cfg_dir = v;
 
   RealD pass_tol = 0.02;
   if (const char *v = std::getenv("PASS_TOL"); v && *v) pass_tol = std::atof(v);
@@ -76,7 +77,7 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage
             << "TXQCD FREE-FIELD light test:"
             << " mass=" << mass_run << " (κ=" << 1.0/(2.0*(4.0+mass_run)) << ")"
-            << " lambda=" << lambda_run
+            << " lambda=" << lambda_run << " csw=" << csw_run
             << " MDsteps=" << mdsteps << " trajL=" << trajL
             << " N_THERM=" << n_therm_run << " N_PROD=" << n_prod_run
             << " RAT[" << rat_lo << "," << rat_hi << "]^" << rat_deg
@@ -89,7 +90,6 @@ int main(int argc, char **argv) {
   GridRedBlackCartesian RBGrid(&Grid_);
 
   int total_traj = n_therm_run + n_prod_run;
-  mkdir_p(cfg_dir);
 
   GridSerialRNG   sRNG;
   GridParallelRNG pRNG(&Grid_);
@@ -99,8 +99,19 @@ int main(int argc, char **argv) {
   OneFlavourRationalParams rat_params(rat_lo, rat_hi, cg_max, 1e-10,
                                        rat_deg, 64, 100, 1e-6);
 
-  AuxiliaryFieldGaussianAction           AuxAction(lambda_run);
-  TXQCDWilsonRationalPseudoFermionAction PF(Grid_, RBGrid, mass_run, rat_params);
+  // PF selection by csw: at csw=0 keep the lighter non-EO Wilson PF
+  // (proven fast smoke).  At csw!=0 switch to the clover-aware EO action
+  // so the sampling weight matches the WilsonClover reference operator.
+  AuxiliaryFieldGaussianAction AuxAction(lambda_run);
+  TXQCDWilsonRationalPseudoFermionAction PF_wilson(Grid_, RBGrid,
+                                                    mass_run, rat_params);
+  TXQCDWilsonCloverRationalEOAction      PF_clover(Grid_, RBGrid,
+                                                    mass_run, rat_params,
+                                                    csw_run);
+  Action<TXQCDField> *PF = (csw_run == 0.0)
+                            ? (Action<TXQCDField> *)&PF_wilson
+                            : (Action<TXQCDField> *)&PF_clover;
+  std::cout << GridLogMessage << "PF: " << PF->action_name() << std::endl;
 
   setenv("TXQCD_FREEZE_GAUGE", "1", 1);
   std::cout << GridLogMessage
@@ -108,7 +119,7 @@ int main(int argc, char **argv) {
 
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
-  L1.push_back(&PF);
+  L1.push_back(PF);
   L1.push_back(&AuxAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
@@ -143,14 +154,8 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid_, MD, Aset, Smear);
   Smear.set_Field(U);
 
-  CheckpointerParameters CPp;
-  CPp.config_prefix = cfg_dir + "/ckpoint_lat";
-  CPp.rng_prefix    = cfg_dir + "/ckpoint_rng";
-  CPp.saveInterval  = meas_skip_run;
-  CPp.format        = "IEEE64BIG";
-  TXQCDCheckpointer ckpt(CPp);
-
-  std::vector<HmcObservable<TXQCDField> *> Obs = {&ckpt};
+  // No checkpointer — the Fierz check runs on the in-memory final state.
+  std::vector<HmcObservable<TXQCDField> *> Obs = {};
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 

@@ -16,6 +16,8 @@
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/fermion/CloverHelpers.h>
 #include <Grid/qcd/utils/GaugeGroup.h>
 #include <Grid/parallelIO/NerscIO.h>
 
@@ -77,15 +79,12 @@ inline WilsonImplR::ImplParams TxqcdFierzApbcImplParams() {
 }
 
 // Stochastic Tr[D_W^{-1}] / V on plain Wilson at the given U, APBC time.
-inline RealD TxqcdFierzPlainWilsonTrminv(LatticeGaugeField &U,
-                                          GridCartesian &Grid_,
-                                          GridRedBlackCartesian &RBGrid,
+// At csw != 0, dispatches to WilsonCloverFermion (csw_r = csw_t = csw).
+template <class Op>
+inline RealD TxqcdFierzWilsonLikeTrminv_(Op &Dw, GridCartesian &Grid_,
                                           GridParallelRNG &prng,
-                                          RealD mass, int n_noise,
-                                          RealD cg_tol) {
-  auto impl_p = TxqcdFierzApbcImplParams();
-  WilsonFermionD Dw(U, Grid_, RBGrid, mass, impl_p);
-  MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
+                                          int n_noise, RealD cg_tol) {
+  MdagMLinearOperator<Op, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(cg_tol, 30000);
   RealD V = (RealD)Grid_.gSites();
   RealD acc = 0.0;
@@ -98,6 +97,24 @@ inline RealD TxqcdFierzPlainWilsonTrminv(LatticeGaugeField &U,
     acc += innerProduct(eta, x).real() / (2.0 * V);
   }
   return acc / n_noise;
+}
+
+inline RealD TxqcdFierzPlainWilsonTrminv(LatticeGaugeField &U,
+                                          GridCartesian &Grid_,
+                                          GridRedBlackCartesian &RBGrid,
+                                          GridParallelRNG &prng,
+                                          RealD mass, RealD csw,
+                                          int n_noise, RealD cg_tol) {
+  auto impl_p = TxqcdFierzApbcImplParams();
+  if (csw == 0.0) {
+    WilsonFermionD Dw(U, Grid_, RBGrid, mass, impl_p);
+    return TxqcdFierzWilsonLikeTrminv_(Dw, Grid_, prng, n_noise, cg_tol);
+  } else {
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    WCF Dw(U, Grid_, RBGrid, mass, csw, csw,
+            WilsonAnisotropyCoefficients(), impl_p);
+    return TxqcdFierzWilsonLikeTrminv_(Dw, Grid_, prng, n_noise, cg_tol);
+  }
 }
 
 // Stochastic Tr[M_TX^{-1}] / (V · Nf) on the doubled TXQCD Wilson-clover.
@@ -195,7 +212,7 @@ inline TxqcdFierzCheckResult TxqcdFierzCheck(TXQCDField &U,
                                        mass, csw, n_noise, cg_tol);
   noisePRNG.SeedFixedIntegers({2001, 2002, 2003, 2004, 2005});
   RealD sigma_w = TxqcdFierzPlainWilsonTrminv(U.U, Grid_, RBGrid, noisePRNG,
-                                                mass, n_noise, cg_tol);
+                                                mass, csw, n_noise, cg_tol);
   RealD ratio = sigma_tx / sigma_w;
   RealD dev = std::fabs(ratio - 1.0);
   bool pass = (dev < pass_tol);
