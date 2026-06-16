@@ -207,15 +207,16 @@ int main(int argc, char **argv) {
   }
 
   // INDEPENDENT noise streams for each mode (avoid correlated estimators).
-  pRNG.SeedFixedIntegers({100, 200, 300, 400, 500});
+  // Seed depends on cfg traj — different cfgs get independent noise.
+  pRNG.SeedFixedIntegers({100 + traj, 200 + traj, 300 + traj, 400 + traj, 500 + traj});
   RealD sigma_full = m48_trminv_masked(U, Grid_, RBGrid, pRNG, mass, csw,
                                        n_noise, NoiseMode::Both);
 
-  pRNG.SeedFixedIntegers({600, 700, 800, 900, 1000});
+  pRNG.SeedFixedIntegers({600 + traj, 700 + traj, 800 + traj, 900 + traj, 1000 + traj});
   RealD sigma_upper = m48_trminv_masked(U, Grid_, RBGrid, pRNG, mass, csw,
                                         n_noise, NoiseMode::UpperOnly);
 
-  pRNG.SeedFixedIntegers({1100, 1200, 1300, 1400, 1500});
+  pRNG.SeedFixedIntegers({1100 + traj, 1200 + traj, 1300 + traj, 1400 + traj, 1500 + traj});
   RealD sigma_lower = m48_trminv_masked(U, Grid_, RBGrid, pRNG, mass, csw,
                                         n_noise, NoiseMode::LowerOnly);
 
@@ -224,7 +225,7 @@ int main(int argc, char **argv) {
   // on a pure QCD ensemble at the same mass + lattice.
   RealD cg_tol_eff = 1e-6;
   if (const char *t = std::getenv("CG_TOL"); t && *t) cg_tol_eff = std::atof(t);
-  pRNG.SeedFixedIntegers({2100, 2200, 2300, 2400, 2500});
+  pRNG.SeedFixedIntegers({2100 + traj, 2200 + traj, 2300 + traj, 2400 + traj, 2500 + traj});
   RealD sigma_W = plain_wilson_trminv(U.U, Grid_, RBGrid, pRNG, mass,
                                        n_noise, cg_tol_eff);
 

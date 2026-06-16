@@ -174,11 +174,15 @@ int main(int argc, char **argv) {
             << "  ||t||²/V="    << (norm2(U.t)     / Grid_.gSites())
             << std::endl;
 
-  pRNG.SeedFixedIntegers({100, 200, 300, 400, 500});
+  // Seed noise with cfg traj number so different cfgs get independent
+  // Hutchinson noise — averaging over cfgs then yields a properly
+  // mixed estimator (gauge + aux + noise) instead of a fixed-noise
+  // realization of (gauge + aux).
+  pRNG.SeedFixedIntegers({100 + traj, 200 + traj, 300 + traj, 400 + traj, 500 + traj});
   RealD sigma_txqcd = txqcd_op_trminv(U, Grid_, RBGrid, pRNG, mass, csw,
                                        n_noise, cg_tol);
 
-  pRNG.SeedFixedIntegers({2100, 2200, 2300, 2400, 2500});
+  pRNG.SeedFixedIntegers({2100 + traj, 2200 + traj, 2300 + traj, 2400 + traj, 2500 + traj});
   RealD sigma_W = plain_wilson_clover_trminv(U.U, Grid_, RBGrid, pRNG, mass,
                                               csw, n_noise, cg_tol);
 
