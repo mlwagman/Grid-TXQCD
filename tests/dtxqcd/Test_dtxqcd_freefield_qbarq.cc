@@ -17,6 +17,7 @@
 // Env knobs match TXQCD analog (LAMBDA, MASS, MDSTEPS, TRAJL, N_PROD, N_THERM, MEAS_SKIP, CFG_DIR).
 
 #include "Test_dtxqcd_2pt_utils.h"
+#include "Test_dtxqcd_fierz_check_utils.h"
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
@@ -29,13 +30,15 @@ using namespace Grid;
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
-  RealD lambda_run = 2.0;
+  // Quick smoke defaults — m=1000 (κ ≈ 5e-4, BC irrelevant) so the
+  // entire run completes in well under 1 min.
+  RealD lambda_run = 1.0;
   RealD mass_run   = 1000.0;
   RealD csw_run    = 0.0;
   int mdsteps      = 4;
   RealD trajL      = 1.0;
   int n_therm_run  = 10;
-  int n_prod_run   = 30;
+  int n_prod_run   = 20;
   int meas_skip_run = 5;
   std::string cfg_dir = "free_dtxqcd";
 
@@ -111,9 +114,7 @@ int main(int argc, char **argv) {
 
   DTXQCDField U(&Grid);
   DTXQCDCompositeImpl::ColdConfiguration(pRNG, U);
-  RealD init_plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
-  std::cout << GridLogMessage << "  U cold start: plaq = " << init_plaq
-            << " (expect 1)" << std::endl;
+  DtxqcdInitFrozenGauge(pRNG, U);
 
   HMCparameters HMCp;
   HMCp.StartTrajectory     = 0;
@@ -130,17 +131,23 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid, MD, Aset, Smear);
   Smear.set_Field(U);
 
-  CheckpointerParameters CPp;
-  CPp.config_prefix = cfg_dir + "/ckpoint_lat";
-  CPp.rng_prefix    = cfg_dir + "/ckpoint_rng";
-  CPp.saveInterval  = meas_skip_run;
-  CPp.format        = "IEEE64BIG";
-  DTXQCDCheckpointer ckpt(CPp);
-
-  std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt};
+  // No checkpointer — Fierz check runs on in-memory final state.
+  std::vector<HmcObservable<DTXQCDField> *> Obs = {};
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 
+  // ===== Post-HMC Fierz check =====
+  RealD pass_tol = 0.02;
+  if (const char *v = std::getenv("PASS_TOL"); v && *v) pass_tol = std::atof(v);
+  int n_noise = 64;
+  if (const char *v = std::getenv("N_NOISE"); v && *v) n_noise = std::atoi(v);
+  RealD meas_cg_tol = 1e-10;
+  if (const char *v = std::getenv("MEAS_CG_TOL"); v && *v) meas_cg_tol = std::atof(v);
+
+  auto result = DtxqcdFierzCheck(U, Grid, RBGrid, mass_run, csw_run,
+                                  n_noise, meas_cg_tol, pass_tol,
+                                  "Test_dtxqcd_freefield_qbarq");
+
   Grid_finalize();
-  return 0;
+  return result.pass ? 0 : 1;
 }
