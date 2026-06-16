@@ -31,6 +31,7 @@
 //   N_THERM   — thermalization trajectories (default 50)
 
 #include "Test_txqcd_2pt_clover_optlam_utils.h"
+#include "Test_txqcd_fierz_check_utils.h"
 #include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
@@ -41,14 +42,18 @@ using TxqcdTest2pt::n_vev_noise;
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
-  RealD lambda_run = 2.0;
-  RealD mass_run   = 100.0;          // effectively kappa=0
+  // Quick smoke-test defaults — m=1000 (κ ≈ 5e-4, BC irrelevant) so the
+  // entire run completes in ~5 seconds and probes the Fierz equivalence
+  // in the deep heavy-mass regime.  For the harder light-mass corner see
+  // Test_txqcd_freefield_qbarq_light.
+  RealD lambda_run = 1.0;
+  RealD mass_run   = 1000.0;
   RealD csw_run    = 0.0;
   int mdsteps      = 4;
   RealD trajL      = 1.0;
-  int n_therm_run  = 50;
-  int n_prod_run   = 200;
-  int meas_skip_run = 10;
+  int n_therm_run  = 10;
+  int n_prod_run   = 20;
+  int meas_skip_run = 4;
   bool dh_only     = false;          // if true, no Metropolis (pure dH probe)
   std::string cfg_dir = "free_txqcd";
 
@@ -104,8 +109,11 @@ int main(int argc, char **argv) {
   // Rational bracket: M^dag M at U=I has eigenvalues ~ (m+4)².  Defaults
   // sized for m=1000 (M²~1e6); override with RAT_LO/RAT_HI/RAT_DEGREE for
   // smaller m runs.
-  RealD rat_lo = 1e4, rat_hi = 2e6;
-  int rat_deg  = 8;
+  // Bracket sized for the m=1000 default — M^†M spectrum at U=I sits near
+  // (m+4)² = 1.008×10⁶.  RAT_LO / RAT_HI / RAT_DEGREE env overrides for
+  // smaller mass.
+  RealD rat_lo = 1e5, rat_hi = 2e7;
+  int rat_deg  = 10;
   if (const char *v = std::getenv("RAT_LO");     v && *v) rat_lo  = std::atof(v);
   if (const char *v = std::getenv("RAT_HI");     v && *v) rat_hi  = std::atof(v);
   if (const char *v = std::getenv("RAT_DEGREE"); v && *v) rat_deg = std::atoi(v);
@@ -200,6 +208,21 @@ int main(int argc, char **argv) {
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 
+  // ===== Post-HMC: Σ_TX vs Σ_W Fierz check on equilibrated state =====
+  // PASS_TOL controls the relative tolerance; 0.02 (2%) is comfortable for
+  // m=1000 and m≥10.  At very light mass (m=0.1) the genuine finite-aux
+  // correction reaches ~0.5%, still well under the tolerance.
+  RealD pass_tol = 0.02;
+  if (const char *v = std::getenv("PASS_TOL"); v && *v) pass_tol = std::atof(v);
+  int n_noise = 64;
+  if (const char *v = std::getenv("N_NOISE"); v && *v) n_noise = std::atoi(v);
+  RealD meas_cg_tol = 1e-10;
+  if (const char *v = std::getenv("MEAS_CG_TOL"); v && *v) meas_cg_tol = std::atof(v);
+
+  auto result = TxqcdFierzCheck(U, Grid, RBGrid, mass_run, csw_run,
+                                 n_noise, meas_cg_tol, pass_tol,
+                                 "Test_txqcd_freefield_qbarq");
+
   Grid_finalize();
-  return 0;
+  return result.pass ? 0 : 1;
 }
