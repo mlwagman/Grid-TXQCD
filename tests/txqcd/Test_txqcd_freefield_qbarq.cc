@@ -149,8 +149,10 @@ int main(int argc, char **argv) {
   MD.trajL   = trajL;
 
   TXQCDField U(&Grid);
-  // Initialize U = I and aux fields.
+  // ColdConfiguration → U=I, aux=0.  Then overlay U per GAUGE_INIT
+  // (default "cold" leaves U=I; "tepid", "hot", or "nersc:PATH" perturbs).
   TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
+  TxqcdInitFrozenGauge(pRNG, U);
   // SIGMA_INIT env knob: seed aux at the predicted saddle using
   // FillAuxFields(Sigma).  Sigma=0 keeps aux=0 (cold start).
   // SADDLE_INIT=1 computes the free-field Sigma automatically:
@@ -171,10 +173,6 @@ int main(int argc, char **argv) {
               << (TxqcdNf * sigma_init / (std::sqrt(2.0) * Nc * lambda_run * lambda_run))
               << std::endl;
   }
-  // verify U = I (plaq should be 1)
-  RealD init_plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
-  std::cout << GridLogMessage << "  U cold start: plaq = " << init_plaq
-            << " (expect 1)" << std::endl;
 
   HMCparameters HMCp;
   HMCp.StartTrajectory     = 0;

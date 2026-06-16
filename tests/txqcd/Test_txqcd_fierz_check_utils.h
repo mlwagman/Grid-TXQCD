@@ -16,8 +16,58 @@
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
+#include <Grid/qcd/utils/GaugeGroup.h>
+#include <Grid/parallelIO/NerscIO.h>
 
 NAMESPACE_BEGIN(Grid);
+
+// Initialize the frozen gauge field for the Fierz unit tests.  Aux fields
+// are assumed already initialized by the caller (TXQCDCompositeImpl::
+// ColdConfiguration + FillAuxFields are the usual sequence).
+//
+// Mode is taken from the GAUGE_INIT env knob:
+//   "cold"        — U_μ(x) = I (default, current behaviour)
+//   "tepid"       — Grid's TepidConfiguration (small Lie-algebra noise,
+//                    amp=0.01); a weak-field stress test
+//   "tepid:AMP"   — explicit Lie-randomize amplitude (e.g. tepid:0.05)
+//   "hot"         — Grid's HotConfiguration (uniform random SU(3))
+//   "nersc:PATH"  — read NERSC-format config at PATH
+//
+// Returns the average plaquette so the caller can log it.
+inline RealD TxqcdInitFrozenGauge(GridParallelRNG &pRNG, TXQCDField &U) {
+  const char *env = std::getenv("GAUGE_INIT");
+  std::string mode = (env && *env) ? env : "cold";
+  if (mode == "cold") {
+    U.U = 1.0;
+  } else if (mode == "hot") {
+    SU<Nc>::HotConfiguration(pRNG, U.U);
+  } else if (mode.rfind("tepid", 0) == 0) {
+    RealD amp = 0.01;  // Grid default
+    if (mode.size() > 5 && mode[5] == ':') amp = std::atof(mode.c_str() + 6);
+    typedef LatticeColourMatrix LCM;
+    LCM Umu(U.U.Grid());
+    for (int mu = 0; mu < Nd; ++mu) {
+      SU<Nc>::LieRandomize(pRNG, Umu, amp);
+      PokeIndex<LorentzIndex>(U.U, Umu, mu);
+    }
+    std::cout << GridLogMessage << "TxqcdInitFrozenGauge: tepid amp=" << amp << std::endl;
+  } else if (mode.rfind("nersc:", 0) == 0) {
+    std::string path = mode.substr(6);
+    FieldMetaData header;
+    NerscIO::readConfiguration(U.U, header, path);
+    std::cout << GridLogMessage
+              << "TxqcdInitFrozenGauge: loaded NERSC " << path << std::endl;
+  } else {
+    std::cerr << "TxqcdInitFrozenGauge: unknown GAUGE_INIT='"
+              << mode << "'.  Falling back to cold." << std::endl;
+    U.U = 1.0;
+  }
+  RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
+  std::cout << GridLogMessage
+            << "TxqcdInitFrozenGauge: mode=" << mode << " plaq=" << plaq
+            << " (1.0 = cold, < 1 = perturbed)" << std::endl;
+  return plaq;
+}
 
 inline WilsonImplR::ImplParams TxqcdFierzApbcImplParams() {
   WilsonImplR::ImplParams p;

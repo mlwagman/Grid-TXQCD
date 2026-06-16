@@ -119,15 +119,14 @@ int main(int argc, char **argv) {
   MD.trajL   = trajL;
 
   TXQCDField U(&Grid_);
-  TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
-  // Seed aux at the predicted free-field saddle Σ = 3/(4+m).
+  TXQCDCompositeImpl::ColdConfiguration(pRNG, U);  // zeros aux + U=I
+  TxqcdInitFrozenGauge(pRNG, U);                    // overlays U per GAUGE_INIT
+  // Seed aux at the predicted free-field saddle Σ = 3/(4+m).  At weak
+  // perturbed U this is still a good initial guess.
   RealD sigma_init = 3.0 / (4.0 + mass_run);
   TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, sigma_init);
   std::cout << GridLogMessage
             << "aux seeded at saddle Σ=" << sigma_init << std::endl;
-  RealD init_plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
-  std::cout << GridLogMessage << "U cold start: plaq = " << init_plaq
-            << " (expect 1)" << std::endl;
 
   HMCparameters HMCp;
   HMCp.StartTrajectory     = 0;
