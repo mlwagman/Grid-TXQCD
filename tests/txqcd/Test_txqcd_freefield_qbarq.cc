@@ -136,8 +136,28 @@ int main(int argc, char **argv) {
   MD.trajL   = trajL;
 
   TXQCDField U(&Grid);
-  // ColdConfiguration: U = identity, aux = 0 (no Gaussian init).
+  // Initialize U = I and aux fields.
   TXQCDCompositeImpl::ColdConfiguration(pRNG, U);
+  // SIGMA_INIT env knob: seed aux at the predicted saddle using
+  // FillAuxFields(Sigma).  Sigma=0 keeps aux=0 (cold start).
+  // SADDLE_INIT=1 computes the free-field Sigma automatically:
+  //   <q̄q>_free / 2 = Ns·Nc/(4·(4+m)) = 3/(4+m)   (compute_trminv "/4V" convention)
+  // and uses it as the seed (saddle <s> ≈ Nf·Σ/(√2·Nc·λ²)).
+  RealD sigma_init = 0.0;
+  if (const char *v = std::getenv("SIGMA_INIT"); v && *v) {
+    sigma_init = std::atof(v);
+  } else if (const char *v = std::getenv("SADDLE_INIT");
+             v && std::atoi(v) != 0) {
+    sigma_init = 3.0 / (4.0 + mass_run);
+  }
+  if (sigma_init != 0.0) {
+    TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, sigma_init);
+    std::cout << GridLogMessage
+              << "  aux seeded at saddle: Sigma=" << sigma_init
+              << "  → <s>_init ~ Nf·Σ/(√2·Nc·λ²) = "
+              << (TxqcdNf * sigma_init / (std::sqrt(2.0) * Nc * lambda_run * lambda_run))
+              << std::endl;
+  }
   // verify U = I (plaq should be 1)
   RealD init_plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
   std::cout << GridLogMessage << "  U cold start: plaq = " << init_plaq
