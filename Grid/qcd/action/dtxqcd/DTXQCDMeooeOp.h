@@ -42,13 +42,22 @@ class DTXQCDMeooeDoubled {
   typedef WilsonImplR Impl;
   typedef WilsonFermion<Impl> WilsonOp;
 
+  // APBC time (chroma physics convention).  Both block engines must agree.
+  static typename Impl::ImplParams DefaultImplParams() {
+    typename Impl::ImplParams p;
+    p.boundary_phases.resize(Nd, 1.0);
+    p.boundary_phases[Nd - 1] = -1.0;
+    return p;
+  }
+
   DTXQCDMeooeDoubled(LatticeGaugeField &U_upper,
                      GridCartesian &grid,
                      GridRedBlackCartesian &rbgrid,
-                     RealD mass)
+                     RealD mass,
+                     typename Impl::ImplParams impl_p = DefaultImplParams())
       : U_conj_(DtxqcdConjugateGauge(U_upper)),
-        Dw_upper_(U_upper, grid, rbgrid, mass),
-        Dw_lower_(U_conj_, grid, rbgrid, mass) {}
+        Dw_upper_(U_upper, grid, rbgrid, mass, impl_p),
+        Dw_lower_(U_conj_, grid, rbgrid, mass, impl_p) {}
 
   // Apply the doubled Meooe hopping per block, per flavor.
   // Checkerboard semantics follow Grid's WilsonFermion::Meooe (in/out must

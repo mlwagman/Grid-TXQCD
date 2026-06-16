@@ -185,7 +185,8 @@ protected:
 
   std::vector<int>    traj_;
   std::vector<RealD>  plaq_;
-  std::vector<RealD>  vev_sigma_, vev_s_;
+  std::vector<RealD>  vev_sigma_, vev_s_, vev_pi_, vev_p_;
+  std::vector<RealD>  vev_sigma_i_, vev_s_i_, vev_pi_i_, vev_p_i_;
   std::vector<std::vector<RealD>> force_avg_, force_max_;
   std::vector<std::vector<RealD>> fdt_avg_, fdt_max_;
 
@@ -205,6 +206,8 @@ protected:
     if (has_aux_) {
       write(wr, "vev_sigma", vev_sigma_);
       write(wr, "vev_s", vev_s_);
+      write(wr, "vev_pi", vev_pi_);
+      write(wr, "vev_p", vev_p_);
     }
     std::vector<std::string> names;
     for (auto &a : actions_) names.push_back(a.name);
@@ -214,6 +217,7 @@ protected:
     force_avg_.clear(); force_max_.clear();
     fdt_avg_.clear(); fdt_max_.clear();
     vev_sigma_.clear(); vev_s_.clear();
+    vev_pi_.clear(); vev_p_.clear();
 
     std::cout << GridLogMessage << "HMC diagnostics written to " << fname << std::endl;
   }
@@ -274,7 +278,11 @@ struct TxqcdDiagnostics : HmcDiagWriter<TXQCDField> {
   virtual LatticeGaugeField get_vev_gauge(TXQCDField &U) { return U.U; }
 
   virtual RealD compute_trminv(LatticeGaugeField &Uvev) {
-    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_);
+    // APBC time (chroma physics convention) — matches the TXQCD operators.
+    WilsonImplR::ImplParams impl_p;
+    impl_p.boundary_phases.resize(Nd, 1.0);
+    impl_p.boundary_phases[Nd - 1] = -1.0;
+    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_, impl_p);
     MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     RealD V = (RealD)grid_.gSites();
@@ -292,8 +300,18 @@ struct TxqcdDiagnostics : HmcDiagWriter<TXQCDField> {
 
   void record_aux(TXQCDField &U) override {
     RealD V = (RealD)U.Grid()->gSites();
-    vev_sigma_.push_back(TensorRemove(sum(trace(U.sigma))).real() / V);
-    vev_s_.push_back(TensorRemove(sum(trace(U.s))).real() / V);
+    auto tr_sigma = TensorRemove(sum(trace(U.sigma)));
+    auto tr_s     = TensorRemove(sum(trace(U.s)));
+    auto tr_pi    = TensorRemove(sum(trace(U.pi)));
+    auto tr_p     = TensorRemove(sum(trace(U.p)));
+    vev_sigma_.push_back(tr_sigma.real() / V);
+    vev_s_.push_back(tr_s.real() / V);
+    vev_pi_.push_back(tr_pi.real() / V);
+    vev_p_.push_back(tr_p.real() / V);
+    vev_sigma_i_.push_back(tr_sigma.imag() / V);
+    vev_s_i_.push_back(tr_s.imag() / V);
+    vev_pi_i_.push_back(tr_pi.imag() / V);
+    vev_p_i_.push_back(tr_p.imag() / V);
 
     LatticeGaugeField Uvev = get_vev_gauge(U);
     vev_trminv_.push_back(compute_trminv(Uvev));
@@ -311,6 +329,12 @@ struct TxqcdDiagnostics : HmcDiagWriter<TXQCDField> {
     write(wr, "fdt_max", fdt_max_);
     write(wr, "vev_sigma", vev_sigma_);
     write(wr, "vev_s", vev_s_);
+    write(wr, "vev_pi", vev_pi_);
+    write(wr, "vev_p", vev_p_);
+    write(wr, "vev_sigma_imag", vev_sigma_i_);
+    write(wr, "vev_s_imag", vev_s_i_);
+    write(wr, "vev_pi_imag", vev_pi_i_);
+    write(wr, "vev_p_imag", vev_p_i_);
     write(wr, "vev_trminv", vev_trminv_);
     std::vector<std::string> names;
     for (auto &a : actions_) names.push_back(a.name);
@@ -320,6 +344,9 @@ struct TxqcdDiagnostics : HmcDiagWriter<TXQCDField> {
     force_avg_.clear(); force_max_.clear();
     fdt_avg_.clear(); fdt_max_.clear();
     vev_sigma_.clear(); vev_s_.clear();
+    vev_pi_.clear(); vev_p_.clear();
+    vev_sigma_i_.clear(); vev_s_i_.clear();
+    vev_pi_i_.clear(); vev_p_i_.clear();
     vev_trminv_.clear();
 
     std::cout << GridLogMessage << "HMC diagnostics written to " << fname << std::endl;
@@ -349,7 +376,11 @@ struct QcdDiagnostics : HmcDiagWriter<LatticeGaugeField> {
   virtual LatticeGaugeField get_vev_gauge(LatticeGaugeField &U) { return U; }
 
   virtual RealD compute_trminv(LatticeGaugeField &Uvev) {
-    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_);
+    // APBC time (chroma physics convention).
+    WilsonImplR::ImplParams impl_p;
+    impl_p.boundary_phases.resize(Nd, 1.0);
+    impl_p.boundary_phases[Nd - 1] = -1.0;
+    WilsonFermionD Dw(Uvev, grid_, rbgrid_, mass_, impl_p);
     MdagMLinearOperator<WilsonFermionD, LatticeFermion> HermOp(Dw);
     ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
     RealD V = (RealD)grid_.gSites();

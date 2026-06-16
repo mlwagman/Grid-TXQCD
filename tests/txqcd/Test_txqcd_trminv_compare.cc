@@ -48,12 +48,23 @@ using namespace Grid;
 //   Σ_W = 12/(m+4) = 4·Nc/(m+4)     ← user's free-field expression
 // Same convention matches compute_trminv in Test_dtxqcd_2pt_utils.h
 // (and the AUX_INIT_AUTO bisection / saddle relations in gencfgs).
+static WilsonImplR::ImplParams AntiPeriodicTimeBC() {
+  WilsonImplR::ImplParams p;
+  p.boundary_phases.resize(Nd, 1.0);
+  p.boundary_phases[Nd - 1] = -1.0;
+  return p;
+}
+
 static RealD plain_wilson_clover_trminv(LatticeGaugeField &U, GridCartesian &Grid_,
                                          GridRedBlackCartesian &RBGrid,
                                          GridParallelRNG &prng, RealD mass,
                                          RealD csw, int n_noise, RealD cg_tol) {
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-  WCF Dw(U, Grid_, RBGrid, mass, csw, csw);
+  WilsonImplR::ImplParams ap = AntiPeriodicTimeBC();
+  if (const char *p = std::getenv("PBC_TIME"); p && std::atoi(p) != 0) {
+    ap.boundary_phases[Nd - 1] = 1.0;
+  }
+  WCF Dw(U, Grid_, RBGrid, mass, csw, csw, WilsonAnisotropyCoefficients(), ap);
   MdagMLinearOperator<WCF, LatticeFermion> HermOp(Dw);
   ConjugateGradient<LatticeFermion> CG(cg_tol, 30000);
   RealD V = (RealD)Grid_.gSites();
@@ -75,8 +86,18 @@ static RealD txqcd_op_trminv(TXQCDField &U, GridCartesian &Grid_,
                               int n_noise, RealD cg_tol) {
   std::array<RealD, TxqcdNf> mass_arr;
   for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass;
+  // Default BC = APBC time (matches TXQCDWilsonCloverFermionEO default).
+  // PBC_TIME=1 → use periodic in all directions (matches TXQCDWilsonOp / HMC).
+  WilsonImplR::ImplParams impl_p;
+  impl_p.boundary_phases.resize(Nd, 1.0);
+  impl_p.boundary_phases[Nd - 1] = -1.0;
+  if (const char *p = std::getenv("PBC_TIME"); p && std::atoi(p) != 0) {
+    impl_p.boundary_phases[Nd - 1] = 1.0;
+    std::cout << GridLogMessage << "PBC_TIME=1 → Σ_TX with periodic time" << std::endl;
+  }
   TXQCDWilsonCloverFermionEO Dw(U.U, Grid_, RBGrid, mass_arr,
-                                 U.sigma, U.pi, U.s, U.p, U.t, csw);
+                                 U.sigma, U.pi, U.s, U.p, U.t, csw,
+                                 impl_p);
   RealD V = (RealD)Grid_.gSites();
   RealD acc = 0.0;
   const int cg_max = 30000;
@@ -161,6 +182,67 @@ int main(int argc, char **argv) {
                                  cfg_dir + "/ckpoint_lat",
                                  cfg_dir + "/ckpoint_rng", traj);
 
+  // ZERO_AUX=1 — zero the loaded aux to test M_TX|aux=0 == D_W on 2 copies.
+  if (const char *z = std::getenv("ZERO_AUX"); z && std::atoi(z) != 0) {
+    U.sigma = Zero(); U.pi = Zero(); U.s = Zero(); U.p = Zero(); U.t = Zero();
+    std::cout << GridLogMessage << "ZERO_AUX=1 → all aux zeroed" << std::endl;
+  }
+
+  // OP_DIFF=1 — apply M_TX and D_W to the same vector, compare element-wise.
+  if (const char *od = std::getenv("OP_DIFF"); od && std::atoi(od) != 0) {
+    std::array<RealD, TxqcdNf> mass_arr;
+    for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass;
+    TXQCDWilsonCloverFermionEO Mtx(U.U, Grid_, RBGrid, mass_arr,
+                                    U.sigma, U.pi, U.s, U.p, U.t, csw);
+    WilsonFermionD Mw(U.U, Grid_, RBGrid, mass);
+
+    TXQCDFermionNf in_tx(&Grid_), out_tx(&Grid_);
+    for (int a = 0; a < TxqcdNf; ++a) gaussian(pRNG, in_tx.f[a]);
+    Mtx.M(in_tx, out_tx);
+
+    // Apply Wilson D_W to each flavor independently.
+    LatticeFermion out_w0(&Grid_), out_w1(&Grid_);
+    Mw.M(in_tx.f[0], out_w0);
+    Mw.M(in_tx.f[1], out_w1);
+
+    LatticeFermion diff0 = out_tx.f[0] - out_w0;
+    LatticeFermion diff1 = out_tx.f[1] - out_w1;
+    RealD n_tx0 = std::sqrt(norm2(out_tx.f[0]));
+    RealD n_w0  = std::sqrt(norm2(out_w0));
+    RealD n_d0  = std::sqrt(norm2(diff0));
+    RealD n_d1  = std::sqrt(norm2(diff1));
+    std::cout << GridLogMessage << "OP_DIFF: ||M_TX·η_0|| = " << n_tx0
+              << "   ||D_W·η_0|| = " << n_w0
+              << "   ||M_TX·η_0 - D_W·η_0|| = " << n_d0
+              << "   rel = " << (n_d0/n_w0)
+              << "\n             flavor 1 rel = " << (n_d1/n_w0)
+              << std::endl;
+
+    // Direct test: TXQCD's internal Dw_ (mass=0 Wilson) vs fresh WilsonFermion(mass=0)
+    WilsonFermionD Mw0(U.U, Grid_, RBGrid, 0.0);
+    LatticeFermion out_dwm0(&Grid_), out_mw0(&Grid_);
+    Mtx.Wilson().M(in_tx.f[0], out_dwm0);  // TXQCD's internal Wilson kernel
+    Mw0.M(in_tx.f[0], out_mw0);
+    LatticeFermion diff_w = out_dwm0 - out_mw0;
+    RealD rel_w = std::sqrt(norm2(diff_w) / norm2(out_mw0));
+    std::cout << GridLogMessage
+              << "Dw_inner vs WilsonFermion(m=0) rel = " << rel_w
+              << "   (||Dw_inner|| = " << std::sqrt(norm2(out_dwm0))
+              << ", ||WilsonFermion|| = " << std::sqrt(norm2(out_mw0)) << ")"
+              << std::endl;
+
+    // Decomposition: out_tx = Dw_.M(η) + mass*η + Delta(aux=0)·η = Dw_.M(η) + mass*η
+    // Subtract Dw_.M and mass*η from out_tx — what's left should be zero if Delta(aux=0)=0
+    LatticeFermion out_check(&Grid_);
+    out_check = out_tx.f[0] - out_dwm0 - mass * in_tx.f[0];
+    RealD residual = std::sqrt(norm2(out_check));
+    std::cout << GridLogMessage
+              << "Residual ||M_TX·η - Dw·η - mass·η|| = " << residual
+              << "  (should be 0 at aux=0)" << std::endl;
+    Grid_finalize();
+    return 0;
+  }
+
   std::cout << GridLogMessage
             << "loaded cfg: dir=" << cfg_dir << " traj=" << traj
             << "  mass=" << mass << "  csw=" << csw
@@ -173,6 +255,24 @@ int main(int argc, char **argv) {
             << "  ||p||²/V="    << (norm2(U.p)     / Grid_.gSites())
             << "  ||t||²/V="    << (norm2(U.t)     / Grid_.gSites())
             << std::endl;
+
+  // Spatial-mean trace VEVs (real + imag) for σ, π, s, p
+  {
+    RealD V = (RealD)Grid_.gSites();
+    auto tr_sigma = TensorRemove(sum(trace(U.sigma)));
+    auto tr_pi    = TensorRemove(sum(trace(U.pi)));
+    auto tr_s     = TensorRemove(sum(trace(U.s)));
+    auto tr_p     = TensorRemove(sum(trace(U.p)));
+    std::cout << GridLogMessage << "VEV  ⟨Tr σ⟩ = "
+              << (tr_sigma.real()/V) << "  + i*" << (tr_sigma.imag()/V)
+              << "\n         ⟨Tr π⟩ = "
+              << (tr_pi.real()/V) << "  + i*" << (tr_pi.imag()/V)
+              << "\n         ⟨Tr s⟩ = "
+              << (tr_s.real()/V) << "  + i*" << (tr_s.imag()/V)
+              << "\n         ⟨Tr p⟩ = "
+              << (tr_p.real()/V) << "  + i*" << (tr_p.imag()/V)
+              << std::endl;
+  }
 
   // Seed noise with cfg traj number so different cfgs get independent
   // Hutchinson noise — averaging over cfgs then yields a properly

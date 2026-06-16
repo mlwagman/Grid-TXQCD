@@ -85,8 +85,13 @@ int main(int argc, char **argv) {
 
   GridSerialRNG   sRNG;
   GridParallelRNG pRNG(&Grid);
-  sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
-  pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+  int rng_seed = 0;
+  if (const char *v = std::getenv("RNG_SEED"); v && *v) rng_seed = std::atoi(v);
+  sRNG.SeedFixedIntegers({1 + rng_seed, 2 + rng_seed, 3 + rng_seed,
+                          4 + rng_seed, 5 + rng_seed});
+  pRNG.SeedFixedIntegers({6 + rng_seed, 7 + rng_seed, 8 + rng_seed,
+                          9 + rng_seed, 10 + rng_seed});
+  std::cout << GridLogMessage << "  RNG_SEED offset = " << rng_seed << std::endl;
 
   // RATIONAL Nf=2 PF: S = phi^dag (M^dag M)^{-1/2} phi → weight |det M_TX|.
   // At aux=0 with internal Nf=2 flavor block: |det M_TX| = (det D_W)² = Nf=2 vanilla Wilson.

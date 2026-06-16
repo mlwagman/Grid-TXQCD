@@ -72,7 +72,9 @@ class DTXQCDWilsonCloverFermionEO {
                               const LatticeDtxqcdD     &d,
                               const LatticeDtxqcdN     &n,
                               const LatticeDtxqcdS     &s,
-                              const LatticeDtxqcdP     &p)
+                              const LatticeDtxqcdP     &p,
+                              typename Impl::ImplParams impl_p =
+                                  DTXQCDMeooeDoubled::DefaultImplParams())
       : mass_(mass),
         csw_(csw),
         sigma_(sigma),
@@ -84,7 +86,7 @@ class DTXQCDWilsonCloverFermionEO {
         grid_(grid),
         rbgrid_(rbgrid),
         Umu_(U),
-        meooe_(U, grid, rbgrid, mass),
+        meooe_(U, grid, rbgrid, mass, impl_p),
         sigma_e_(&rbgrid), sigma_o_(&rbgrid),
         pi_e_(&rbgrid),    pi_o_(&rbgrid),
         d_e_(&rbgrid),     d_o_(&rbgrid),

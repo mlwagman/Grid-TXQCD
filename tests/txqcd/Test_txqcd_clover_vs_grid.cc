@@ -46,9 +46,15 @@ int main(int argc, char **argv) {
 
   RealD mass = 0.3;
   RealD csw = 1.0;
+  bool u_identity = false;
+  if (const char *m = std::getenv("MASS"); m && *m) mass = std::atof(m);
+  if (const char *c = std::getenv("CSW");  c && *c) csw  = std::atof(c);
+  if (const char *u = std::getenv("U_IDENTITY"); u && std::atoi(u) != 0) u_identity = true;
+  std::cout << GridLogMessage << "mass=" << mass << " csw=" << csw
+            << " U_IDENTITY=" << u_identity << std::endl;
 
   LatticeGaugeField U(&grid);
-  SU3::HotConfiguration(pRNG, U);
+  if (u_identity) { U = 1.0; } else { SU3::HotConfiguration(pRNG, U); }
 
   // Zero aux fields
   LatticeSigmaField sigma(&grid); sigma = Zero();
