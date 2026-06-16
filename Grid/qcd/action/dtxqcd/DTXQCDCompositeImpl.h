@@ -145,6 +145,13 @@ class DTXQCDCompositeImpl {
   static inline void generate_momenta(Field &P, GridSerialRNG &sRNG,
                                       GridParallelRNG &pRNG) {
     PeriodicGimplR::generate_momenta(P.U, sRNG, pRNG);
+    // DTXQCD_FREEZE_GAUGE=1 zeros gauge momentum so U stays fixed during HMC.
+    // Used by free-field unit test (U=I + kappa~0 limit).
+    static int freeze_gauge_mom = []() {
+      const char *e = std::getenv("DTXQCD_FREEZE_GAUGE");
+      return (e && std::atoi(e) != 0) ? 1 : 0;
+    }();
+    if (freeze_gauge_mom) P.U = Zero();
     // Match the sqrt(HMC_MOMENTUM_DENOMINATOR) scaling that gauge momenta
     // get inside PeriodicGimplR::generate_momenta so the integrator update
     // P -= F * ep * HMC_MOMENTUM_DENOMINATOR is balanced against dq/dt = P
@@ -166,7 +173,15 @@ class DTXQCDCompositeImpl {
 
   static inline Field projectForce(Field &Fforce) {
     Field out(Fforce.Grid());
-    out.U = PeriodicGimplR::projectForce(Fforce.U);
+    static int freeze_gauge_pf = []() {
+      const char *e = std::getenv("DTXQCD_FREEZE_GAUGE");
+      return (e && std::atoi(e) != 0) ? 1 : 0;
+    }();
+    if (freeze_gauge_pf) {
+      out.U = Zero();  // zero gauge force → U stays at I
+    } else {
+      out.U = PeriodicGimplR::projectForce(Fforce.U);
+    }
     // σ, π forces are projected real-symmetric AND traceless (so the
     // singlet trace mode never gets a force kick, preserving traceless).
     out.sigma = Fforce.sigma;  DtxqcdHermitizeAndTracelessCFInPlace(out.sigma);
@@ -257,7 +272,7 @@ class DTXQCDCompositeImpl {
   // 2026-06-15 redesign — σ, π are traceless, s, p have halved Gaussian
   // coefficient (λ²/4).  Saddle now puts the entire singlet condensate
   // into s alone (no Tr σ contribution since σ is forced traceless):
-  //   ⟨s⟩      = N_F · Σ / (2 λ²)    (per-quark Σ convention)
+  //   ⟨s⟩      = 2 N_F · Σ / λ²       (per-quark Σ convention)
   //   ⟨Tr σ⟩   = 0                    (traceless by construction)
   // π, d, n, p stay mean-zero.
   //
@@ -266,13 +281,11 @@ class DTXQCDCompositeImpl {
   // convention after dividing by 2·N_F (the doubling factor verified
   // by Test_dtxqcd_trminv_zeroaux: ratio = 2·N_F).
   //
-  // Pre-2026-06-15 (and superseded): both s and Tr σ each shifted by
-  // N_F·Σ/λ², doubling the effective singlet coupling.  Their sum
-  // matched the SD identity, but the chain explored a redundant
-  // (s − Tr σ) DOF that was tightly constrained near zero by the
-  // gradient pressure (corr(s, c)=0.999 in data).  Resolved by analytic
-  // integration of the redundant variable — see
-  // project_dtxqcd_s_sigma_redundancy.md.
+  // The 2 N_F prefactor (vs the naive N_F/2 from (λ²/4)s² and a single
+  // Tr M_QCD^{-1} pull) reflects the (s + 2Q) source structure: the s
+  // singlet plus a 2× shift from the trace-mode Q in the M48 doubling.
+  // Empirical confirmation from λ=10 and λ=5 sweeps: λ²⟨s⟩/Σ_M48 ≈ 4
+  // (2 N_F for N_F=2) at equilibrium.
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
                                     RealD lambda, RealD Sigma = 0.0) {
     RealD lambda_var = lambda;
@@ -292,9 +305,9 @@ class DTXQCDCompositeImpl {
     DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale_sp * U.p;
 
     if (Sigma != 0.0) {
-      // s shift = N_F · Σ / (2 λ²)  with Σ in per-quark convention.
+      // s shift = 2 N_F · Σ / λ²  with Σ in per-quark convention.
       // σ traceless → no σ shift; the entire singlet condensate sits in s.
-      const RealD s_shift = DtxqcdNf * Sigma / (2.0 * lambda * lambda);
+      const RealD s_shift = 2.0 * DtxqcdNf * Sigma / (lambda * lambda);
       typedef typename LatticeDtxqcdS::vector_object::scalar_object SSobj;
       SSobj s_id;  s_id()()() = s_shift;
       LatticeDtxqcdS shift_s(U.s.Grid());

@@ -131,11 +131,15 @@ int main(int argc, char **argv) {
               << (use_full_pf ? "FULL (non-EO)" : "EO Schur")
               << std::endl;
 
-    DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass_run, 0.0);
+    RealD csw_run = 0.0;
+    if (const char *c = std::getenv("CSW"); c && *c) csw_run = std::atof(c);
+    std::cout << GridLogMessage << "DTXQCD csw = " << csw_run << std::endl;
+
+    DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass_run, csw_run);
     DTXQCDWilsonCloverRationalEOAction
-        PF(Grid, RBGrid, mass_run, rat_params, 0.0);
+        PF(Grid, RBGrid, mass_run, rat_params, csw_run);
     DTXQCDWilsonCloverRationalFullAction
-        PF_full(Grid, RBGrid, mass_run, rat_params, 0.0);
+        PF_full(Grid, RBGrid, mass_run, rat_params, csw_run);
 
     // Three-level hierarchy.  TXQCD's Wilson Fierz test bundles AuxGaussian
     // into L1 with PF and LogDet -- a smoke run at that structure showed
@@ -167,7 +171,12 @@ int main(int argc, char **argv) {
         L1.push_back(&LogDet);
       }
     }
-    ActionLevel<DTXQCDField, Reps> L2(2);
+    int gauge_mult = 2;
+    if (const char *m = std::getenv("GAUGE_MULT"); m && *m) {
+      gauge_mult = std::atoi(m);
+    }
+    std::cout << GridLogMessage << "DTXQCD gauge multiplier = " << gauge_mult << std::endl;
+    ActionLevel<DTXQCDField, Reps> L2(gauge_mult);
     L2.push_back(&GaugeAction);
     int aux_mult = 4;
     if (const char *m = std::getenv("AUX_MULT"); m && *m) {
@@ -219,10 +228,12 @@ int main(int argc, char **argv) {
       // doubled M well-conditioned on the cold gauge while HMC evolves
       // the aux toward the physical 1/lambda width.
       if (std::getenv("AUX_FLUCT_LAMBDA") == nullptr) setenv("AUX_FLUCT_LAMBDA", "10.0", 0);
-      // AUX_INIT / AUX_INIT_AUTO: shift σ diagonal and s to the SD saddle
-      // ⟨σ^{ij}_{ab}⟩_diag = ⟨s⟩ = Σ/λ² where Σ = ⟨Tr M^{-1}⟩/V is the
-      // chiral condensate.  Skips the slow trace-mode equilibration at
-      // small λ (relaxation rate λ²/Nf Nc ⇒ hundreds of trajectories for
+      // AUX_INIT / AUX_INIT_AUTO: shift s to the SD saddle
+      // ⟨s⟩ = 2 N_F · Σ / λ² where Σ = ⟨Tr M_QCD^{-1}⟩/(V·2·N_F) is the
+      // per-quark chiral condensate.  σ stays mean-zero (traceless by
+      // construction).  Empirical at λ=10/5: λ²⟨s⟩ ≈ 4·Σ = 2 N_F · Σ.
+      // Skips the slow singlet equilibration at small λ
+      // (relaxation rate λ²/(N_F·N_c) ⇒ hundreds of trajectories for
       // λ < 1).  Mirrors TXQCD AUX_INIT pattern in gen_txqcd_cfgs.cc.
       //   AUX_INIT=value  → Σ set explicitly
       //   AUX_INIT_AUTO=1 → measure Σ = vev_trminv on the weak-field gauge
@@ -266,21 +277,21 @@ int main(int argc, char **argv) {
         Sigma_init = acc / n_noise;
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO] Σ = vev_trminv = " << Sigma_init
-                  << "  → ⟨s⟩ = N_F·Σ/(2λ²) = "
-                  << (DtxqcdNf * Sigma_init / (2.0 * lambda_run * lambda_run))
+                  << "  → ⟨s⟩ = 2 N_F·Σ/λ² = "
+                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
                   << "  ⟨Tr σ⟩ = 0 (traceless by construction)" << std::endl;
       } else if (Sigma_init != 0.0) {
         std::cout << GridLogMessage
                   << "[AUX_INIT] Σ = " << Sigma_init
-                  << "  → ⟨s⟩ = N_F·Σ/(2λ²) = "
-                  << (DtxqcdNf * Sigma_init / (2.0 * lambda_run * lambda_run))
+                  << "  → ⟨s⟩ = 2 N_F·Σ/λ² = "
+                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
                   << "  ⟨Tr σ⟩ = 0 (traceless by construction)" << std::endl;
       }
       // Step 2: fill aux with Gaussian + saddle shift.
       DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
       // Step 2b (AUX_INIT_AUTO only): bisect on g(Σ) = Σ - Σ_DTXQCD(Σ)
       // to find the self-consistent saddle satisfying
-      // ⟨s⟩* = Nf·Σ_DTXQCD(⟨s⟩*)/λ², i.e., Σ_target = Σ_measured_on_op_with_that_aux.
+      // ⟨s⟩* = 2 N_F · Σ_DTXQCD(⟨s⟩*)/λ², i.e., Σ_target = Σ_measured_on_op_with_that_aux.
       // Plain Picard iteration (Σ_{n+1} = Σ_DTXQCD(Σ_n)) is unstable at small
       // λ because |dΣ_DTXQCD/d⟨s⟩| · Nf/λ² > 1 (the map is anti-monotone with
       // slope > 1).  Bisection is robust:
@@ -390,8 +401,8 @@ int main(int argc, char **argv) {
         DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
         std::cout << GridLogMessage
                   << "[AUX_INIT_AUTO converged] Σ* = " << Sigma_init
-                  << "  → ⟨s⟩* = Nf·Σ*/(2λ²) = "
-                  << (DtxqcdNf * Sigma_init / (2.0 * lambda_run * lambda_run))
+                  << "  → ⟨s⟩* = 2 N_F·Σ*/λ² = "
+                  << (2.0 * DtxqcdNf * Sigma_init / (lambda_run * lambda_run))
                   << std::endl;
       }
       if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {

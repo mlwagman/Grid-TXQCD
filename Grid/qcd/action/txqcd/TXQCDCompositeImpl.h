@@ -122,6 +122,13 @@ class TXQCDCompositeImpl {
   static inline void generate_momenta(Field &P, GridSerialRNG &sRNG,
                                       GridParallelRNG &pRNG) {
     PeriodicGimplR::generate_momenta(P.U, sRNG, pRNG);
+    // TXQCD_FREEZE_GAUGE=1 zeros gauge momentum so U stays fixed during HMC.
+    // Used by the free-field unit test where U=I + kappa=0 must be preserved.
+    static int freeze_gauge = []() {
+      const char *e = std::getenv("TXQCD_FREEZE_GAUGE");
+      return (e && std::atoi(e) != 0) ? 1 : 0;
+    }();
+    if (freeze_gauge) P.U = Zero();
     // Aux momenta need the same sqrt(HMC_MOMENTUM_DENOMINATOR) scaling that
     // gauge momenta receive inside PeriodicGimplR::generate_momenta, so that
     // K = ||P||^2 / HMC_MOMENTUM_DENOMINATOR gives K ~ nDOF/2 per component
@@ -137,7 +144,15 @@ class TXQCDCompositeImpl {
 
   static inline Field projectForce(Field &Fforce) {
     Field out(Fforce.Grid());
-    out.U = PeriodicGimplR::projectForce(Fforce.U);
+    static int freeze_gauge_pf = []() {
+      const char *e = std::getenv("TXQCD_FREEZE_GAUGE");
+      return (e && std::atoi(e) != 0) ? 1 : 0;
+    }();
+    if (freeze_gauge_pf) {
+      out.U = Zero();  // zero gauge force → U cannot move via integrator
+    } else {
+      out.U = PeriodicGimplR::projectForce(Fforce.U);
+    }
     out.sigma = Fforce.sigma;
     HermitianProjectInPlace(out.sigma);
     out.pi = Fforce.pi;

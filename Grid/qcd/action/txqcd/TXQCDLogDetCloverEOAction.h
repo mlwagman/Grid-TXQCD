@@ -19,11 +19,11 @@
 #include <Grid/qcd/action/txqcd/TXQCDSiteMatrix.h>
 #include <Grid/qcd/action/txqcd/TXQCDCompositeImpl.h>
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverFermionEO.h>
-#include <Grid/qcd/action/txqcd/TXQCDLogDetGpuKernel.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 #include <Grid/util/QudaPackGpu.h>
-#include <Grid/algorithms/blas/BatchedBlas.h>
 #ifdef GRID_CUDA
+#include <Grid/qcd/action/txqcd/TXQCDLogDetGpuKernel.h>
+#include <Grid/algorithms/blas/BatchedBlas.h>
 #include <cublas_v2.h>
 #endif
 
@@ -189,7 +189,11 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
       if (!e || !*e) return 1;
       return std::atoi(e);
     }();
+#ifdef GRID_CUDA
     if (use_gpu) { deriv_gpu(U, dSdU); return; }
+#else
+    (void)use_gpu;  // CPU build: GPU path stripped out by the preprocessor.
+#endif
     deriv_cpu(U, dSdU);
   }
 
@@ -204,6 +208,7 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
   //   3) dSdU.* = Zero(); Quda::AccumulateRbScaledToFull(dSdU.*, 1, F_*_e).
   //   4) For csw≠0: derive 6 clover_sigma RB ColourMatrix from F_t_e and
   //      run the existing Cmunu chain on the full grid.
+#ifdef GRID_CUDA
   void deriv_gpu(const TXQCDField &U, TXQCDField &dSdU) {
     auto t_total0 = usecond();
     constexpr int N  = SMU::kDim;        // 24
@@ -437,6 +442,7 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
     t_total_us_ += usecond() - t_total0;
     n_deriv_++;
   }
+#endif  // GRID_CUDA — end of deriv_gpu
 
   // Per-component timer dump (called from destructor or on demand).
   void PrintGpuTimers(const char *tag = "") const {
