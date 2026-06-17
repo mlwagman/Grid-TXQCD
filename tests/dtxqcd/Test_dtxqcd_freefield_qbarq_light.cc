@@ -129,6 +129,29 @@ int main(int argc, char **argv) {
   DTXQCDCompositeImpl::ColdConfiguration(pRNG, U);
   DtxqcdInitFrozenGauge(pRNG, U);
 
+  // Seed aux at the bare-Σ saddle = 3/(4+m) (matches existing DTXQCD smoke).
+  // AUX_INIT_AUTO=1 runs the production self-consistent bisection from
+  // gencfgs to seed at the true saddle Σ* satisfying Σ = Σ_DTXQCD(Σ).
+  // Necessary at small λ where the bare-Σ formula overshoots.
+  RealD Sigma_init = 3.0 / (4.0 + mass_run);
+  if (const char *si = std::getenv("AUX_INIT"); si && *si) {
+    Sigma_init = std::atof(si);
+  }
+  if (const char *sa = std::getenv("AUX_INIT_AUTO"); sa && std::atoi(sa) != 0) {
+    int max_iter = 15;
+    if (const char *m = std::getenv("AUX_INIT_MAX_ITER"); m && *m) max_iter = std::atoi(m);
+    RealD aux_tol = 1e-2;
+    if (const char *t = std::getenv("AUX_INIT_TOL"); t && *t) aux_tol = std::atof(t);
+    Sigma_init = DtxqcdSelfConsistentAuxInit(pRNG, Grid_, RBGrid, U,
+                                              lambda_run, mass_run, csw_run,
+                                              Sigma_init, max_iter, aux_tol);
+  } else {
+    pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+    DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
+    std::cout << GridLogMessage
+              << "Aux seeded at bare saddle Σ=" << Sigma_init << std::endl;
+  }
+
   HMCparameters HMCp;
   HMCp.StartTrajectory     = 0;
   HMCp.Trajectories        = total_traj - n_therm_run;

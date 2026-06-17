@@ -170,6 +170,77 @@ inline RealD DtxqcdFierzOpTrminv(DTXQCDField &U,
   return acc / (n_noise * 2.0 * (RealD)DtxqcdNf);
 }
 
+// Self-consistent aux seed via bisection.  Solves
+//   g(Σ) = Σ - Σ_DTXQCD(Σ) = 0
+// where Σ_DTXQCD(Σ) is the per-quark trace of M_DTXQCD^{-1} with aux
+// filled at ⟨s⟩ = 2·Nf·Σ/λ².  Bisection bracket: [0, Σ_bare].  Mirrors
+// the AUX_INIT_AUTO logic in Test_dtxqcd_2pt_gencfgs.cc.
+//
+// Returns the converged Σ.  The caller is responsible for the final
+// FillAuxFields call (which this routine also performs as a side effect).
+inline RealD DtxqcdSelfConsistentAuxInit(GridParallelRNG &pRNG,
+                                          GridCartesian &Grid_,
+                                          GridRedBlackCartesian &RBGrid,
+                                          DTXQCDField &U, RealD lambda,
+                                          RealD mass, RealD csw,
+                                          RealD Sigma_bare, int aux_max_iter,
+                                          RealD aux_tol) {
+  auto measure_sigma_dtxqcd = [&](RealD Sigma_at) -> RealD {
+    pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+    DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_at);
+    GridParallelRNG noisePRNG(&Grid_);
+    noisePRNG.SeedFixedIntegers({400, 410, 420, 430, 440});
+    const int n_noise_iter = 4;
+    return DtxqcdFierzOpTrminv(U, Grid_, RBGrid, noisePRNG, mass, csw,
+                                n_noise_iter, /*cg_tol=*/1e-8);
+  };
+  RealD Sigma_lo = 0.0;
+  RealD Sigma_hi = Sigma_bare;
+  RealD sigma_dtxqcd_lo = measure_sigma_dtxqcd(Sigma_lo);
+  RealD g_lo = Sigma_lo - sigma_dtxqcd_lo;
+  RealD sigma_dtxqcd_hi = measure_sigma_dtxqcd(Sigma_hi);
+  RealD g_hi = Sigma_hi - sigma_dtxqcd_hi;
+  std::cout << GridLogMessage
+            << "[AUX_INIT bracket] g(0)=" << g_lo
+            << "  g(" << Sigma_hi << ")=" << g_hi << std::endl;
+  RealD Sigma_star = Sigma_bare;
+  if (g_lo * g_hi > 0.0) {
+    std::cout << GridLogMessage
+              << "[AUX_INIT_AUTO] bracket has same sign — fall back to Σ_bare/2"
+              << std::endl;
+    Sigma_star = Sigma_hi / 2.0;
+  } else {
+    for (int it = 0; it < aux_max_iter; ++it) {
+      RealD Sigma_mid = 0.5 * (Sigma_lo + Sigma_hi);
+      RealD sigma_dtxqcd_mid = measure_sigma_dtxqcd(Sigma_mid);
+      RealD g_mid = Sigma_mid - sigma_dtxqcd_mid;
+      std::cout << GridLogMessage
+                << "[AUX_INIT iter " << it << "] Σ_mid = " << Sigma_mid
+                << "  Σ_DTXQCD = " << sigma_dtxqcd_mid
+                << "  g = " << g_mid << std::endl;
+      if (g_mid * g_lo < 0.0) {
+        Sigma_hi = Sigma_mid;
+        g_hi = g_mid;
+      } else {
+        Sigma_lo = Sigma_mid;
+        g_lo = g_mid;
+      }
+      if ((Sigma_hi - Sigma_lo) /
+              std::max(0.5 * (Sigma_hi + Sigma_lo), 1e-30) < aux_tol) {
+        break;
+      }
+    }
+    Sigma_star = 0.5 * (Sigma_lo + Sigma_hi);
+  }
+  pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+  DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_star);
+  std::cout << GridLogMessage
+            << "[AUX_INIT_AUTO converged] Σ* = " << Sigma_star
+            << "  → ⟨s⟩* = 2·Nf·Σ*/λ² = "
+            << (2.0 * DtxqcdNf * Sigma_star / (lambda * lambda)) << std::endl;
+  return Sigma_star;
+}
+
 struct DtxqcdFierzCheckResult {
   RealD sigma_dtx;
   RealD sigma_w;
