@@ -167,13 +167,59 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid_, MD, Aset, Smear);
   Smear.set_Field(U);
 
-  std::vector<HmcObservable<DTXQCDField> *> Obs = {};
+  // FIERZ_AVG_N_NOISE=K  → install averaging observer that does a small
+  // Fierz check (K noise samples) on every prod-window trajectory and
+  // accumulates aux trace VEVs.  Final ratio is the cfg-averaged
+  // ⟨Σ_DTX⟩ / ⟨Σ_W⟩, with the cfg-fluctuation noise folded into the
+  // standard error.  Default (knob absent) keeps the single-cfg final
+  // check path.
+  std::unique_ptr<DtxqcdFierzAveragingObserver> avg_obs;
+  std::unique_ptr<DTXQCDCheckpointer> ckpt;
+  std::vector<HmcObservable<DTXQCDField> *> Obs;
+  // SAVE_TRACE=PATH writes gauge+aux every MEAS_SKIP trajs so any future
+  // precision measurement (different N_NOISE, different ratio
+  // definition, etc.) can be re-run post-hoc.  Off by default.
+  if (const char *trace_path = std::getenv("SAVE_TRACE");
+      trace_path && *trace_path) {
+    int meas_skip = 5;
+    if (const char *v = std::getenv("MEAS_SKIP"); v && *v) meas_skip = std::atoi(v);
+    TxqcdTest2pt::mkdir_p(trace_path);
+    CheckpointerParameters CPp;
+    CPp.config_prefix = std::string(trace_path) + "/ckpoint_lat";
+    CPp.rng_prefix    = std::string(trace_path) + "/ckpoint_rng";
+    CPp.saveInterval  = meas_skip;
+    CPp.format        = "IEEE64BIG";
+    ckpt.reset(new DTXQCDCheckpointer(CPp));
+    Obs.push_back(ckpt.get());
+    std::cout << GridLogMessage << "SAVE_TRACE=" << trace_path
+              << " (cfg every " << meas_skip << " trajs)" << std::endl;
+  }
+  int fierz_avg_n_noise = 0;
+  if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
+    fierz_avg_n_noise = std::atoi(v);
+  if (fierz_avg_n_noise > 0) {
+    avg_obs.reset(new DtxqcdFierzAveragingObserver(Grid_, RBGrid, mass_run,
+                                                    csw_run, n_therm_run,
+                                                    fierz_avg_n_noise,
+                                                    /*cg_tol=*/1e-8));
+    Obs.push_back(avg_obs.get());
+    std::cout << GridLogMessage
+              << "FIERZ_AVG_N_NOISE=" << fierz_avg_n_noise
+              << "  (in-line averaging from traj " << n_therm_run
+              << " onward)" << std::endl;
+  }
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 
-  auto result = DtxqcdFierzCheck(U, Grid_, RBGrid, mass_run, csw_run,
-                                  n_noise, meas_cg_tol, pass_tol,
-                                  "Test_dtxqcd_freefield_qbarq_light");
+  DtxqcdFierzCheckResult result;
+  if (avg_obs) {
+    result = avg_obs->finalize(pass_tol,
+                                "Test_dtxqcd_freefield_qbarq_light");
+  } else {
+    result = DtxqcdFierzCheck(U, Grid_, RBGrid, mass_run, csw_run,
+                               n_noise, meas_cg_tol, pass_tol,
+                               "Test_dtxqcd_freefield_qbarq_light");
+  }
 
   Grid_finalize();
   return result.pass ? 0 : 1;

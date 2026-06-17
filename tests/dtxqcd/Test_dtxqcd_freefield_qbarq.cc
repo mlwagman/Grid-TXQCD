@@ -131,8 +131,35 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid, MD, Aset, Smear);
   Smear.set_Field(U);
 
-  // No checkpointer — Fierz check runs on in-memory final state.
-  std::vector<HmcObservable<DTXQCDField> *> Obs = {};
+  // Optional observers (off by default):
+  //   SAVE_TRACE=PATH      — write cfgs every MEAS_SKIP trajs
+  //   FIERZ_AVG_N_NOISE=K  — in-line averaging Fierz measurement
+  std::unique_ptr<DTXQCDCheckpointer> ckpt;
+  std::unique_ptr<DtxqcdFierzAveragingObserver> avg_obs;
+  std::vector<HmcObservable<DTXQCDField> *> Obs;
+  if (const char *trace_path = std::getenv("SAVE_TRACE");
+      trace_path && *trace_path) {
+    int meas_skip = 10;
+    if (const char *v = std::getenv("MEAS_SKIP"); v && *v) meas_skip = std::atoi(v);
+    TxqcdTest2pt::mkdir_p(trace_path);
+    CheckpointerParameters CPp;
+    CPp.config_prefix = std::string(trace_path) + "/ckpoint_lat";
+    CPp.rng_prefix    = std::string(trace_path) + "/ckpoint_rng";
+    CPp.saveInterval  = meas_skip;
+    CPp.format        = "IEEE64BIG";
+    ckpt.reset(new DTXQCDCheckpointer(CPp));
+    Obs.push_back(ckpt.get());
+  }
+  int fierz_avg_n_noise = 0;
+  if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
+    fierz_avg_n_noise = std::atoi(v);
+  if (fierz_avg_n_noise > 0) {
+    avg_obs.reset(new DtxqcdFierzAveragingObserver(Grid, RBGrid, mass_run,
+                                                    csw_run, n_therm_run,
+                                                    fierz_avg_n_noise,
+                                                    /*cg_tol=*/1e-8));
+    Obs.push_back(avg_obs.get());
+  }
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 
@@ -144,9 +171,14 @@ int main(int argc, char **argv) {
   RealD meas_cg_tol = 1e-10;
   if (const char *v = std::getenv("MEAS_CG_TOL"); v && *v) meas_cg_tol = std::atof(v);
 
-  auto result = DtxqcdFierzCheck(U, Grid, RBGrid, mass_run, csw_run,
-                                  n_noise, meas_cg_tol, pass_tol,
-                                  "Test_dtxqcd_freefield_qbarq");
+  DtxqcdFierzCheckResult result;
+  if (avg_obs) {
+    result = avg_obs->finalize(pass_tol, "Test_dtxqcd_freefield_qbarq");
+  } else {
+    result = DtxqcdFierzCheck(U, Grid, RBGrid, mass_run, csw_run,
+                               n_noise, meas_cg_tol, pass_tol,
+                               "Test_dtxqcd_freefield_qbarq");
+  }
 
   Grid_finalize();
   return result.pass ? 0 : 1;

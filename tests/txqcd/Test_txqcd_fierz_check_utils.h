@@ -173,6 +173,134 @@ struct TxqcdFierzCheckResult {
   bool pass;
 };
 
+// In-line averaging observer.  Runs a small Fierz check on every HMC
+// trajectory once burn-in is past, accumulating per-traj samples of
+// Σ_TX, Σ_W, and the aux trace VEVs.  Finalize() returns the
+// ensemble-averaged ratio with cfg-fluctuation noise folded in.
+class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
+ public:
+  TxqcdFierzAveragingObserver(GridCartesian &grid,
+                               GridRedBlackCartesian &rbgrid,
+                               RealD mass, RealD csw,
+                               int n_skip, int n_noise_per_traj,
+                               RealD cg_tol = 1e-8)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
+        cg_tol_(cg_tol), n_skip_(n_skip),
+        n_noise_per_traj_(n_noise_per_traj) {}
+
+  void TrajectoryComplete(int traj, TXQCDField &U,
+                          GridSerialRNG &sRNG,
+                          GridParallelRNG &pRNG) override {
+    if (traj < n_skip_) return;
+    RealD V = (RealD)grid_.gSites();
+    auto tr_sigma = TensorRemove(sum(trace(U.sigma)));
+    auto tr_pi    = TensorRemove(sum(trace(U.pi)));
+    auto tr_s     = TensorRemove(sum(trace(U.s)));
+    auto tr_p     = TensorRemove(sum(trace(U.p)));
+    tr_sigma_.push_back(tr_sigma.real() / V);
+    tr_pi_.push_back(tr_pi.real() / V);
+    tr_s_.push_back(tr_s.real() / V);
+    tr_p_.push_back(tr_p.real() / V);
+    n_sigma_sq_.push_back(norm2(U.sigma) / V);
+    n_s_sq_.push_back(norm2(U.s) / V);
+    n_t_sq_.push_back(norm2(U.t) / V);
+
+    GridParallelRNG noisePRNG(&grid_);
+    noisePRNG.SeedFixedIntegers({1000 + 7 * traj, 1100 + 7 * traj,
+                                  1200 + 7 * traj, 1300 + 7 * traj,
+                                  1400 + 7 * traj});
+    RealD sigma_tx = TxqcdFierzOpTrminv(U, grid_, rbgrid_, noisePRNG,
+                                         mass_, csw_, n_noise_per_traj_,
+                                         cg_tol_);
+    noisePRNG.SeedFixedIntegers({2000 + 7 * traj, 2100 + 7 * traj,
+                                  2200 + 7 * traj, 2300 + 7 * traj,
+                                  2400 + 7 * traj});
+    RealD sigma_w = TxqcdFierzPlainWilsonTrminv(U.U, grid_, rbgrid_,
+                                                 noisePRNG, mass_, csw_,
+                                                 n_noise_per_traj_, cg_tol_);
+    sigma_tx_.push_back(sigma_tx);
+    sigma_w_.push_back(sigma_w);
+    ratio_.push_back(sigma_tx / sigma_w);
+    std::cout << GridLogMessage
+              << "[FierzAvg traj " << traj << "] Σ_TX=" << sigma_tx
+              << " Σ_W=" << sigma_w << " ratio=" << (sigma_tx / sigma_w)
+              << "  ⟨Tr s⟩=" << (tr_s.real() / V)
+              << "  ⟨Tr σ⟩=" << (tr_sigma.real() / V) << std::endl;
+  }
+
+  TxqcdFierzCheckResult finalize(RealD pass_tol,
+                                  const std::string &test_name) {
+    int N = (int)sigma_tx_.size();
+    if (N == 0) {
+      TxqcdFierzCheckResult r{0, 0, 0, 0, false};
+      std::cout << GridLogMessage
+                << "[" << test_name << " AVG] No samples — FAIL"
+                << std::endl;
+      return r;
+    }
+    auto mean = [](const std::vector<RealD> &v) {
+      RealD s = 0.0;
+      for (auto x : v) s += x;
+      return s / v.size();
+    };
+    auto stdev = [](const std::vector<RealD> &v, RealD m) {
+      if (v.size() < 2) return 0.0;
+      RealD s = 0.0;
+      for (auto x : v) s += (x - m) * (x - m);
+      return std::sqrt(s / (v.size() - 1));
+    };
+    RealD mean_sigma_tx = mean(sigma_tx_);
+    RealD mean_sigma_w  = mean(sigma_w_);
+    RealD ratio = mean_sigma_tx / mean_sigma_w;
+    RealD ratio_std = stdev(ratio_, mean(ratio_));
+    RealD ratio_se = ratio_std / std::sqrt((RealD)N);
+    RealD dev = std::fabs(ratio - 1.0);
+    bool pass = dev < pass_tol;
+
+    std::cout << GridLogMessage << std::endl
+              << "===== TXQCD Fierz averaging summary (N=" << N
+              << " samples, " << n_noise_per_traj_ << " noise/traj) ====="
+              << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr σ⟩ = " << mean(tr_sigma_) << " ± " << stdev(tr_sigma_, mean(tr_sigma_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr π⟩ = " << mean(tr_pi_)    << " ± " << stdev(tr_pi_, mean(tr_pi_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr s⟩ = " << mean(tr_s_)     << " ± " << stdev(tr_s_, mean(tr_s_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr p⟩ = " << mean(tr_p_)     << " ± " << stdev(tr_p_, mean(tr_p_)) << std::endl;
+    std::cout << GridLogMessage
+              << "‖σ‖²/V = " << mean(n_sigma_sq_) << "   ‖s‖²/V = " << mean(n_s_sq_)
+              << "   ‖t‖²/V = " << mean(n_t_sq_) << std::endl;
+    std::cout << GridLogMessage
+              << "Σ_TX = " << mean_sigma_tx
+              << " ± " << stdev(sigma_tx_, mean_sigma_tx) / std::sqrt((RealD)N)
+              << " (SE)" << std::endl;
+    std::cout << GridLogMessage
+              << "Σ_W  = " << mean_sigma_w
+              << " ± " << stdev(sigma_w_, mean_sigma_w) / std::sqrt((RealD)N)
+              << " (SE)" << std::endl;
+    std::cout << GridLogMessage
+              << "ratio  Σ_TX/Σ_W = " << ratio
+              << " ± " << ratio_se << " (SE)"
+              << "   |dev| = " << dev
+              << "   tol = " << pass_tol << std::endl;
+    std::cout << GridLogMessage
+              << "[" << test_name << " AVG] " << (pass ? "PASS" : "FAIL")
+              << std::endl;
+    return {mean_sigma_tx, mean_sigma_w, ratio, dev, pass};
+  }
+
+ private:
+  GridCartesian &grid_;
+  GridRedBlackCartesian &rbgrid_;
+  RealD mass_, csw_, cg_tol_;
+  int n_skip_, n_noise_per_traj_;
+  std::vector<RealD> sigma_tx_, sigma_w_, ratio_;
+  std::vector<RealD> tr_sigma_, tr_pi_, tr_s_, tr_p_;
+  std::vector<RealD> n_sigma_sq_, n_s_sq_, n_t_sq_;
+};
+
 // Run the full Σ_TX vs Σ_W check on the equilibrated state.  Prints all
 // diagnostics (aux trace VEVs, ‖·‖²/V per channel, Σ_TX, Σ_W, ratio, PASS/FAIL).
 inline TxqcdFierzCheckResult TxqcdFierzCheck(TXQCDField &U,

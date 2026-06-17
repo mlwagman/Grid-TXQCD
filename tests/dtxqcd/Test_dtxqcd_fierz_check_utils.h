@@ -249,6 +249,142 @@ struct DtxqcdFierzCheckResult {
   bool pass;
 };
 
+// In-line averaging observer.  Runs a small Fierz check on every HMC
+// trajectory once burn-in is past, accumulating per-traj samples of
+// Σ_DTXQCD, Σ_W, and the aux trace VEVs.  Finalize() returns the
+// ensemble-averaged ratio with cfg-fluctuation noise folded in.
+class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
+ public:
+  DtxqcdFierzAveragingObserver(GridCartesian &grid,
+                                GridRedBlackCartesian &rbgrid,
+                                RealD mass, RealD csw,
+                                int n_skip, int n_noise_per_traj,
+                                RealD cg_tol = 1e-8)
+      : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
+        cg_tol_(cg_tol), n_skip_(n_skip),
+        n_noise_per_traj_(n_noise_per_traj) {}
+
+  void TrajectoryComplete(int traj, DTXQCDField &U,
+                          GridSerialRNG &sRNG,
+                          GridParallelRNG &pRNG) override {
+    if (traj < n_skip_) return;
+    RealD V = (RealD)grid_.gSites();
+    auto tr_sigma = TensorRemove(sum(trace(U.sigma)));
+    auto tr_pi    = TensorRemove(sum(trace(U.pi)));
+    auto tr_s     = TensorRemove(sum(trace(U.s)));
+    auto tr_p     = TensorRemove(sum(trace(U.p)));
+    auto tr_d     = TensorRemove(sum(trace(U.d)));
+    auto tr_n     = TensorRemove(sum(trace(U.n)));
+    tr_sigma_.push_back(tr_sigma.real() / V);
+    tr_pi_.push_back(tr_pi.real() / V);
+    tr_s_.push_back(tr_s.real() / V);
+    tr_p_.push_back(tr_p.real() / V);
+    tr_d_.push_back(tr_d.real() / V);
+    tr_n_.push_back(tr_n.real() / V);
+    n_sigma_sq_.push_back(norm2(U.sigma) / V);
+    n_s_sq_.push_back(norm2(U.s) / V);
+    n_d_sq_.push_back(norm2(U.d) / V);
+
+    GridParallelRNG noisePRNG(&grid_);
+    noisePRNG.SeedFixedIntegers({1000 + 7 * traj, 1100 + 7 * traj,
+                                  1200 + 7 * traj, 1300 + 7 * traj,
+                                  1400 + 7 * traj});
+    RealD sigma_dtx = DtxqcdFierzOpTrminv(U, grid_, rbgrid_, noisePRNG,
+                                           mass_, csw_, n_noise_per_traj_,
+                                           cg_tol_);
+    noisePRNG.SeedFixedIntegers({2000 + 7 * traj, 2100 + 7 * traj,
+                                  2200 + 7 * traj, 2300 + 7 * traj,
+                                  2400 + 7 * traj});
+    RealD sigma_w = DtxqcdFierzPlainWilsonTrminv(U.U, grid_, rbgrid_,
+                                                  noisePRNG, mass_, csw_,
+                                                  n_noise_per_traj_, cg_tol_);
+    sigma_dtx_.push_back(sigma_dtx);
+    sigma_w_.push_back(sigma_w);
+    ratio_.push_back(sigma_dtx / sigma_w);
+    std::cout << GridLogMessage
+              << "[FierzAvg traj " << traj << "] Σ_DTX=" << sigma_dtx
+              << " Σ_W=" << sigma_w << " ratio=" << (sigma_dtx / sigma_w)
+              << "  ⟨Tr s⟩=" << (tr_s.real() / V)
+              << "  ⟨Tr σ⟩=" << (tr_sigma.real() / V) << std::endl;
+  }
+
+  DtxqcdFierzCheckResult finalize(RealD pass_tol,
+                                   const std::string &test_name) {
+    int N = (int)sigma_dtx_.size();
+    if (N == 0) {
+      DtxqcdFierzCheckResult r{0, 0, 0, 0, false};
+      std::cout << GridLogMessage
+                << "[" << test_name << " AVG] No samples — FAIL"
+                << std::endl;
+      return r;
+    }
+    auto mean = [](const std::vector<RealD> &v) {
+      RealD s = 0.0;
+      for (auto x : v) s += x;
+      return s / v.size();
+    };
+    auto stdev = [](const std::vector<RealD> &v, RealD m) {
+      if (v.size() < 2) return 0.0;
+      RealD s = 0.0;
+      for (auto x : v) s += (x - m) * (x - m);
+      return std::sqrt(s / (v.size() - 1));
+    };
+    RealD mean_sigma_dtx = mean(sigma_dtx_);
+    RealD mean_sigma_w   = mean(sigma_w_);
+    RealD ratio = mean_sigma_dtx / mean_sigma_w;
+    RealD ratio_std = stdev(ratio_, mean(ratio_));
+    RealD ratio_se = ratio_std / std::sqrt((RealD)N);
+    RealD dev = std::fabs(ratio - 1.0);
+    bool pass = dev < pass_tol;
+
+    std::cout << GridLogMessage << std::endl
+              << "===== DTXQCD Fierz averaging summary (N=" << N
+              << " samples, " << n_noise_per_traj_ << " noise/traj) ====="
+              << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr σ⟩ = " << mean(tr_sigma_) << " ± " << stdev(tr_sigma_, mean(tr_sigma_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr π⟩ = " << mean(tr_pi_)    << " ± " << stdev(tr_pi_, mean(tr_pi_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr s⟩ = " << mean(tr_s_)     << " ± " << stdev(tr_s_, mean(tr_s_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr p⟩ = " << mean(tr_p_)     << " ± " << stdev(tr_p_, mean(tr_p_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr d⟩ = " << mean(tr_d_)     << " ± " << stdev(tr_d_, mean(tr_d_)) << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr n⟩ = " << mean(tr_n_)     << " ± " << stdev(tr_n_, mean(tr_n_)) << std::endl;
+    std::cout << GridLogMessage
+              << "‖σ‖²/V = " << mean(n_sigma_sq_) << "   ‖s‖²/V = " << mean(n_s_sq_)
+              << "   ‖d‖²/V = " << mean(n_d_sq_) << std::endl;
+    std::cout << GridLogMessage
+              << "Σ_DTXQCD = " << mean_sigma_dtx
+              << " ± " << stdev(sigma_dtx_, mean_sigma_dtx) / std::sqrt((RealD)N)
+              << " (SE)" << std::endl;
+    std::cout << GridLogMessage
+              << "Σ_W      = " << mean_sigma_w
+              << " ± " << stdev(sigma_w_, mean_sigma_w) / std::sqrt((RealD)N)
+              << " (SE)" << std::endl;
+    std::cout << GridLogMessage
+              << "ratio  Σ_DTXQCD/Σ_W = " << ratio
+              << " ± " << ratio_se << " (SE)"
+              << "   |dev| = " << dev
+              << "   tol = " << pass_tol << std::endl;
+    std::cout << GridLogMessage
+              << "[" << test_name << " AVG] " << (pass ? "PASS" : "FAIL")
+              << std::endl;
+    return {mean_sigma_dtx, mean_sigma_w, ratio, dev, pass};
+  }
+
+ private:
+  GridCartesian &grid_;
+  GridRedBlackCartesian &rbgrid_;
+  RealD mass_, csw_, cg_tol_;
+  int n_skip_, n_noise_per_traj_;
+  std::vector<RealD> sigma_dtx_, sigma_w_, ratio_;
+  std::vector<RealD> tr_sigma_, tr_pi_, tr_s_, tr_p_, tr_d_, tr_n_;
+  std::vector<RealD> n_sigma_sq_, n_s_sq_, n_d_sq_;
+};
+
 inline DtxqcdFierzCheckResult DtxqcdFierzCheck(DTXQCDField &U,
                                                  GridCartesian &Grid_,
                                                  GridRedBlackCartesian &RBGrid,

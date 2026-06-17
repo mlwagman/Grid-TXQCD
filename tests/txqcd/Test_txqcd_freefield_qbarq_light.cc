@@ -17,7 +17,9 @@
 //
 // Env knobs (overrides):
 //   MASS, LAMBDA, MDSTEPS, TRAJL, N_THERM, N_PROD
-//   RAT_LO, RAT_HI, RAT_DEGREE, CG_TOL, N_NOISE
+//   RAT_LO, RAT_HI, RAT_DEGREE, MEAS_CG_TOL, MD_CG_TOL, N_NOISE
+//   FIERZ_AVG_N_NOISE  — install averaging observer (default off)
+//   SAVE_TRACE=PATH    — write cfgs every MEAS_SKIP trajs (default off)
 //   CSW       — clover coefficient (default 0; nonzero switches the
 //                HMC to TXQCDWilsonCloverRationalEOAction and the Σ_W
 //                reference to WilsonCloverFermion at the same csw)
@@ -64,8 +66,11 @@ int main(int argc, char **argv) {
 
   int n_noise = 64;
   if (const char *v = std::getenv("N_NOISE"); v && *v) n_noise = std::atoi(v);
+  // Measurement-side CG tolerance for the Σ_TX, Σ_W trace estimators.
+  // Accepts MEAS_CG_TOL (standardized name) or legacy CG_TOL.
   RealD cg_tol_meas = 1e-10;
-  if (const char *v = std::getenv("CG_TOL"); v && *v) cg_tol_meas = std::atof(v);
+  if (const char *v = std::getenv("MEAS_CG_TOL"); v && *v) cg_tol_meas = std::atof(v);
+  else if (const char *v = std::getenv("CG_TOL"); v && *v) cg_tol_meas = std::atof(v);
 
   // RHMC bracket — default sized for m=0.1.
   RealD rat_lo = 0.005, rat_hi = 80.0;
@@ -96,8 +101,13 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
+  // Rational params: outer tolerance 1e-10 for refresh/S, MD-solve tol
+  // 1e-6 default (force is symplectic-corrected, so a looser tol is fine).
+  // MD_CG_TOL knob lets a probe trade accuracy for wall time.
+  RealD md_cg_tol = 1e-6;
+  if (const char *v = std::getenv("MD_CG_TOL"); v && *v) md_cg_tol = std::atof(v);
   OneFlavourRationalParams rat_params(rat_lo, rat_hi, cg_max, 1e-10,
-                                       rat_deg, 64, 100, 1e-6);
+                                       rat_deg, 64, 100, md_cg_tol);
 
   // PF selection by csw: at csw=0 keep the lighter non-EO Wilson PF
   // (proven fast smoke).  At csw!=0 switch to the clover-aware EO action
@@ -154,15 +164,56 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid_, MD, Aset, Smear);
   Smear.set_Field(U);
 
-  // No checkpointer — the Fierz check runs on the in-memory final state.
-  std::vector<HmcObservable<TXQCDField> *> Obs = {};
+  // Observers:
+  //   SAVE_TRACE=PATH      — write cfgs every MEAS_SKIP trajs (off by default)
+  //   FIERZ_AVG_N_NOISE=K  — in-line Fierz check with K noise/traj over the
+  //                          prod window, averages folded into final ratio
+  //                          (off by default; final check uses single-cfg path)
+  std::unique_ptr<TXQCDCheckpointer> ckpt;
+  std::unique_ptr<TxqcdFierzAveragingObserver> avg_obs;
+  std::vector<HmcObservable<TXQCDField> *> Obs;
+  if (const char *trace_path = std::getenv("SAVE_TRACE");
+      trace_path && *trace_path) {
+    int meas_skip = 10;
+    if (const char *v = std::getenv("MEAS_SKIP"); v && *v) meas_skip = std::atoi(v);
+    mkdir_p(trace_path);
+    CheckpointerParameters CPp;
+    CPp.config_prefix = std::string(trace_path) + "/ckpoint_lat";
+    CPp.rng_prefix    = std::string(trace_path) + "/ckpoint_rng";
+    CPp.saveInterval  = meas_skip;
+    CPp.format        = "IEEE64BIG";
+    ckpt.reset(new TXQCDCheckpointer(CPp));
+    Obs.push_back(ckpt.get());
+    std::cout << GridLogMessage << "SAVE_TRACE=" << trace_path
+              << "  (cfg every " << meas_skip << " trajs)" << std::endl;
+  }
+  int fierz_avg_n_noise = 0;
+  if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
+    fierz_avg_n_noise = std::atoi(v);
+  if (fierz_avg_n_noise > 0) {
+    avg_obs.reset(new TxqcdFierzAveragingObserver(Grid_, RBGrid, mass_run,
+                                                   csw_run, n_therm_run,
+                                                   fierz_avg_n_noise,
+                                                   /*cg_tol=*/1e-8));
+    Obs.push_back(avg_obs.get());
+    std::cout << GridLogMessage
+              << "FIERZ_AVG_N_NOISE=" << fierz_avg_n_noise
+              << "  (in-line averaging from traj " << n_therm_run
+              << " onward)" << std::endl;
+  }
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 
-  // ===== Post-HMC: Σ_TX vs Σ_W on the equilibrated state =====
-  auto result = TxqcdFierzCheck(U, Grid_, RBGrid, mass_run, csw_run,
-                                 n_noise, cg_tol_meas, pass_tol,
-                                 "Test_txqcd_freefield_qbarq_light");
+  // ===== Post-HMC Fierz check =====
+  TxqcdFierzCheckResult result;
+  if (avg_obs) {
+    result = avg_obs->finalize(pass_tol,
+                                "Test_txqcd_freefield_qbarq_light");
+  } else {
+    result = TxqcdFierzCheck(U, Grid_, RBGrid, mass_run, csw_run,
+                              n_noise, cg_tol_meas, pass_tol,
+                              "Test_txqcd_freefield_qbarq_light");
+  }
 
   Grid_finalize();
   return result.pass ? 0 : 1;
