@@ -38,6 +38,67 @@ inline void DtxqcdHermitizeAndTracelessCFInPlace(LatticeDtxqcdSigma &X) {
   X = 0.5 * (X + adj(X));
 }
 
+// Real-symmetric projection: X → Symm(Re(X)).  Used (under env knob
+// DTXQCD_DN_REAL_SYMMETRIC=1) on d, n to restore formal Pfaffian
+// antisymmetry of (K·M48) — Hermitian d, n break it.  σ, π are
+// independently kept Hermitian by the surrounding code; the mixed
+// projection (real-symm d/n + Hermitian σ/π) is the v2 algebraic
+// formulation per the dtxqcd_v2 derivation.
+inline void DtxqcdRealSymmetricCFInPlace(LatticeDtxqcdSigma &X) {
+  LatticeDtxqcdSigma tmp(X.Grid());
+  tmp = X + transpose(X);                   // 2*Symm(M)
+  tmp = 0.5 * (tmp + conjugate(tmp));       // 2*Re(Symm(M))
+  X   = 0.5 * tmp;                          // Re(Symm(M)) = Symm(Re(M))
+}
+
+// Complex-symmetric projection: X → Symm(X) = (X + X^T)/2.  Transpose
+// only — leaves Re/Im parts both with transpose-symmetric structure.
+// Used (under env knob DTXQCD_DN_COMPLEX_SYMMETRIC=1) on d, n in the
+// "complex d, d* independent" formulation where M48 LL = conj(M48 UR).
+// 42 real DOFs/site for 6×6 vs Hermitian 36 vs real-symm 21.
+inline void DtxqcdComplexSymmetricCFInPlace(LatticeDtxqcdSigma &X) {
+  X = 0.5 * (X + transpose(X));
+}
+
+// Cached env knob: DTXQCD_DN_COMPLEX_SYMMETRIC=1 enables the formal
+// "complex d, d* independent" variant.  When ON:
+//   - σ, π projected real-symmetric
+//   - d, n projected complex-symmetric (transpose-symm, Im allowed)
+//   - M48 LL block uses conj(UR) — handled in DtxqcdAssembleDoubled48
+static inline bool DtxqcdDnComplexSymmetric() {
+  static const bool b = []() {
+    if (const char *v = std::getenv("DTXQCD_DN_COMPLEX_SYMMETRIC"); v && *v) {
+      bool on = std::atoi(v) != 0;
+      std::cout << GridLogMessage
+                << "[DTXQCD] DN_COMPLEX_SYMMETRIC = " << (on ? "ON" : "OFF")
+                << "  (complex-symm d/n + real-symm σ/π + LL=conj(UR) in M48)"
+                << std::endl;
+      return on;
+    }
+    return false;
+  }();
+  return b;
+}
+
+// Cached env knob: DTXQCD_DN_REAL_SYMMETRIC=1 projects d, n to be
+// real-symmetric instead of merely Hermitian.  Restores formal Pfaffian
+// antisymmetry per the v2 algebra.  Default OFF (d, n stay Hermitian per
+// the empirically-verified-at-factor=1 setup).
+static inline bool DtxqcdDnRealSymmetric() {
+  static const bool b = []() {
+    if (const char *v = std::getenv("DTXQCD_DN_REAL_SYMMETRIC"); v && *v) {
+      bool on = std::atoi(v) != 0;
+      std::cout << GridLogMessage
+                << "[DTXQCD] DN_REAL_SYMMETRIC = " << (on ? "ON" : "OFF")
+                << "  (project d, n to real-symmetric; σ, π stay Hermitian)"
+                << std::endl;
+      return on;
+    }
+    return false;
+  }();
+  return b;
+}
+
 // Color-traceless projection: for each (a,b) flavor pair, subtract the
 // trace over the inner Nc×Nc color matrix.  After this, sum_i X_ab^{ii} = 0
 // for every (a,b) pair.  Used (under env knob DTXQCD_DN_COLOR_TRACELESS=1)
@@ -143,6 +204,10 @@ class DTXQCDCompositeImpl {
       DtxqcdMakeColorTracelessCFInPlace(P.d);
       DtxqcdMakeColorTracelessCFInPlace(P.n);
     }
+    if (DtxqcdDnRealSymmetric()) {
+      DtxqcdRealSymmetricCFInPlace(P.d);
+      DtxqcdRealSymmetricCFInPlace(P.n);
+    }
   }
 
   static inline Field projectForce(Field &Fforce) {
@@ -157,6 +222,10 @@ class DTXQCDCompositeImpl {
     if (DtxqcdDnColorTraceless()) {
       DtxqcdMakeColorTracelessCFInPlace(out.d);
       DtxqcdMakeColorTracelessCFInPlace(out.n);
+    }
+    if (DtxqcdDnRealSymmetric()) {
+      DtxqcdRealSymmetricCFInPlace(out.d);
+      DtxqcdRealSymmetricCFInPlace(out.n);
     }
     return out;
   }
@@ -197,6 +266,10 @@ class DTXQCDCompositeImpl {
       DtxqcdMakeColorTracelessCFInPlace(U.d);
       DtxqcdMakeColorTracelessCFInPlace(U.n);
     }
+    if (DtxqcdDnRealSymmetric()) {
+      DtxqcdRealSymmetricCFInPlace(U.d);
+      DtxqcdRealSymmetricCFInPlace(U.n);
+    }
   }
 
   static inline void HotConfiguration(GridParallelRNG &pRNG, Field &U) {
@@ -210,6 +283,10 @@ class DTXQCDCompositeImpl {
     if (DtxqcdDnColorTraceless()) {
       DtxqcdMakeColorTracelessCFInPlace(U.d);
       DtxqcdMakeColorTracelessCFInPlace(U.n);
+    }
+    if (DtxqcdDnRealSymmetric()) {
+      DtxqcdRealSymmetricCFInPlace(U.d);
+      DtxqcdRealSymmetricCFInPlace(U.n);
     }
   }
 
@@ -264,6 +341,10 @@ class DTXQCDCompositeImpl {
     if (DtxqcdDnColorTraceless()) {
       DtxqcdMakeColorTracelessCFInPlace(U.d);
       DtxqcdMakeColorTracelessCFInPlace(U.n);
+    }
+    if (DtxqcdDnRealSymmetric()) {
+      DtxqcdRealSymmetricCFInPlace(U.d);
+      DtxqcdRealSymmetricCFInPlace(U.n);
     }
 
     if (Sigma != 0.0) {

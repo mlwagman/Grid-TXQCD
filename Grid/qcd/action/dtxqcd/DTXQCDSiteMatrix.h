@@ -344,7 +344,12 @@ inline void DtxqcdAssembleDoubled48(const Eigen::MatrixXcd& M_upper,
   const int N = kDtxqcdSiteDim24;
   M48.block(0, 0, N, N) = M_upper;
   M48.block(0, N, N, N) = M_offdiag;
-  M48.block(N, 0, N, N) = M_offdiag;
+  // Default: M_LL = M_UR (Hermitian d, n implicit symmetry).
+  // Under DTXQCD_DN_COMPLEX_SYMMETRIC: M_LL = conj(M_UR), enforcing the
+  // "d in UR, d* in LL" form per the algebraic complex-d/n derivation.
+  M48.block(N, 0, N, N) = DtxqcdDnComplexSymmetric()
+                              ? M_offdiag.conjugate()
+                              : M_offdiag;
   M48.block(N, N, N, N) = M_lower;
 }
 
