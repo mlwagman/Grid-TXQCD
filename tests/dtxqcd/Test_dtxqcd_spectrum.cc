@@ -98,14 +98,15 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage
             << "||sigma||^2/V=" << norm2(U.sigma) / Grid.gSites()
             << "  ||pi||^2/V=" << norm2(U.pi) / Grid.gSites()
-            << "  ||t||^2/V=" << norm2(U.t) / Grid.gSites()
             << "  ||d||^2/V=" << norm2(U.d) / Grid.gSites()
             << "  ||n||^2/V=" << norm2(U.n) / Grid.gSites()
+            << "  ||s||^2/V=" << norm2(U.s) / Grid.gSites()
+            << "  ||p||^2/V=" << norm2(U.p) / Grid.gSites()
             << "  (expected ~3/lambda^2=" << 3.0 / (lambda * lambda) << ")"
             << std::endl;
 
   DTXQCDWilsonCloverFermionEO Dw(U.U, Grid, RBGrid, mass, csw,
-                                  U.sigma, U.pi, U.t, U.d, U.n);
+                                  U.sigma, U.pi, U.d, U.n, U.s, U.p);
   DTXQCDMpcOp Mop(Dw);
 
   // ---- lambda_max via power iteration ----

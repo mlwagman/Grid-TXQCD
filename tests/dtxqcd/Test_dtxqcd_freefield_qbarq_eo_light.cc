@@ -1,9 +1,11 @@
-// Test_dtxqcd_freefield_qbarq_light:
+// Test_dtxqcd_freefield_qbarq_eo_light:
 //
-// Light-mass DTXQCD free-field Fierz unit test.  Mirror of
-// Test_txqcd_freefield_qbarq_light — runs DTXQCD HMC at frozen U with
-// APBC time, measures Σ_DTXQCD / Σ_W on the equilibrated state, and
-// returns PASS/FAIL.
+// Light-mass DTXQCD free-field Fierz test using the EO action stack
+// (production-matching): RationalEO on M_pc + LogDetCloverEO on M_ee +
+// AuxGaussian.  Sibling: Test_dtxqcd_freefield_qbarq_light uses
+// RationalFullAction alone (no LogDet); both must agree on Σ_DTX/Σ_W and
+// ⟨s⟩ saddle if the Pfaffian factor accounting is consistent across
+// stacks.
 //
 // Default corner: m=0.1 (κ ≈ 0.122) and λ=10.  This is the
 // BC-sensitive regime where the silent PBC default in DTXQCDMeooeDoubled
@@ -22,7 +24,8 @@
 #include "Test_dtxqcd_fierz_check_utils.h"
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
-#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
@@ -40,7 +43,7 @@ int main(int argc, char **argv) {
   int n_therm_run  = 30;
   int n_prod_run   = 40;
   int meas_skip_run = 4;
-  std::string cfg_dir = "free_dtxqcd_light";
+  std::string cfg_dir = "free_dtxqcd_eo_light";
 
   if (const char *v = std::getenv("LAMBDA");    v && *v) lambda_run = std::atof(v);
   if (const char *v = std::getenv("MASS");      v && *v) mass_run   = std::atof(v);
@@ -102,22 +105,24 @@ int main(int argc, char **argv) {
                                        rat_deg, 64, /*BCFreq=*/100,
                                        /*mdtol=*/md_cg_tol);
 
-  // Non-EO action stack: Full-PF on M48 alone covers |det M48|^1 weight
-  // (Nf=2 doubled = 2 Pfaffians = 1 det).  DO NOT add LogDetCloverEO here:
-  // that would double-count |det M_ee|.  Use Test_dtxqcd_freefield_qbarq_eo
-  // for the EO action stack (RationalEO + LogDet) that mirrors production.
-  DTXQCDWilsonCloverRationalFullAction
-      PF_full(Grid_, RBGrid, mass_run, rat_params, csw_run);
+  // EO action stack mirroring production: RationalEO covers |det M_pc|^1
+  // (Nf=2 doubled = 2 Pfaffians), LogDet covers |det M_ee|; together =
+  // |det M48|^1.  Non-EO sibling: Test_dtxqcd_freefield_qbarq_light uses
+  // RationalFullAction on M48 alone.
+  DTXQCDWilsonCloverRationalEOAction
+      PF_eo(Grid_, RBGrid, mass_run, rat_params, csw_run);
+  DTXQCDLogDetCloverEOAction LogDet(Grid_, RBGrid, mass_run, csw_run);
 
   setenv("DTXQCD_FREEZE_GAUGE", "1", 1);
-  setenv("USE_FULL_PF", "1", 1);
+  setenv("USE_FULL_PF", "0", 1);
   std::cout << GridLogMessage
-            << "DTXQCD_FREEZE_GAUGE=1, USE_FULL_PF=1 (non-EO stack: PF_full only)"
+            << "DTXQCD_FREEZE_GAUGE=1, USE_FULL_PF=0 (EO stack: RationalEO + LogDet)"
             << std::endl;
 
   typedef Representations<EmptyRep<DTXQCDField>> Reps;
   ActionLevel<DTXQCDField, Reps> L1(1);
-  L1.push_back(&PF_full);
+  L1.push_back(&PF_eo);
+  L1.push_back(&LogDet);
   L1.push_back(&AuxAction);
   ActionSet<DTXQCDField, Reps> Aset;
   Aset.push_back(L1);
@@ -217,11 +222,11 @@ int main(int argc, char **argv) {
   DtxqcdFierzCheckResult result;
   if (avg_obs) {
     result = avg_obs->finalize(pass_tol,
-                                "Test_dtxqcd_freefield_qbarq_light");
+                                "Test_dtxqcd_freefield_qbarq_eo_light");
   } else {
     result = DtxqcdFierzCheck(U, Grid_, RBGrid, mass_run, csw_run,
                                n_noise, meas_cg_tol, pass_tol,
-                               "Test_dtxqcd_freefield_qbarq_light");
+                               "Test_dtxqcd_freefield_qbarq_eo_light");
   }
 
   Grid_finalize();

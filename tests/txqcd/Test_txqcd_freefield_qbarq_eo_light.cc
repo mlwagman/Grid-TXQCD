@@ -31,7 +31,10 @@
 
 #include "Test_txqcd_2pt_clover_optlam_utils.h"
 #include "Test_txqcd_fierz_check_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
@@ -110,24 +113,26 @@ int main(int argc, char **argv) {
   OneFlavourRationalParams rat_params(rat_lo, rat_hi, cg_max, 1e-10,
                                        rat_deg, 64, 100, md_cg_tol);
 
-  // Non-EO action stack: full-volume RHMC pseudofermion alone covers the
-  // |det M_TX|^{Nf/2} weight; no LogDet needed.  csw≠0 is not supported
-  // here — use the EO sibling (Test_txqcd_freefield_qbarq_eo_light) that
-  // pairs RationalEO with LogDet.
-  if (csw_run != 0.0) {
-    std::cout << GridLogMessage
-              << "[Test_txqcd_freefield_qbarq_light] non-EO stack requires csw=0;"
-                 " got csw=" << csw_run << " — use the _eo sibling instead."
-              << std::endl;
-    Grid_finalize();
-    return 1;
-  }
+  // EO action stack mirroring production: RationalEO on M_pc covers
+  // |det M_pc|, LogDet on M_ee covers |det M_ee|; together = |det M_TX|.
   AuxiliaryFieldGaussianAction AuxAction(lambda_run);
-  TXQCDWilsonRationalPseudoFermionAction PF_wilson(Grid_, RBGrid,
-                                                    mass_run, rat_params);
-  Action<TXQCDField> *PF = (Action<TXQCDField> *)&PF_wilson;
+  TXQCDWilsonRationalEOAction       PF_wilson_eo(Grid_, RBGrid,
+                                                  mass_run, rat_params);
+  TXQCDWilsonCloverRationalEOAction PF_clover_eo(Grid_, RBGrid,
+                                                  mass_run, rat_params,
+                                                  csw_run);
+  TXQCDLogDetEOAction               LogDet_wilson(Grid_, RBGrid, mass_run);
+  TXQCDLogDetCloverEOAction         LogDet_clover(Grid_, RBGrid,
+                                                  mass_run, csw_run);
+  Action<TXQCDField> *PF = (csw_run == 0.0)
+                            ? (Action<TXQCDField> *)&PF_wilson_eo
+                            : (Action<TXQCDField> *)&PF_clover_eo;
+  Action<TXQCDField> *LogDet = (csw_run == 0.0)
+                            ? (Action<TXQCDField> *)&LogDet_wilson
+                            : (Action<TXQCDField> *)&LogDet_clover;
   std::cout << GridLogMessage << "PF: " << PF->action_name()
-            << " (non-EO stack: PF only)" << std::endl;
+            << "  LogDet: " << LogDet->action_name()
+            << " (EO stack: RationalEO + LogDet)" << std::endl;
 
   setenv("TXQCD_FREEZE_GAUGE", "1", 1);
   std::cout << GridLogMessage
@@ -136,6 +141,7 @@ int main(int argc, char **argv) {
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
   L1.push_back(PF);
+  L1.push_back(LogDet);
   L1.push_back(&AuxAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
@@ -215,11 +221,11 @@ int main(int argc, char **argv) {
   TxqcdFierzCheckResult result;
   if (avg_obs) {
     result = avg_obs->finalize(pass_tol,
-                                "Test_txqcd_freefield_qbarq_light");
+                                "Test_txqcd_freefield_qbarq_eo_light");
   } else {
     result = TxqcdFierzCheck(U, Grid_, RBGrid, mass_run, csw_run,
                               n_noise, cg_tol_meas, pass_tol,
-                              "Test_txqcd_freefield_qbarq_light");
+                              "Test_txqcd_freefield_qbarq_eo_light");
   }
 
   Grid_finalize();

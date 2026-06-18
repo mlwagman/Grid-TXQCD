@@ -1,107 +1,84 @@
-tests-local: Test_dtxqcd_2pt_gencfgs Test_dtxqcd_aux_gaussian Test_dtxqcd_aux_io Test_dtxqcd_clover_herm Test_dtxqcd_delta_diag_lower Test_dtxqcd_delta_herm Test_dtxqcd_freefield_qbarq Test_dtxqcd_freefield_qbarq_light Test_dtxqcd_g5M_evals Test_dtxqcd_gamma5_herm_full Test_dtxqcd_KM48_minmax Test_dtxqcd_logdet_aux_force Test_dtxqcd_measure_sigma_full Test_dtxqcd_measure_sigma Test_dtxqcd_meooe_free_field Test_dtxqcd_mooee_clover_consistency Test_dtxqcd_mooee_consistency Test_dtxqcd_mooee_herm Test_dtxqcd_mooeeinv_n Test_dtxqcd_mpc_spectrum Test_dtxqcd_parity_mirror Test_dtxqcd_pf_realness Test_dtxqcd_pfaff_logdet_blockdiag Test_dtxqcd_pfaffian_antisymmetry Test_dtxqcd_psd_check Test_dtxqcd_rational_aux_force Test_dtxqcd_rational_full_force Test_dtxqcd_site_lu Test_dtxqcd_spectrum_minmax Test_dtxqcd_spectrum Test_dtxqcd_trminv_zeroaux Test_dtxqcd_trminv_block_compare Test_dtxqcd_wilson_clover_fermion_eo Test_dtxqcd_zero_aux_doubled_qcd 
-EXTRA_PROGRAMS = Test_dtxqcd_2pt_gencfgs Test_dtxqcd_aux_gaussian Test_dtxqcd_aux_io Test_dtxqcd_clover_herm Test_dtxqcd_delta_diag_lower Test_dtxqcd_delta_herm Test_dtxqcd_freefield_qbarq Test_dtxqcd_freefield_qbarq_light Test_dtxqcd_g5M_evals Test_dtxqcd_gamma5_herm_full Test_dtxqcd_KM48_minmax Test_dtxqcd_logdet_aux_force Test_dtxqcd_measure_sigma_full Test_dtxqcd_measure_sigma Test_dtxqcd_meooe_free_field Test_dtxqcd_mooee_clover_consistency Test_dtxqcd_mooee_consistency Test_dtxqcd_mooee_herm Test_dtxqcd_mooeeinv_n Test_dtxqcd_mpc_spectrum Test_dtxqcd_parity_mirror Test_dtxqcd_pf_realness Test_dtxqcd_pfaff_logdet_blockdiag Test_dtxqcd_pfaffian_antisymmetry Test_dtxqcd_psd_check Test_dtxqcd_rational_aux_force Test_dtxqcd_rational_full_force Test_dtxqcd_site_lu Test_dtxqcd_spectrum_minmax Test_dtxqcd_spectrum Test_dtxqcd_trminv_zeroaux Test_dtxqcd_trminv_block_compare Test_dtxqcd_wilson_clover_fermion_eo Test_dtxqcd_zero_aux_doubled_qcd
+## DTXQCD test suite registration.
+##
+## Per-target _LDADD is dropped: global `LDADD` below covers all.
+## _SOURCES is still per-target because automake defaults to .c, not .cc.
 
-Test_dtxqcd_2pt_gencfgs_SOURCES=Test_dtxqcd_2pt_gencfgs.cc
-Test_dtxqcd_2pt_gencfgs_LDADD=$(top_builddir)/Grid/libGrid.a
+TESTS_LIST = \
+  Test_dtxqcd_2pt_gencfgs \
+  Test_dtxqcd_aux_gaussian \
+  Test_dtxqcd_aux_io \
+  Test_dtxqcd_clover_herm \
+  Test_dtxqcd_delta_diag_lower \
+  Test_dtxqcd_delta_herm \
+  Test_dtxqcd_freefield_qbarq \
+  Test_dtxqcd_freefield_qbarq_eo \
+  Test_dtxqcd_freefield_qbarq_eo_light \
+  Test_dtxqcd_freefield_qbarq_light \
+  Test_dtxqcd_g5M_evals \
+  Test_dtxqcd_gamma5_herm_full \
+  Test_dtxqcd_KM48_minmax \
+  Test_dtxqcd_logdet_aux_force \
+  Test_dtxqcd_measure_sigma \
+  Test_dtxqcd_measure_sigma_full \
+  Test_dtxqcd_meooe_free_field \
+  Test_dtxqcd_mooee_clover_consistency \
+  Test_dtxqcd_mooee_consistency \
+  Test_dtxqcd_mooee_herm \
+  Test_dtxqcd_mooeeinv_n \
+  Test_dtxqcd_mpc_spectrum \
+  Test_dtxqcd_parity_mirror \
+  Test_dtxqcd_pf_realness \
+  Test_dtxqcd_pfaff_logdet_blockdiag \
+  Test_dtxqcd_pfaffian_antisymmetry \
+  Test_dtxqcd_psd_check \
+  Test_dtxqcd_rational_aux_force \
+  Test_dtxqcd_rational_full_force \
+  Test_dtxqcd_site_lu \
+  Test_dtxqcd_spectrum \
+  Test_dtxqcd_spectrum_minmax \
+  Test_dtxqcd_trminv_block_compare \
+  Test_dtxqcd_trminv_zeroaux \
+  Test_dtxqcd_wilson_clover_fermion_eo \
+  Test_dtxqcd_zero_aux_doubled_qcd
 
-Test_dtxqcd_aux_gaussian_SOURCES=Test_dtxqcd_aux_gaussian.cc
-Test_dtxqcd_aux_gaussian_LDADD=$(top_builddir)/Grid/libGrid.a
+tests-local: $(TESTS_LIST)
+EXTRA_PROGRAMS = $(TESTS_LIST)
+LDADD = $(top_builddir)/Grid/libGrid.a
+CLEANFILES = $(TESTS_LIST)
 
-Test_dtxqcd_aux_io_SOURCES=Test_dtxqcd_aux_io.cc
-Test_dtxqcd_aux_io_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_clover_herm_SOURCES=Test_dtxqcd_clover_herm.cc
-Test_dtxqcd_clover_herm_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_delta_diag_lower_SOURCES=Test_dtxqcd_delta_diag_lower.cc
-Test_dtxqcd_delta_diag_lower_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_delta_herm_SOURCES=Test_dtxqcd_delta_herm.cc
-Test_dtxqcd_delta_herm_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_freefield_qbarq_SOURCES=Test_dtxqcd_freefield_qbarq.cc
-Test_dtxqcd_freefield_qbarq_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_freefield_qbarq_light_SOURCES=Test_dtxqcd_freefield_qbarq_light.cc
-Test_dtxqcd_freefield_qbarq_light_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_g5M_evals_SOURCES=Test_dtxqcd_g5M_evals.cc
-Test_dtxqcd_g5M_evals_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_gamma5_herm_full_SOURCES=Test_dtxqcd_gamma5_herm_full.cc
-Test_dtxqcd_gamma5_herm_full_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_KM48_minmax_SOURCES=Test_dtxqcd_KM48_minmax.cc
-Test_dtxqcd_KM48_minmax_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_logdet_aux_force_SOURCES=Test_dtxqcd_logdet_aux_force.cc
-Test_dtxqcd_logdet_aux_force_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_measure_sigma_full_SOURCES=Test_dtxqcd_measure_sigma_full.cc
-Test_dtxqcd_measure_sigma_full_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_measure_sigma_SOURCES=Test_dtxqcd_measure_sigma.cc
-Test_dtxqcd_measure_sigma_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_meooe_free_field_SOURCES=Test_dtxqcd_meooe_free_field.cc
-Test_dtxqcd_meooe_free_field_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_mooee_clover_consistency_SOURCES=Test_dtxqcd_mooee_clover_consistency.cc
-Test_dtxqcd_mooee_clover_consistency_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_mooee_consistency_SOURCES=Test_dtxqcd_mooee_consistency.cc
-Test_dtxqcd_mooee_consistency_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_mooee_herm_SOURCES=Test_dtxqcd_mooee_herm.cc
-Test_dtxqcd_mooee_herm_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_mooeeinv_n_SOURCES=Test_dtxqcd_mooeeinv_n.cc
-Test_dtxqcd_mooeeinv_n_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_mpc_spectrum_SOURCES=Test_dtxqcd_mpc_spectrum.cc
-Test_dtxqcd_mpc_spectrum_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_parity_mirror_SOURCES=Test_dtxqcd_parity_mirror.cc
-Test_dtxqcd_parity_mirror_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_pf_realness_SOURCES=Test_dtxqcd_pf_realness.cc
-Test_dtxqcd_pf_realness_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_pfaff_logdet_blockdiag_SOURCES=Test_dtxqcd_pfaff_logdet_blockdiag.cc
-Test_dtxqcd_pfaff_logdet_blockdiag_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_pfaffian_antisymmetry_SOURCES=Test_dtxqcd_pfaffian_antisymmetry.cc
-Test_dtxqcd_pfaffian_antisymmetry_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_psd_check_SOURCES=Test_dtxqcd_psd_check.cc
-Test_dtxqcd_psd_check_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_rational_aux_force_SOURCES=Test_dtxqcd_rational_aux_force.cc
-Test_dtxqcd_rational_aux_force_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_rational_full_force_SOURCES=Test_dtxqcd_rational_full_force.cc
-Test_dtxqcd_rational_full_force_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_site_lu_SOURCES=Test_dtxqcd_site_lu.cc
-Test_dtxqcd_site_lu_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_spectrum_minmax_SOURCES=Test_dtxqcd_spectrum_minmax.cc
-Test_dtxqcd_spectrum_minmax_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_spectrum_SOURCES=Test_dtxqcd_spectrum.cc
-Test_dtxqcd_spectrum_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_trminv_zeroaux_SOURCES=Test_dtxqcd_trminv_zeroaux.cc
-Test_dtxqcd_trminv_zeroaux_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_trminv_block_compare_SOURCES=Test_dtxqcd_trminv_block_compare.cc
-Test_dtxqcd_trminv_block_compare_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_wilson_clover_fermion_eo_SOURCES=Test_dtxqcd_wilson_clover_fermion_eo.cc
-Test_dtxqcd_wilson_clover_fermion_eo_LDADD=$(top_builddir)/Grid/libGrid.a
-
-Test_dtxqcd_zero_aux_doubled_qcd_SOURCES=Test_dtxqcd_zero_aux_doubled_qcd.cc
-Test_dtxqcd_zero_aux_doubled_qcd_LDADD=$(top_builddir)/Grid/libGrid.a
-
-CLEANFILES = Test_dtxqcd_2pt_gencfgs Test_dtxqcd_aux_gaussian Test_dtxqcd_aux_io Test_dtxqcd_clover_herm Test_dtxqcd_delta_diag_lower Test_dtxqcd_delta_herm Test_dtxqcd_freefield_qbarq Test_dtxqcd_freefield_qbarq_light Test_dtxqcd_g5M_evals Test_dtxqcd_gamma5_herm_full Test_dtxqcd_KM48_minmax Test_dtxqcd_logdet_aux_force Test_dtxqcd_measure_sigma_full Test_dtxqcd_measure_sigma Test_dtxqcd_meooe_free_field Test_dtxqcd_mooee_clover_consistency Test_dtxqcd_mooee_consistency Test_dtxqcd_mooee_herm Test_dtxqcd_mooeeinv_n Test_dtxqcd_mpc_spectrum Test_dtxqcd_parity_mirror Test_dtxqcd_pf_realness Test_dtxqcd_pfaff_logdet_blockdiag Test_dtxqcd_pfaffian_antisymmetry Test_dtxqcd_psd_check Test_dtxqcd_rational_aux_force Test_dtxqcd_rational_full_force Test_dtxqcd_site_lu Test_dtxqcd_spectrum_minmax Test_dtxqcd_spectrum Test_dtxqcd_trminv_zeroaux Test_dtxqcd_trminv_block_compare Test_dtxqcd_wilson_clover_fermion_eo Test_dtxqcd_zero_aux_doubled_qcd
-
+Test_dtxqcd_2pt_gencfgs_SOURCES = Test_dtxqcd_2pt_gencfgs.cc
+Test_dtxqcd_aux_gaussian_SOURCES = Test_dtxqcd_aux_gaussian.cc
+Test_dtxqcd_aux_io_SOURCES = Test_dtxqcd_aux_io.cc
+Test_dtxqcd_clover_herm_SOURCES = Test_dtxqcd_clover_herm.cc
+Test_dtxqcd_delta_diag_lower_SOURCES = Test_dtxqcd_delta_diag_lower.cc
+Test_dtxqcd_delta_herm_SOURCES = Test_dtxqcd_delta_herm.cc
+Test_dtxqcd_freefield_qbarq_SOURCES = Test_dtxqcd_freefield_qbarq.cc
+Test_dtxqcd_freefield_qbarq_eo_SOURCES = Test_dtxqcd_freefield_qbarq_eo.cc
+Test_dtxqcd_freefield_qbarq_eo_light_SOURCES = Test_dtxqcd_freefield_qbarq_eo_light.cc
+Test_dtxqcd_freefield_qbarq_light_SOURCES = Test_dtxqcd_freefield_qbarq_light.cc
+Test_dtxqcd_g5M_evals_SOURCES = Test_dtxqcd_g5M_evals.cc
+Test_dtxqcd_gamma5_herm_full_SOURCES = Test_dtxqcd_gamma5_herm_full.cc
+Test_dtxqcd_KM48_minmax_SOURCES = Test_dtxqcd_KM48_minmax.cc
+Test_dtxqcd_logdet_aux_force_SOURCES = Test_dtxqcd_logdet_aux_force.cc
+Test_dtxqcd_measure_sigma_SOURCES = Test_dtxqcd_measure_sigma.cc
+Test_dtxqcd_measure_sigma_full_SOURCES = Test_dtxqcd_measure_sigma_full.cc
+Test_dtxqcd_meooe_free_field_SOURCES = Test_dtxqcd_meooe_free_field.cc
+Test_dtxqcd_mooee_clover_consistency_SOURCES = Test_dtxqcd_mooee_clover_consistency.cc
+Test_dtxqcd_mooee_consistency_SOURCES = Test_dtxqcd_mooee_consistency.cc
+Test_dtxqcd_mooee_herm_SOURCES = Test_dtxqcd_mooee_herm.cc
+Test_dtxqcd_mooeeinv_n_SOURCES = Test_dtxqcd_mooeeinv_n.cc
+Test_dtxqcd_mpc_spectrum_SOURCES = Test_dtxqcd_mpc_spectrum.cc
+Test_dtxqcd_parity_mirror_SOURCES = Test_dtxqcd_parity_mirror.cc
+Test_dtxqcd_pf_realness_SOURCES = Test_dtxqcd_pf_realness.cc
+Test_dtxqcd_pfaff_logdet_blockdiag_SOURCES = Test_dtxqcd_pfaff_logdet_blockdiag.cc
+Test_dtxqcd_pfaffian_antisymmetry_SOURCES = Test_dtxqcd_pfaffian_antisymmetry.cc
+Test_dtxqcd_psd_check_SOURCES = Test_dtxqcd_psd_check.cc
+Test_dtxqcd_rational_aux_force_SOURCES = Test_dtxqcd_rational_aux_force.cc
+Test_dtxqcd_rational_full_force_SOURCES = Test_dtxqcd_rational_full_force.cc
+Test_dtxqcd_site_lu_SOURCES = Test_dtxqcd_site_lu.cc
+Test_dtxqcd_spectrum_SOURCES = Test_dtxqcd_spectrum.cc
+Test_dtxqcd_spectrum_minmax_SOURCES = Test_dtxqcd_spectrum_minmax.cc
+Test_dtxqcd_trminv_block_compare_SOURCES = Test_dtxqcd_trminv_block_compare.cc
+Test_dtxqcd_trminv_zeroaux_SOURCES = Test_dtxqcd_trminv_zeroaux.cc
+Test_dtxqcd_wilson_clover_fermion_eo_SOURCES = Test_dtxqcd_wilson_clover_fermion_eo.cc
+Test_dtxqcd_zero_aux_doubled_qcd_SOURCES = Test_dtxqcd_zero_aux_doubled_qcd.cc

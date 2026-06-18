@@ -181,11 +181,11 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
  public:
   TxqcdFierzAveragingObserver(GridCartesian &grid,
                                GridRedBlackCartesian &rbgrid,
-                               RealD mass, RealD csw,
+                               RealD mass, RealD csw, RealD lambda,
                                int n_skip, int n_noise_per_traj,
                                RealD cg_tol = 1e-8)
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
-        cg_tol_(cg_tol), n_skip_(n_skip),
+        lambda_(lambda), cg_tol_(cg_tol), n_skip_(n_skip),
         n_noise_per_traj_(n_noise_per_traj) {}
 
   void TrajectoryComplete(int traj, TXQCDField &U,
@@ -257,6 +257,26 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
     RealD dev = std::fabs(ratio - 1.0);
     bool pass = dev < pass_tol;
 
+    // Saddle predictions for aux VEVs (free-field, isotropic flavor/color):
+    //   ⟨Tr σ⟩ = Nf · Σ_W / λ²            (flavor Hermitian Nf×Nf)
+    //   ⟨Tr s⟩ = Nf · Σ_W / (√2 · λ²)     (color Hermitian Nc×Nc)
+    //          = ⟨Tr σ⟩ / √2
+    RealD lam2 = lambda_ * lambda_;
+    RealD pred_tr_sigma = (RealD)TxqcdNf * mean_sigma_w / lam2;
+    RealD pred_tr_s     = pred_tr_sigma / std::sqrt(2.0);
+    RealD mean_tr_sigma = mean(tr_sigma_);
+    RealD mean_tr_s     = mean(tr_s_);
+    RealD se_tr_sigma = stdev(tr_sigma_, mean_tr_sigma) / std::sqrt((RealD)N);
+    RealD se_tr_s     = stdev(tr_s_, mean_tr_s)         / std::sqrt((RealD)N);
+    RealD dev_tr_sigma = std::fabs(mean_tr_sigma - pred_tr_sigma);
+    RealD dev_tr_s     = std::fabs(mean_tr_s     - pred_tr_s);
+    // Pass tolerance for VEV saddle: max(5·SE, pass_tol·|pred|)
+    RealD tol_tr_sigma = std::max(5.0 * se_tr_sigma, pass_tol * std::fabs(pred_tr_sigma));
+    RealD tol_tr_s     = std::max(5.0 * se_tr_s,     pass_tol * std::fabs(pred_tr_s));
+    bool pass_tr_sigma = dev_tr_sigma < tol_tr_sigma;
+    bool pass_tr_s     = dev_tr_s     < tol_tr_s;
+    pass = pass && pass_tr_sigma && pass_tr_s;
+
     std::cout << GridLogMessage << std::endl
               << "===== TXQCD Fierz averaging summary (N=" << N
               << " samples, " << n_noise_per_traj_ << " noise/traj) ====="
@@ -285,6 +305,17 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
               << " ± " << ratio_se << " (SE)"
               << "   |dev| = " << dev
               << "   tol = " << pass_tol << std::endl;
+    // Aux VEV saddle checks (lambda=" << lambda_ << ", Nf=" << TxqcdNf << ")
+    std::cout << GridLogMessage
+              << "⟨Tr σ⟩ saddle: obs=" << mean_tr_sigma
+              << " ± " << se_tr_sigma << " (SE)  pred=Nf·Σ/λ²=" << pred_tr_sigma
+              << "  |dev|=" << dev_tr_sigma << "  tol=" << tol_tr_sigma
+              << "  [" << (pass_tr_sigma ? "PASS" : "FAIL") << "]" << std::endl;
+    std::cout << GridLogMessage
+              << "⟨Tr s⟩ saddle: obs=" << mean_tr_s
+              << " ± " << se_tr_s << " (SE)  pred=Nf·Σ/(√2·λ²)=" << pred_tr_s
+              << "  |dev|=" << dev_tr_s << "  tol=" << tol_tr_s
+              << "  [" << (pass_tr_s ? "PASS" : "FAIL") << "]" << std::endl;
     std::cout << GridLogMessage
               << "[" << test_name << " AVG] " << (pass ? "PASS" : "FAIL")
               << std::endl;
@@ -294,7 +325,7 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
  private:
   GridCartesian &grid_;
   GridRedBlackCartesian &rbgrid_;
-  RealD mass_, csw_, cg_tol_;
+  RealD mass_, csw_, lambda_, cg_tol_;
   int n_skip_, n_noise_per_traj_;
   std::vector<RealD> sigma_tx_, sigma_w_, ratio_;
   std::vector<RealD> tr_sigma_, tr_pi_, tr_s_, tr_p_;
