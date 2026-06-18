@@ -20,58 +20,34 @@ NAMESPACE_BEGIN(Grid);
 
 // ---------- field-type projectors ----------
 
-// Real-symmetric projection on a CF-matrix lattice field, operating on the
-// combined (a,i)(b,j) 6x6 index space.  Real-symmetric in the joint (i,a)
-// row index swapped with (j,b) column index:
+// Hermitize-only projection on a CF-matrix lattice field, operating on the
+// combined (a,i)(b,j) 6x6 index space: M_{(a,i)(b,j)} <- 0.5 (M + adj(M)).
 //
-//   M_RS = 0.25 * (M + M^T + M* + adj(M))
-//        = 0.5 * (Re(M) + Re(M)^T)
-//
-// Why real-symmetric and not Hermitian?  The C·K-doubled M48 in our
-// formulation is required to satisfy (K·M48)^T = -(K·M48) (the Pfaffian
-// antisymmetry of arxiv:2209.13183) for the Pf(K·M) = det(M)^{1/2}
-// identification.  Empirically (test_pfaffian_antisymmetry.py 2026-06-13):
-//   - Complex Hermitian aux X breaks Pfaffian antisymmetry  (ratio ~ 1.03)
-//   - Real symmetric aux X preserves Pfaffian antisymmetry (ratio = 0)
-//
-// Real-symmetric is a strict subset of Hermitian (Hermitian = symmetric +
-// real part), so old DTX2 checkpoints with complex Hermitian aux just lose
-// their imaginary off-diagonal pieces on read — fine as a hot restart.
-//
-// 2026-06-12: Removed traceless step (see git log) -- trace of sigma
-// carries the singlet condensate, redirecting it to s introduced spurious
-// factor of N_F·N_C in the normalization.
-//
-// 2026-06-15: REDESIGN per s/σ redundancy resolution: σ and π are again
-// traceless via DtxqcdMakeTracelessCFInPlace (called separately after the
-// real-symmetric step), and the s, p Gaussian coefficient is halved
-// (λ²/4 instead of λ²/2) — see DTXQCDAuxGaussianAction and
-// project_dtxqcd_s_sigma_redundancy.md.  d, n stay real-symmetric only
-// (no analogous redundancy).
-//
-// Name kept for grep-compatibility; function is real-symmetric projection only.
-// For σ, π: call DtxqcdMakeTracelessCFInPlace after this for full projection.
+// 2026-06-12: Removed the traceless step.  In TXQCD the trace of sigma carries
+// the qqbar singlet condensate (⟨Tr sigma⟩ = Sigma/lambda^2).  In v2 DTXQCD the
+// trace was being pinned to zero by the per-site subtraction below, redirecting
+// the condensate onto the separate s singlet field with a non-trivial
+// renormalization factor (the s coefficient in S_aux = (lambda^2/2) s^2 should
+// be 6*(lambda^2/2) to match X = sigma_traceless + s*I in Tr X^2).  Cleaner to
+// drop the traceless constraint here and let sigma carry the full Hermitian
+// degrees of freedom (matching TXQCD).  The s and p singlet slots remain in
+// the field but become redundant trace modes; we leave them in for now since
+// they still contribute to S_aux additively without breaking anything.  The
+// name is kept for grep-compatibility; the function is now Hermitize-only.
 inline void DtxqcdHermitizeAndTracelessCFInPlace(LatticeDtxqcdSigma &X) {
-  // Real-symmetric: 0.5*(Re(M) + Re(M)^T) = 0.25*(M + M^T + M* + (M*)^T)
-  LatticeDtxqcdSigma tmp(X.Grid());
-  tmp = X + transpose(X);                  // 2*Symm(M)
-  tmp = 0.5 * (tmp + conjugate(tmp));      // 2*Re(Symm(M))
-  X   = 0.5 * tmp;                         // Re(Symm(M)) = Symm(Re(M))
+  X = 0.5 * (X + adj(X));
 }
 
-// Subtract the singlet trace mode from a CF Hermitian matrix:
-//   X → X − (Tr X / (N_F·N_C)) · I
-// where the trace sums over both flavor and color, and I is the 6×6
-// identity in (a,i)⊗(b,j) space.  After this, Tr_{a,i}(X) ≡ 0, removing
-// the redundancy with the singlet scalar s (resp. p).
-//
-// Per-site iteration via peek/poke — clear and works for any lattice
-// shape in serial; performance fine for the 4^3 × 8 test scout.
-inline void DtxqcdMakeTracelessCFInPlace(LatticeDtxqcdSigma &X) {
+// Color-traceless projection: for each (a,b) flavor pair, subtract the
+// trace over the inner Nc×Nc color matrix.  After this, sum_i X_ab^{ii} = 0
+// for every (a,b) pair.  Used (under env knob DTXQCD_DN_COLOR_TRACELESS=1)
+// on d, n to enforce the Fierz-derived constraint that the color-singlet
+// (q̄^C γ5 q · δ_ij = 0 from 3⊗3 = 6 ⊕ 3̄ having no singlet).
+inline void DtxqcdMakeColorTracelessCFInPlace(LatticeDtxqcdSigma &X) {
   typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SObj;
   GridBase *grid = X.Grid();
   Coordinate latt = grid->GlobalDimensions();
-  const RealD invN = 1.0 / RealD(DtxqcdNf * Nc);
+  const ComplexD invNc(1.0 / RealD(Nc), 0.0);
   for (int t = 0; t < latt[Tdir]; ++t)
     for (int x3 = 0; x3 < latt[Zdir]; ++x3)
       for (int x2 = 0; x2 < latt[Ydir]; ++x2)
@@ -80,36 +56,43 @@ inline void DtxqcdMakeTracelessCFInPlace(LatticeDtxqcdSigma &X) {
           site[0] = x1; site[1] = x2; site[2] = x3; site[3] = t;
           SObj M;
           peekSite(M, X, site);
-          ComplexD tr(0.0, 0.0);
           for (int a = 0; a < DtxqcdNf; ++a)
-            for (int i = 0; i < Nc; ++i)
-              tr += static_cast<ComplexD>(M()(a, a)(i, i));
-          ComplexD c = tr * invN;
-          for (int a = 0; a < DtxqcdNf; ++a)
-            for (int i = 0; i < Nc; ++i)
-              M()(a, a)(i, i) = M()(a, a)(i, i) - c;
+            for (int b = 0; b < DtxqcdNf; ++b) {
+              ComplexD tr(0.0, 0.0);
+              for (int i = 0; i < Nc; ++i)
+                tr += static_cast<ComplexD>(M()(a, b)(i, i));
+              ComplexD c = tr * invNc;
+              for (int i = 0; i < Nc; ++i)
+                M()(a, b)(i, i) = M()(a, b)(i, i) - c;
+            }
           pokeSite(M, X, site);
         }
 }
 
+// Cached env-knob: when DTXQCD_DN_COLOR_TRACELESS=1, project d and n
+// color-traceless throughout HMC (field, momentum, force).  Default OFF.
+static inline bool DtxqcdDnColorTraceless() {
+  static const bool b = []() {
+    if (const char *v = std::getenv("DTXQCD_DN_COLOR_TRACELESS"); v && *v) {
+      bool on = std::atoi(v) != 0;
+      std::cout << GridLogMessage
+                << "[DTXQCD] DN_COLOR_TRACELESS = " << (on ? "ON" : "OFF")
+                << "  (project d, n color-traceless per Fierz)" << std::endl;
+      return on;
+    }
+    return false;
+  }();
+  return b;
+}
+
 // Gaussian sample for CF matrix: complex Gaussian fill of all NfNc^2 entries,
-// then real-symmetric project.  Resulting entries:
-//   diagonal      ~ N(0, 1) real
-//   off-diagonal  ~ N(0, 1/2) real, with M_ji = M_ij
-// Tr(X^2) has expectation = NfNc*(NfNc+1)/2 = 21 (the DOF count).
-// For σ, π use DtxqcdHermitianTracelessCFGaussian instead.
+// then Hermitian + traceless project.  Variance of the resulting Hermitian
+// matrix entries: off-diagonal ~ N(0, 1/2) in re/im each; diagonal ~ N(0, 1)
+// real -- standard for symmetric Hermitian Gaussian (GUE) ensemble.
 inline void DtxqcdHermitianCFGaussian(GridParallelRNG &pRNG,
                                        LatticeDtxqcdSigma &X) {
   gaussian(pRNG, X);
   DtxqcdHermitizeAndTracelessCFInPlace(X);
-}
-
-// Same as above plus traceless projection — for σ, π.
-inline void DtxqcdHermitianTracelessCFGaussian(GridParallelRNG &pRNG,
-                                                LatticeDtxqcdSigma &X) {
-  gaussian(pRNG, X);
-  DtxqcdHermitizeAndTracelessCFInPlace(X);
-  DtxqcdMakeTracelessCFInPlace(X);
 }
 
 // Real projection for singlet scalar (zero out imag part of the vComplex
@@ -145,53 +128,36 @@ class DTXQCDCompositeImpl {
   static inline void generate_momenta(Field &P, GridSerialRNG &sRNG,
                                       GridParallelRNG &pRNG) {
     PeriodicGimplR::generate_momenta(P.U, sRNG, pRNG);
-    // DTXQCD_FREEZE_GAUGE=1 zeros gauge momentum so U stays fixed during HMC.
-    // Used by free-field unit test (U=I + kappa~0 limit).
-    static int freeze_gauge_mom = []() {
-      const char *e = std::getenv("DTXQCD_FREEZE_GAUGE");
-      return (e && std::atoi(e) != 0) ? 1 : 0;
-    }();
-    if (freeze_gauge_mom) P.U = Zero();
     // Match the sqrt(HMC_MOMENTUM_DENOMINATOR) scaling that gauge momenta
     // get inside PeriodicGimplR::generate_momenta so the integrator update
     // P -= F * ep * HMC_MOMENTUM_DENOMINATOR is balanced against dq/dt = P
     // for each aux slot.
     RealD scale = ::sqrt(HMC_MOMENTUM_DENOMINATOR);
-    // σ, π momenta are traceless (matching their position-space constraint —
-    // a non-zero trace in the momentum would push σ into a non-traceless
-    // configuration during a leapfrog step, breaking the projection).
-    // d, n keep their real-symmetric Gaussian.  s, p momenta unchanged
-    // (the halved Gaussian coefficient in S affects only the force amplitude,
-    // not the kinetic-energy normalization).
-    DtxqcdHermitianTracelessCFGaussian(pRNG, P.sigma);  P.sigma = scale * P.sigma;
-    DtxqcdHermitianTracelessCFGaussian(pRNG, P.pi);     P.pi    = scale * P.pi;
-    DtxqcdHermitianCFGaussian(pRNG, P.d);               P.d     = scale * P.d;
-    DtxqcdHermitianCFGaussian(pRNG, P.n);               P.n     = scale * P.n;
-    DtxqcdRealScalarGaussian(pRNG, P.s);                P.s     = scale * P.s;
-    DtxqcdRealScalarGaussian(pRNG, P.p);                P.p     = scale * P.p;
+    DtxqcdHermitianCFGaussian(pRNG, P.sigma);  P.sigma = scale * P.sigma;
+    DtxqcdHermitianCFGaussian(pRNG, P.pi);     P.pi    = scale * P.pi;
+    DtxqcdHermitianCFGaussian(pRNG, P.d);      P.d     = scale * P.d;
+    DtxqcdHermitianCFGaussian(pRNG, P.n);      P.n     = scale * P.n;
+    DtxqcdRealScalarGaussian(pRNG, P.s);       P.s     = scale * P.s;
+    DtxqcdRealScalarGaussian(pRNG, P.p);       P.p     = scale * P.p;
+    if (DtxqcdDnColorTraceless()) {
+      DtxqcdMakeColorTracelessCFInPlace(P.d);
+      DtxqcdMakeColorTracelessCFInPlace(P.n);
+    }
   }
 
   static inline Field projectForce(Field &Fforce) {
     Field out(Fforce.Grid());
-    static int freeze_gauge_pf = []() {
-      const char *e = std::getenv("DTXQCD_FREEZE_GAUGE");
-      return (e && std::atoi(e) != 0) ? 1 : 0;
-    }();
-    if (freeze_gauge_pf) {
-      out.U = Zero();  // zero gauge force → U stays at I
-    } else {
-      out.U = PeriodicGimplR::projectForce(Fforce.U);
-    }
-    // σ, π forces are projected real-symmetric AND traceless (so the
-    // singlet trace mode never gets a force kick, preserving traceless).
+    out.U = PeriodicGimplR::projectForce(Fforce.U);
     out.sigma = Fforce.sigma;  DtxqcdHermitizeAndTracelessCFInPlace(out.sigma);
-                                DtxqcdMakeTracelessCFInPlace(out.sigma);
     out.pi    = Fforce.pi;     DtxqcdHermitizeAndTracelessCFInPlace(out.pi);
-                                DtxqcdMakeTracelessCFInPlace(out.pi);
     out.d     = Fforce.d;      DtxqcdHermitizeAndTracelessCFInPlace(out.d);
     out.n     = Fforce.n;      DtxqcdHermitizeAndTracelessCFInPlace(out.n);
     out.s     = Fforce.s;      DtxqcdRealScalarProjectInPlace(out.s);
     out.p     = Fforce.p;      DtxqcdRealScalarProjectInPlace(out.p);
+    if (DtxqcdDnColorTraceless()) {
+      DtxqcdMakeColorTracelessCFInPlace(out.d);
+      DtxqcdMakeColorTracelessCFInPlace(out.n);
+    }
     return out;
   }
 
@@ -222,23 +188,29 @@ class DTXQCDCompositeImpl {
   static inline void Project(Field &U) {
     PeriodicGimplR::Project(U.U);
     DtxqcdHermitizeAndTracelessCFInPlace(U.sigma);
-    DtxqcdMakeTracelessCFInPlace(U.sigma);
     DtxqcdHermitizeAndTracelessCFInPlace(U.pi);
-    DtxqcdMakeTracelessCFInPlace(U.pi);
     DtxqcdHermitizeAndTracelessCFInPlace(U.d);
     DtxqcdHermitizeAndTracelessCFInPlace(U.n);
     DtxqcdRealScalarProjectInPlace(U.s);
     DtxqcdRealScalarProjectInPlace(U.p);
+    if (DtxqcdDnColorTraceless()) {
+      DtxqcdMakeColorTracelessCFInPlace(U.d);
+      DtxqcdMakeColorTracelessCFInPlace(U.n);
+    }
   }
 
   static inline void HotConfiguration(GridParallelRNG &pRNG, Field &U) {
     PeriodicGimplR::HotConfiguration(pRNG, U.U);
-    DtxqcdHermitianTracelessCFGaussian(pRNG, U.sigma);
-    DtxqcdHermitianTracelessCFGaussian(pRNG, U.pi);
+    DtxqcdHermitianCFGaussian(pRNG, U.sigma);
+    DtxqcdHermitianCFGaussian(pRNG, U.pi);
     DtxqcdHermitianCFGaussian(pRNG, U.d);
     DtxqcdHermitianCFGaussian(pRNG, U.n);
     DtxqcdRealScalarGaussian(pRNG, U.s);
     DtxqcdRealScalarGaussian(pRNG, U.p);
+    if (DtxqcdDnColorTraceless()) {
+      DtxqcdMakeColorTracelessCFInPlace(U.d);
+      DtxqcdMakeColorTracelessCFInPlace(U.n);
+    }
   }
 
   static inline void TepidConfiguration(GridParallelRNG &pRNG, Field &U) {
@@ -267,25 +239,15 @@ class DTXQCDCompositeImpl {
   // decouples the init fluctuation width from the physical lambda.
   //
   // Sigma is the chiral condensate (Σ ≈ −⟨q̄q⟩ from Hutchinson on the
-  // initial gauge with stout smearing + AP-time BC).
-  //
-  // 2026-06-15 redesign — σ, π are traceless, s, p have halved Gaussian
-  // coefficient (λ²/4).  Saddle now puts the entire singlet condensate
-  // into s alone (no Tr σ contribution since σ is forced traceless):
-  //   ⟨s⟩      = 2 N_F · Σ / λ²       (per-quark Σ convention)
-  //   ⟨Tr σ⟩   = 0                    (traceless by construction)
-  // π, d, n, p stay mean-zero.
-  //
-  // Σ here is the per-quark chiral condensate (matches plain-Wilson Σ
-  // at aux=0); compute_trminv on the doubled M48 returns this same
-  // convention after dividing by 2·N_F (the doubling factor verified
-  // by Test_dtxqcd_trminv_zeroaux: ratio = 2·N_F).
-  //
-  // The 2 N_F prefactor (vs the naive N_F/2 from (λ²/4)s² and a single
-  // Tr M_QCD^{-1} pull) reflects the (s + 2Q) source structure: the s
-  // singlet plus a 2× shift from the trace-mode Q in the M48 doubling.
-  // Empirical confirmation from λ=10 and λ=5 sweeps: λ²⟨s⟩/Σ_M48 ≈ 4
-  // (2 N_F for N_F=2) at equilibrium.
+  // initial gauge with stout smearing + AP-time BC).  Equilibrium saddle
+  // values (confirmed from λ=5,10 production data 2026-06-12):
+  //   ⟨s⟩                = N_F · Σ / λ²       (flavor-trace SD identity)
+  //   ⟨Tr σ⟩             = N_F · Σ / λ²       (same as ⟨s⟩, both singlet)
+  //   ⟨σ^{ij}_{ab}⟩_diag = Σ / (N_C · λ²)     (per (i,a) entry; sum to ⟨Trσ⟩)
+  // π, d, n, p stay mean-zero (parity-odd / non-singlet).
+  // PRIOR BUG (pre-2026-06-13): code used per-entry shift Σ/λ² for both σ
+  // and s, giving ⟨s⟩ = Σ/λ² (factor N_F=2 too small) and ⟨Trσ⟩ = N_F·N_C·Σ/λ²
+  // (factor N_C=3 too large).  Corrected here.
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
                                     RealD lambda, RealD Sigma = 0.0) {
     RealD lambda_var = lambda;
@@ -293,21 +255,32 @@ class DTXQCDCompositeImpl {
       lambda_var = std::atof(e);
     }
     RealD scale = 1.0 / lambda_var;
-    // σ, π: traceless real-symmetric Gaussian
-    DtxqcdHermitianTracelessCFGaussian(pRNG, U.sigma);  U.sigma = scale * U.sigma;
-    DtxqcdHermitianTracelessCFGaussian(pRNG, U.pi);     U.pi    = scale * U.pi;
-    DtxqcdHermitianCFGaussian(pRNG, U.d);               U.d     = scale * U.d;
-    DtxqcdHermitianCFGaussian(pRNG, U.n);               U.n     = scale * U.n;
-    // s, p: halved-coefficient Gaussian → width × √2 wider per-entry.
-    // sample standard Gaussian then scale by √2 / λ to get target variance.
-    RealD scale_sp = std::sqrt(2.0) / lambda_var;
-    DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale_sp * U.s;
-    DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale_sp * U.p;
+    DtxqcdHermitianCFGaussian(pRNG, U.sigma);  U.sigma = scale * U.sigma;
+    DtxqcdHermitianCFGaussian(pRNG, U.pi);     U.pi    = scale * U.pi;
+    DtxqcdHermitianCFGaussian(pRNG, U.d);      U.d     = scale * U.d;
+    DtxqcdHermitianCFGaussian(pRNG, U.n);      U.n     = scale * U.n;
+    DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale * U.s;
+    DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale * U.p;
+    if (DtxqcdDnColorTraceless()) {
+      DtxqcdMakeColorTracelessCFInPlace(U.d);
+      DtxqcdMakeColorTracelessCFInPlace(U.n);
+    }
 
     if (Sigma != 0.0) {
-      // s shift = 2 N_F · Σ / λ²  with Σ in per-quark convention.
-      // σ traceless → no σ shift; the entire singlet condensate sits in s.
-      const RealD s_shift = 2.0 * DtxqcdNf * Sigma / (lambda * lambda);
+      // σ per-entry shift = Σ/(N_C λ²)  → ⟨Trσ⟩ = N_F · Σ/λ²
+      const RealD sigma_shift = Sigma / (Nc * lambda * lambda);
+      // s shift = N_F · Σ/λ²
+      const RealD s_shift = DtxqcdNf * Sigma / (lambda * lambda);
+      // σ diagonal shift
+      typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
+      SigSobj sigma_id;  sigma_id = Zero();
+      for (int a = 0; a < DtxqcdNf; ++a)
+        for (int i = 0; i < Nc; ++i)
+          sigma_id()(a, a)(i, i) = sigma_shift;
+      LatticeDtxqcdSigma shift_sigma(U.sigma.Grid());
+      shift_sigma = sigma_id;
+      U.sigma = U.sigma + shift_sigma;
+      // s singlet shift
       typedef typename LatticeDtxqcdS::vector_object::scalar_object SSobj;
       SSobj s_id;  s_id()()() = s_shift;
       LatticeDtxqcdS shift_s(U.s.Grid());
