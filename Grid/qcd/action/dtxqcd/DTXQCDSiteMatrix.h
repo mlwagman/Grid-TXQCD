@@ -226,13 +226,22 @@ inline void DtxqcdBuildDiagBlock24(double mass,
 }
 
 // Add the clover contribution to a 24x24 diagonal block:
-//   upper:  M += -(csw/2) sum_{mu<nu} F_{mu,nu} sigma_{mu,nu}_Grid  (delta in flavor)
-//   lower:  M += -(csw/2) sum_{mu<nu} F^T_{mu,nu} sigma_{mu,nu}_Grid
+//   upper:  M += -(csw/2) sum_{mu<nu} F_{mu,nu}     sigma_{mu,nu}_Grid
+//   lower:  M += +(csw/2) sum_{mu<nu} F^T_{mu,nu}   sigma_{mu,nu}_Grid
 //
-// v2 corrected (2026-06-12): the lower-block clover prefactor changed from
-// +0.5*csw to -0.5*csw to match the corrected M_lower = -C D^T C + X
-// convention (= D[U*] + X including clover).  The old +0.5*csw was tied to
-// the original M_lower = C D^T C - X form which is now superseded.
+// The opposite signs on upper/lower satisfy the Pfaffian-antisymmetry
+// requirement M_ll = -K_b·M_uu^T·K_b with K_b = Cγ5, (Cγ5)² = -I:
+//   M_ll^clover = -K_b·(-csw/2·F·σ_{μν})^T·K_b
+//               = (csw/2)·F^T·(K_b·σ_{μν}^T·K_b)
+//               = (csw/2)·F^T·σ_{μν}
+// (using K_b·σ_{μν}^T·K_b = σ_{μν} since [C,γ5]=0 and Cσ_{μν}C^{-1} = -σ_{μν}^T,
+//  with γ5 σ_{μν} γ5 = +σ_{μν}).
+//
+// History: 2026-06-12 set both upper and lower to -csw/2 to match the
+// "M_lower = -C D^T C + X = D[U*] + X" claim.  That broke the C·K
+// Pfaffian antisymmetry test added 2026-06-13 (csw=0 passed, csw≠0 failed
+// at rel ~ 0.4).  Restoring opposite signs is required for the doubled
+// formulation to represent |det M|^{1/2} as a Pfaffian.
 inline void DtxqcdAddCloverToDiagBlock24(
     double csw,
     const DtxqcdSiteClover &clover,
@@ -240,7 +249,7 @@ inline void DtxqcdAddCloverToDiagBlock24(
     Eigen::MatrixXcd &M,
     bool lower_block = false) {
   if (csw == 0.0) return;
-  const double prefactor = -0.5 * csw;
+  const double prefactor = (lower_block ? +0.5 : -0.5) * csw;
   for (int p = 0; p < 6; ++p) {
     Eigen::Matrix3cd F = lower_block
                               ? Eigen::Matrix3cd(clover.F_munu[p].transpose())
@@ -298,7 +307,7 @@ inline void DtxqcdBuildLowerBlock24(double mass,
 inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
                                       const DtxqcdSpinMatrices& spin,
                                       Eigen::MatrixXcd& M) {
-  const ComplexD sqrt2(std::sqrt(2.0), 0.0);
+  const ComplexD sqrt2(DtxqcdOffdiagFactor(), 0.0);
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {

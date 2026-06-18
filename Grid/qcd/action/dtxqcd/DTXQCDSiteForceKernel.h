@@ -131,7 +131,7 @@ inline void AuxForceAt(InvLookup Inv,
   //   F_d^{ij}_{ab} = -sqrt(2) * sum_{alpha,beta} gamma5(alpha, beta)
   //               * [ Inv((b,beta,j,1), (a,alpha,i,0))
   //                 + Inv((b,beta,j,0), (a,alpha,i,1)) ]
-  const RealD sqrt2 = std::sqrt(2.0);
+  const RealD sqrt2 = DtxqcdOffdiagFactor();
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -223,9 +223,12 @@ inline void CloverSigmaAt(InvLookup Inv,
                           const DtxqcdSpinMatrices &spin,
                           RealD csw,
                           std::array<CMsobj, 6> &clover_sigma) {
-  // v2 corrected (2026-06-12): lower-block clover prefactor changed from
-  // +(csw/2) F^T sigma to -(csw/2) F^T sigma to match M_lower = -C D^T C + X.
-  // The trace combination is now (+upper +lower) rather than (+upper -lower).
+  // 2026-06-13 (Pfaffian restore): upper-block clover has -(csw/2) F σ_{μν}
+  // and lower-block clover has +(csw/2) F^T σ_{μν} (opposite sign on lower,
+  // required by the C·K Pfaffian antisymmetry — see DTXQCDDeltaCloverOp.h).
+  // So dS/dF_p has upper minus lower contribution; we accumulate val =
+  // (upper_contrib) - (lower_contrib) and multiply by -csw/2 at the end:
+  //   cs = -csw/2 · (upper - lower) = -csw/2·upper + csw/2·lower  ✓
   for (int p_idx = 0; p_idx < 6; ++p_idx) {
     CMsobj cs;
     cs = Zero();
@@ -242,7 +245,7 @@ inline void CloverSigmaAt(InvLookup Inv,
               int row_l = DtxqcdSiteIdx24(a, beta,  i_c);
               int col_l = DtxqcdSiteIdx24(a, alpha, j_c);
               val += smn * Inv(row_u, col_u);
-              val += smn * Inv(kDim24 + row_l, kDim24 + col_l);
+              val -= smn * Inv(kDim24 + row_l, kDim24 + col_l);
             }
           }
         }

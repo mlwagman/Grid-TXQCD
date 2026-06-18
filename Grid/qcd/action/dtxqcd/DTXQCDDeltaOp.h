@@ -22,6 +22,26 @@
 
 NAMESPACE_BEGIN(Grid);
 
+// Off-diagonal d/n cross-block prefactor. v2 derivation gives √2; this
+// env-knob helper lets diagnostic runs override it (e.g. 1.0 or 2.0) to
+// probe sensitivity of the residual κ²-deficit in Σ_DTX/Σ_W. The factor
+// MUST be used consistently in the M48 build, the operator action, and
+// the force kernel; otherwise the FD-vs-analytic gates break.
+static inline RealD DtxqcdOffdiagFactor() {
+  static const RealD f = []() {
+    if (const char *v = std::getenv("DTXQCD_OFFDIAG_FACTOR"); v && *v) {
+      RealD x = std::atof(v);
+      std::cout << GridLogMessage
+                << "[DTXQCD] off-diagonal d/n factor overridden via "
+                   "DTXQCD_OFFDIAG_FACTOR=" << x
+                << "  (default √2 = " << std::sqrt(2.0) << ")" << std::endl;
+      return x;
+    }
+    return std::sqrt(2.0);
+  }();
+  return f;
+}
+
 // Nf-flavor doublet fermion.  Same struct as v1; unchanged in v2 since it
 // only depends on Nf, not the aux roster.
 struct DTXQCDFermionNf {
@@ -158,7 +178,7 @@ inline void DtxqcdApplyDnCross(const LatticeDtxqcdD     &d,
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
   int cb = in.f[0].Checkerboard();
-  const RealD sqrt2 = std::sqrt(2.0);
+  const RealD sqrt2 = DtxqcdOffdiagFactor();
 
   std::array<LatticeFermion, DtxqcdNf> g5_in =
       DTXQCDFermionNf::MakeArray(grid, std::make_index_sequence<DtxqcdNf>{});
