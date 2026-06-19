@@ -50,9 +50,12 @@ int main(int argc, char **argv) {
   Utx.s = Zero(); Utx.p = Zero(); Utx.t = Zero();
   TXQCDLogDetCloverEOAction txaction(Grid, RBGrid, mass, csw);
 
-  // QCD setup
+  // QCD setup — match TXQCD APBC default so the per-site clover values agree.
+  WilsonImplR::ImplParams ip;
+  ip.boundary_phases.resize(Nd, 1.0);
+  ip.boundary_phases[Nd - 1] = -1.0;
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
-  WCF Dw(U, Grid, RBGrid, mass, csw, csw);
+  WCF Dw(U, Grid, RBGrid, mass, csw, csw, WilsonAnisotropyCoefficients(), ip);
   QCDLogDetCloverEOAction<WilsonImplR> qcdaction(Dw);
 
   // ============================================================

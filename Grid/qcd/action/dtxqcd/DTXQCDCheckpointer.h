@@ -7,22 +7,25 @@
 //   <config_prefix>_daux.N    packed aux sidecar (DTXQCD v2 layout)
 //   <rng_prefix>.N            RNG state (NERSC writer)
 //
-// Sidecar magic 'DTX2' (0x44545832) is intentionally distinct from v1's
-// 'DTXA' (0x44545841) so v1 configs are rejected at read time.  No v1
-// backward-read path; v1 configs were partial-stat with the wrong action.
+// Sidecar magic 'DTX3' (0x44545833) — bumped from 'DTX2' (2026-06-19) when
+// d, n switched to truly complex-symmetric storage (42 reals each instead
+// of 36) to preserve the imaginary-diagonal DOFs that the Hermitian pack
+// silently discarded.
 //
-// Packed layout per site (146 doubles = 1168 bytes):
-//   sigma:  36 reals  (6 diag + 15 off-diag (re, im) pairs)
-//   pi:     36 reals
-//   d:      36 reals
-//   n:      36 reals
+// Packed layout per site (158 doubles = 1264 bytes):
+//   sigma:  36 reals  (6 real diag + 15 off-diag (re, im) pairs)   [Hermitian]
+//   pi:     36 reals  [Hermitian]
+//   d:      42 reals  (6 diag (re, im) pairs + 15 off-diag (re, im) pairs) [cplx-symm]
+//   n:      42 reals  [cplx-symm]
 //   s:       1 real
 //   p:       1 real
 //
-// Each Hermitian CF matrix is packed under the combined index
-// k = a*Nc + i (k1 = row, k2 = col).  On read the field is re-Hermitized
-// and re-traceless-projected via DTXQCDCompositeImpl::Project so small
-// numerical drift in the stored values is absorbed.
+// Hermitian and complex-symmetric pack share the same combined-index
+// scheme k = a*Nc + i (k1 = row, k2 = col) but differ in how the
+// diagonal is stored: Hermitian → real only (6 doubles), complex-symm →
+// full complex (12 doubles).  On read the field is re-projected to its
+// expected subspace via DTXQCDCompositeImpl::Project so small numerical
+// drift in the stored values is absorbed.
 //
 // Multi-rank layout follows v1: each rank writes its rank-local
 // lex-ordered slice at offset 16 + my_rank * local_bytes via MPI-IO
@@ -40,16 +43,23 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
  private:
   CheckpointerParameters Params;
 
-  static constexpr uint32_t kAuxMagic   = 0x44545832;  // 'DTX2'
-  static constexpr uint32_t kAuxVersion = 2;
+  static constexpr uint32_t kAuxMagic   = 0x44545833;  // 'DTX3'
+  static constexpr uint32_t kAuxVersion = 3;
 
   static constexpr int kCFDim       = DtxqcdNfNc;                       // 6
-  static constexpr int kCFPacked    = kCFDim                            // diag
-                                    + kCFDim * (kCFDim - 1);            // off-diag re,im
-  static_assert(kCFPacked == 36, "kCFPacked should be NfNc^2 = 36");
+  // Hermitian pack: 6 real diag + 15 off-diag (re, im) = 36 reals.
+  static constexpr int kCFHermPacked = kCFDim
+                                     + kCFDim * (kCFDim - 1);
+  static_assert(kCFHermPacked == 36, "kCFHermPacked should be 36");
+  // Complex-symm pack: 6 diag (re, im) + 15 off-diag (re, im) = 42 reals.
+  static constexpr int kCFSymPacked  = 2 * kCFDim
+                                     + kCFDim * (kCFDim - 1);
+  static_assert(kCFSymPacked == 42, "kCFSymPacked should be 42");
   static constexpr int kScalarPacked = 1;
   static constexpr int kSiteDoubles =
-      4 * kCFPacked + 2 * kScalarPacked;                                // 146
+      2 * kCFHermPacked   // sigma, pi
+    + 2 * kCFSymPacked    // d, n
+    + 2 * kScalarPacked;                                                // 158
 
   std::string aux_filename(int traj) const {
     std::ostringstream os;
@@ -106,6 +116,58 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
     }
   }
 
+  // ----- per-site CF complex-symmetric pack/unpack (truly complex-symm,
+  // joint (color+flavor) transpose: M(k1,k2) = M(k2,k1) with complex
+  // values throughout — used for d, n under DTXQCD_DN_COMPLEX_SYMMETRIC).
+  template <class CFSobj>
+  static void PackCFSymmetric(const CFSobj &M, double *buf) {
+    int kk = 0;
+    // Diagonal: 6 complex entries.
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int i = 0; i < Nc; ++i) {
+        auto z = M()(a, a)(i, i);
+        buf[kk++] = z.real();
+        buf[kk++] = z.imag();
+      }
+    }
+    // Off-diagonal upper triangle: 15 complex entries.
+    for (int k1 = 0; k1 < kCFDim; ++k1) {
+      int a1 = k1 / Nc, i1 = k1 % Nc;
+      for (int k2 = k1 + 1; k2 < kCFDim; ++k2) {
+        int a2 = k2 / Nc, i2 = k2 % Nc;
+        auto z = M()(a1, a2)(i1, i2);
+        buf[kk++] = z.real();
+        buf[kk++] = z.imag();
+      }
+    }
+  }
+  template <class CFSobj>
+  static void UnpackCFSymmetric(const double *buf, CFSobj &M) {
+    using SC = std::remove_reference_t<decltype(M()(0, 0)(0, 0))>;
+    for (int a = 0; a < DtxqcdNf; ++a)
+      for (int b = 0; b < DtxqcdNf; ++b)
+        for (int i = 0; i < Nc; ++i)
+          for (int j = 0; j < Nc; ++j)
+            M()(a, b)(i, j) = SC(0.0, 0.0);
+    int kk = 0;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      for (int i = 0; i < Nc; ++i) {
+        double re = buf[kk++], im = buf[kk++];
+        M()(a, a)(i, i) = SC(re, im);
+      }
+    }
+    for (int k1 = 0; k1 < kCFDim; ++k1) {
+      int a1 = k1 / Nc, i1 = k1 % Nc;
+      for (int k2 = k1 + 1; k2 < kCFDim; ++k2) {
+        int a2 = k2 / Nc, i2 = k2 % Nc;
+        double re = buf[kk++], im = buf[kk++];
+        // M(k1,k2) = M(k2,k1) — joint transpose, NO conjugate.
+        M()(a1, a2)(i1, i2) = SC(re, im);
+        M()(a2, a1)(i2, i1) = SC(re, im);
+      }
+    }
+  }
+
   template <class ScalarSobj>
   static void PackScalar(const ScalarSobj &S, double *buf) {
     buf[0] = S()()().real();
@@ -123,10 +185,10 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
                        const SSobj &s, const PSobj &p,
                        double *buf) {
     int off = 0;
-    PackCFHermitian(sigma, buf + off); off += kCFPacked;
-    PackCFHermitian(pi,    buf + off); off += kCFPacked;
-    PackCFHermitian(d,     buf + off); off += kCFPacked;
-    PackCFHermitian(n,     buf + off); off += kCFPacked;
+    PackCFHermitian(sigma, buf + off); off += kCFHermPacked;
+    PackCFHermitian(pi,    buf + off); off += kCFHermPacked;
+    PackCFSymmetric(d,     buf + off); off += kCFSymPacked;
+    PackCFSymmetric(n,     buf + off); off += kCFSymPacked;
     PackScalar(s,          buf + off); off += kScalarPacked;
     PackScalar(p,          buf + off); off += kScalarPacked;
   }
@@ -138,10 +200,10 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
                          DSobj &d, NSobj &n,
                          SSobj &s, PSobj &p) {
     int off = 0;
-    UnpackCFHermitian(buf + off, sigma); off += kCFPacked;
-    UnpackCFHermitian(buf + off, pi);    off += kCFPacked;
-    UnpackCFHermitian(buf + off, d);     off += kCFPacked;
-    UnpackCFHermitian(buf + off, n);     off += kCFPacked;
+    UnpackCFHermitian(buf + off, sigma); off += kCFHermPacked;
+    UnpackCFHermitian(buf + off, pi);    off += kCFHermPacked;
+    UnpackCFSymmetric(buf + off, d);     off += kCFSymPacked;
+    UnpackCFSymmetric(buf + off, n);     off += kCFSymPacked;
     UnpackScalar     (buf + off, s);     off += kScalarPacked;
     UnpackScalar     (buf + off, p);     off += kScalarPacked;
   }
@@ -307,7 +369,7 @@ class DTXQCDCheckpointer : public BaseHmcCheckpointer<DTXQCDCompositeImpl> {
     if (magic != kAuxMagic) {
       std::cout << GridLogError << "DTXQCDCheckpointer: bad aux magic in "
                 << auxfile << " (got 0x" << std::hex << magic << std::dec
-                << ", expected DTX2 = 0x44545832).  This may be a v1 'DTXA'"
+                << ", expected DTX3 = 0x44545833).  This may be a v1 'DTXA'"
                    " config; v2 does not support reading them."
                 << std::endl;
       abort();

@@ -60,8 +60,9 @@ int main(int argc, char **argv) {
       exitcode = 1;
     } else {
       uint64_t sz = ifs.tellg();
-      // v2 payload: 4 * 36 (CF Hermitian) + 2 * 1 (scalars) = 146 doubles/site.
-      uint64_t expected = 16 + (uint64_t)Grid.gSites() * 146 * 8;
+      // v3 payload: 2*36 (sigma, pi Hermitian) + 2*42 (d, n complex-symm)
+      //            + 2*1 (scalars) = 158 doubles/site.
+      uint64_t expected = 16 + (uint64_t)Grid.gSites() * 158 * 8;
       if (sz != expected) {
         std::cout << GridLogError << "[FAIL] sidecar size " << sz
                   << " != expected " << expected << std::endl;
@@ -75,12 +76,12 @@ int main(int argc, char **argv) {
       ifs.seekg(0);
       uint32_t magic = 0;
       ifs.read(reinterpret_cast<char *>(&magic), sizeof(magic));
-      if (magic != 0x44545832u) {
+      if (magic != 0x44545833u) {
         std::cout << GridLogError << "[FAIL] magic 0x" << std::hex << magic
-                  << std::dec << " != 0x44545832 ('DTX2')" << std::endl;
+                  << std::dec << " != 0x44545833 ('DTX3')" << std::endl;
         exitcode = 1;
       } else {
-        std::cout << GridLogMessage << "[ok] magic 0x44545832 ('DTX2')"
+        std::cout << GridLogMessage << "[ok] magic 0x44545833 ('DTX3')"
                   << std::endl;
       }
     }
