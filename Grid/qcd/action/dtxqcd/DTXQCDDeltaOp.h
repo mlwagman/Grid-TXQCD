@@ -108,7 +108,8 @@ inline void DtxqcdApplyX(const LatticeDtxqcdSigma &sigma,
                          const LatticeDtxqcdP     &p,
                          const DTXQCDFermionNf    &in,
                          DTXQCDFermionNf          &out,
-                         double                    block_sign = +1.0) {
+                         double                    block_sign = +1.0,
+                         bool                      transpose_aux = false) {
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
   int cb = in.f[0].Checkerboard();
@@ -118,14 +119,10 @@ inline void DtxqcdApplyX(const LatticeDtxqcdSigma &sigma,
       DTXQCDFermionNf::MakeArray(grid, std::make_index_sequence<DtxqcdNf>{});
   for (int b = 0; b < DtxqcdNf; ++b) g5_in[b] = g5 * in.f[b];
 
-  // PeekIndex<2>(s, 0) collapses iScalar<iScalar<iScalar<...>>> to a
-  // LatticeComplex.  Same for p.  (Singlet has only one entry, so the
-  // peek index is essentially a type-shape change.)
-  // Actually for iScalar<iScalar<iScalar<vComplex>>>, the field is
-  // already at depth-3 scalar; we treat it as a LatticeComplex equivalent.
-  // Grid's tensor algebra allows direct multiplication of LatticeComplex *
-  // LatticeFermion.
-  // (No explicit peek needed -- assign-cast via the depth=3 scalar.)
+  // Under transpose_aux (SIGMA_PI_HERMITIAN_ONLY for the lower block):
+  // applies σ^T (joint color+flavor transpose) instead of σ.
+  // (σ^T)_{(a,i),(b,j)} = σ_{(b,j),(a,i)} → peek with swapped flavor
+  // indices and transpose the color matrix.
   for (int a = 0; a < DtxqcdNf; ++a) {
     LatticeFermion acc(grid);
     acc.Checkerboard() = cb;
@@ -134,8 +131,12 @@ inline void DtxqcdApplyX(const LatticeDtxqcdSigma &sigma,
 
     // Color-flavor matrix contributions.
     for (int b = 0; b < DtxqcdNf; ++b) {
-      LatticeColourMatrix sig_ab = PeekIndex<1>(sigma, a, b);
-      LatticeColourMatrix pi_ab  = PeekIndex<1>(pi,    a, b);
+      LatticeColourMatrix sig_ab =
+          transpose_aux ? LatticeColourMatrix(transpose(PeekIndex<1>(sigma, b, a)))
+                        : LatticeColourMatrix(PeekIndex<1>(sigma, a, b));
+      LatticeColourMatrix pi_ab  =
+          transpose_aux ? LatticeColourMatrix(transpose(PeekIndex<1>(pi,    b, a)))
+                        : LatticeColourMatrix(PeekIndex<1>(pi,    a, b));
       acc = acc + sig_ab * in.f[b];
       acc = acc + pi_ab  * g5_in[b];
     }
@@ -162,13 +163,18 @@ inline void DtxqcdApplyDeltaDiag(const LatticeDtxqcdSigma &sigma,
 // Apply +X (lower block).  v2 corrected (2026-06-12): the lower block now
 // has +X (same sign as upper), matching M_lower = -C D^T C + X.  Old impl
 // applied -X following the superseded M_lower = C D^T C - X form.
+//
+// Under SIGMA_PI_HERMITIAN_ONLY: applies σ^T, π^T (transposed color×flavor)
+// so the lower block matches M_lower = -C X^T C convention with σ, π just
+// Hermitian (not real-symm).
 inline void DtxqcdApplyDeltaDiagLower(const LatticeDtxqcdSigma &sigma,
                                       const LatticeDtxqcdPi    &pi,
                                       const LatticeDtxqcdS     &s,
                                       const LatticeDtxqcdP     &p,
                                       const DTXQCDFermionNf    &in,
                                       DTXQCDFermionNf          &out) {
-  DtxqcdApplyX(sigma, pi, s, p, in, out, +1.0);
+  DtxqcdApplyX(sigma, pi, s, p, in, out, +1.0,
+               /*transpose_aux=*/DtxqcdSigmaPiHermitianOnly());
 }
 
 // Apply the off-diagonal sqrt(2) * (d gamma5 + n) insertion (OVERWRITE).
@@ -180,14 +186,23 @@ inline void DtxqcdApplyDeltaDiagLower(const LatticeDtxqcdSigma &sigma,
 // v2 corrected (2026-06-12): factor sqrt(2) per dtxqcd_v2.tex Eq 22-25.
 // (v1 had factor 2; the earlier "v2 absorbs it" comment was based on an
 // incorrect derivation, since corrected.)
+// Apply the off-diagonal (d γ5 + n) coupling.  Two directions exist:
+//   in.lower → out.upper: uses M_UR = +c·(d γ5 + n)        [apply_conj=false]
+//   in.upper → out.lower: uses M_LL                         [apply_conj=true]
+// Under DN_COMPLEX_SYMMETRIC, M_LL = conj(M_UR), so the upper→lower call
+// uses conj(d), conj(n) on the inner color×flavor block.  Default
+// (apply_conj=false) preserves backwards compatibility for the lower→upper
+// direction.
 inline void DtxqcdApplyDnCross(const LatticeDtxqcdD     &d,
                                 const LatticeDtxqcdN     &n,
                                 const DTXQCDFermionNf    &in,
-                                DTXQCDFermionNf          &out) {
+                                DTXQCDFermionNf          &out,
+                                bool                      apply_conj = false) {
   GridBase *grid = in.Grid();
   Gamma g5(Gamma::Algebra::Gamma5);
   int cb = in.f[0].Checkerboard();
   const RealD sqrt2 = DtxqcdOffdiagFactor();
+  const bool use_conj = apply_conj && DtxqcdDnComplexSymmetric();
 
   std::array<LatticeFermion, DtxqcdNf> g5_in =
       DTXQCDFermionNf::MakeArray(grid, std::make_index_sequence<DtxqcdNf>{});
@@ -199,8 +214,12 @@ inline void DtxqcdApplyDnCross(const LatticeDtxqcdD     &d,
     acc = Zero();
     acc.Checkerboard() = cb;
     for (int b = 0; b < DtxqcdNf; ++b) {
-      LatticeColourMatrix d_ab = PeekIndex<1>(d, a, b);
-      LatticeColourMatrix n_ab = PeekIndex<1>(n, a, b);
+      LatticeColourMatrix d_ab =
+          use_conj ? LatticeColourMatrix(conjugate(PeekIndex<1>(d, a, b)))
+                   : LatticeColourMatrix(PeekIndex<1>(d, a, b));
+      LatticeColourMatrix n_ab =
+          use_conj ? LatticeColourMatrix(conjugate(PeekIndex<1>(n, a, b)))
+                   : LatticeColourMatrix(PeekIndex<1>(n, a, b));
       acc = acc + d_ab * g5_in[b];
       acc = acc + n_ab * in.f[b];
     }

@@ -98,6 +98,19 @@ int main(int argc, char **argv) {
   DtxqcdHermitianCFGaussian(pRNG, Y.d);
   DtxqcdHermitianCFGaussian(pRNG, Y.n);
 
+  // Env-gated alternative projections (must match the HMC subspace the
+  // force kernel was derived for; otherwise FD samples a different manifold).
+  if (DtxqcdDnComplexSymmetric()) {
+    DtxqcdRealSymmetricCFInPlace(U.sigma);
+    DtxqcdRealSymmetricCFInPlace(U.pi);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, U.d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, U.n);
+    DtxqcdRealSymmetricCFInPlace(Y.sigma);
+    DtxqcdRealSymmetricCFInPlace(Y.pi);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, Y.d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, Y.n);
+  }
+
   const RealD mass = 0.4;
   const RealD h    = 1e-4;
 

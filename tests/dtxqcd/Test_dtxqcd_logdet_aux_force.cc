@@ -98,6 +98,26 @@ int main(int argc, char **argv) {
   DtxqcdRealScalarGaussian(pRNG, Y.s);
   DtxqcdRealScalarGaussian(pRNG, Y.p);
 
+  // Apply env-gated alternative projections (must match the HMC subspace
+  // that the force kernel was derived for; otherwise FD samples a
+  // different manifold than the analytic force gradient).
+  // Under DN_COMPLEX_SYMMETRIC: σ/π real-symm; d/n re-generated as truly
+  // complex-symmetric (raw Gaussian + complex-symm proj — keeps imag DOFs).
+  // Under SIGMA_PI_HERMITIAN_ONLY: σ/π stay Hermitian; d/n still truly
+  // complex-symmetric.
+  if (DtxqcdDnComplexSymmetric()) {
+    if (!DtxqcdSigmaPiHermitianOnly()) {
+      DtxqcdRealSymmetricCFInPlace(U.sigma);
+      DtxqcdRealSymmetricCFInPlace(U.pi);
+      DtxqcdRealSymmetricCFInPlace(Y.sigma);
+      DtxqcdRealSymmetricCFInPlace(Y.pi);
+    }
+    DtxqcdComplexSymmetricCFGaussian(pRNG, U.d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, U.n);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, Y.d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, Y.n);
+  }
+
   const RealD mass = 0.4;
   // FD step: 1e-6 is the v1 value.  The Mooee +4 normalization bug fix
   // grew |S| ~ 35x and |dS/dh| in the all-aux directions accordingly, so

@@ -93,8 +93,10 @@ int main(int argc, char **argv) {
 
   GridSerialRNG   sRNG;
   GridParallelRNG pRNG(&Grid_);
-  sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
-  pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+  int rng_off = 0;
+  if (const char *v = std::getenv("RNG_SEED_OFFSET"); v && *v) rng_off = std::atoi(v);
+  sRNG.SeedFixedIntegers({1 + rng_off, 2 + rng_off, 3 + rng_off, 4 + rng_off, 5 + rng_off});
+  pRNG.SeedFixedIntegers({6 + rng_off, 7 + rng_off, 8 + rng_off, 9 + rng_off, 10 + rng_off});
 
   RealD beta_dummy = 6.0;
   DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_dummy);
@@ -153,7 +155,7 @@ int main(int argc, char **argv) {
                                               lambda_run, mass_run, csw_run,
                                               Sigma_init, max_iter, aux_tol);
   } else {
-    pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+    pRNG.SeedFixedIntegers({6 + rng_off, 7 + rng_off, 8 + rng_off, 9 + rng_off, 10 + rng_off});
     DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_run, Sigma_init);
     std::cout << GridLogMessage
               << "Aux seeded at bare saddle Σ=" << Sigma_init << std::endl;
@@ -201,7 +203,7 @@ int main(int argc, char **argv) {
     std::cout << GridLogMessage << "SAVE_TRACE=" << trace_path
               << " (cfg every " << meas_skip << " trajs)" << std::endl;
   }
-  int fierz_avg_n_noise = 0;
+  int fierz_avg_n_noise = 16;
   if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
     fierz_avg_n_noise = std::atoi(v);
   if (fierz_avg_n_noise > 0) {

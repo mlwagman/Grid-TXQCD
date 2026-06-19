@@ -178,7 +178,8 @@ inline void DtxqcdBuildDiagBlock24(double mass,
                                     const DtxqcdSiteAux& aux,
                                     const DtxqcdSpinMatrices& spin,
                                     Eigen::MatrixXcd& M,
-                                    double block_sign = +1.0) {
+                                    double block_sign = +1.0,
+                                    bool transpose_aux = false) {
   // Mooee diagonal = (mass + 4) per Grid's WilsonFermion convention.
   const double mass_diag = mass + 4.0;
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
@@ -191,8 +192,15 @@ inline void DtxqcdBuildDiagBlock24(double mass,
         for (int j = 0; j < Nc; ++j) {
           int kab1 = DtxqcdSiteAux::Kab(a, i);
           int kab2 = DtxqcdSiteAux::Kab(b, j);
-          ComplexD sig_ij_ab = aux.sigma(kab1, kab2);
-          ComplexD pi_ij_ab  = aux.pi   (kab1, kab2);
+          // Under SIGMA_PI_HERMITIAN_ONLY the lower block reads σ^T and π^T
+          // (= -C σ^T C, since σ, π have no spin and C·1·C=1).  This
+          // restores Pf antisymmetry while keeping σ, π Hermitian (so the
+          // H-S Gaussian integral is over the full Hermitian subspace and
+          // the Fierz identity is exact).
+          int aab = transpose_aux ? kab2 : kab1;
+          int bab = transpose_aux ? kab1 : kab2;
+          ComplexD sig_ij_ab = aux.sigma(aab, bab);
+          ComplexD pi_ij_ab  = aux.pi   (aab, bab);
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int row = DtxqcdSiteIdx24(a, alpha, i);
             // Scalar sigma: diagonal in spin.
@@ -295,7 +303,12 @@ inline void DtxqcdBuildLowerBlock24(double mass,
   // confirms the lower block has +X (matching the upper block).  -C D^T C =
   // D[U*] for the kinetic part (verified for mass + Wilson hopping + clover
   // when the clover prefactor sign is correctly handled).
-  DtxqcdBuildDiagBlock24(mass, aux, spin, M, +1.0);
+  //
+  // Under SIGMA_PI_HERMITIAN_ONLY mode: M_lower uses σ^T, π^T (the natural
+  // -C X^T C with C acting trivially on the spinless σ, π).  Restores Pf
+  // antisymmetry with Hermitian (not real-symm) σ, π.
+  const bool transpose_aux = DtxqcdSigmaPiHermitianOnly();
+  DtxqcdBuildDiagBlock24(mass, aux, spin, M, +1.0, transpose_aux);
   if (csw != 0.0 && clover != nullptr)
     DtxqcdAddCloverToDiagBlock24(csw, *clover, spin, M, /*lower_block=*/true);
 }
@@ -344,9 +357,10 @@ inline void DtxqcdAssembleDoubled48(const Eigen::MatrixXcd& M_upper,
   const int N = kDtxqcdSiteDim24;
   M48.block(0, 0, N, N) = M_upper;
   M48.block(0, N, N, N) = M_offdiag;
-  // Default: M_LL = M_UR (Hermitian d, n implicit symmetry).
-  // Under DTXQCD_DN_COMPLEX_SYMMETRIC: M_LL = conj(M_UR), enforcing the
-  // "d in UR, d* in LL" form per the algebraic complex-d/n derivation.
+  // Under DTXQCD_DN_COMPLEX_SYMMETRIC: M_LL = conj(M_UR), the "d, d*
+  // independent" form.  This must match the on-the-fly Apply path
+  // (DtxqcdApplyDnCross with apply_conj=true) — both use conj
+  // CONSISTENTLY to satisfy Mooee * MooeeInv = I.
   M48.block(N, 0, N, N) = DtxqcdDnComplexSymmetric()
                               ? M_offdiag.conjugate()
                               : M_offdiag;

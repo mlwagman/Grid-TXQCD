@@ -306,8 +306,8 @@ class DTXQCDWilsonCloverFermionEO {
     DtxqcdApplyDeltaDiagLower(sigma_, pi_, s_, p_, in.lower, delta_l);
 
     DTXQCDFermionNf cross_u(grid), cross_l(grid);
-    DtxqcdApplyDnCross(d_, n_, in.lower, cross_u);
-    DtxqcdApplyDnCross(d_, n_, in.upper, cross_l);
+    DtxqcdApplyDnCross(d_, n_, in.lower, cross_u, /*apply_conj=*/false);  // M_UR
+    DtxqcdApplyDnCross(d_, n_, in.upper, cross_l, /*apply_conj=*/true);   // M_LL = conj(M_UR) under DN_COMPLEX_SYMMETRIC
 
     for (int a = 0; a < DtxqcdNf; ++a) {
       out.upper.f[a] = out.upper.f[a] + delta_u.f[a] + cross_u.f[a];

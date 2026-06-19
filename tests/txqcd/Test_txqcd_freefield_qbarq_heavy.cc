@@ -32,10 +32,7 @@
 
 #include "Test_txqcd_2pt_clover_optlam_utils.h"
 #include "Test_txqcd_fierz_check_utils.h"
-#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalEOAction.h>
-#include <Grid/qcd/action/txqcd/TXQCDWilsonCloverRationalEOAction.h>
-#include <Grid/qcd/action/txqcd/TXQCDLogDetEOAction.h>
-#include <Grid/qcd/action/txqcd/TXQCDLogDetCloverEOAction.h>
+#include <Grid/qcd/action/txqcd/TXQCDWilsonRationalPseudoFermionAction.h>
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 
 using namespace TxqcdTest2ptCloverOptlam;
@@ -54,9 +51,9 @@ int main(int argc, char **argv) {
   RealD csw_run    = 0.0;
   int mdsteps      = 4;
   RealD trajL      = 1.0;
-  int n_therm_run  = 10;
-  int n_prod_run   = 20;
-  int meas_skip_run = 4;
+  int n_therm_run  = 30;
+  int n_prod_run   = 40;
+  int meas_skip_run = 5;
   bool dh_only     = false;          // if true, no Metropolis (pure dH probe)
   std::string cfg_dir = "free_txqcd";
 
@@ -129,28 +126,24 @@ int main(int argc, char **argv) {
             << "  RHMC bracket: lo=" << rat_lo << " hi=" << rat_hi
             << " degree=" << rat_deg << std::endl;
 
-  // EO action stack mirroring production: RationalEO on M_pc covers
-  // |det M_pc|, LogDet on M_ee covers |det M_ee|; together = |det M_TX|.
-  // Csw=0 uses the Wilson EO variants; csw≠0 the WilsonClover EO variants.
+  // Non-EO action stack: full-volume RHMC pseudofermion on M_TX alone.
+  // |Pf(...)| or |det| weight is covered entirely by PF_wilson; no LogDet
+  // needed.  csw≠0 is not supported in this stack — use the EO sibling
+  // (Test_txqcd_freefield_qbarq_eo) which pairs RationalEO with LogDet.
+  if (csw_run != 0.0) {
+    std::cout << GridLogMessage
+              << "[Test_txqcd_freefield_qbarq] non-EO stack requires csw=0; "
+                 "got csw=" << csw_run << " — use the _eo sibling instead."
+              << std::endl;
+    Grid_finalize();
+    return 1;
+  }
   AuxiliaryFieldGaussianAction AuxAction(lambda_run);
-  TXQCDWilsonRationalEOAction        PF_wilson_eo(Grid, RBGrid,
-                                                   mass_run, rat_params);
-  TXQCDWilsonCloverRationalEOAction  PF_clover_eo(Grid, RBGrid,
-                                                   mass_run, rat_params,
-                                                   csw_run);
-  TXQCDLogDetEOAction                LogDet_wilson(Grid, RBGrid, mass_run);
-  TXQCDLogDetCloverEOAction          LogDet_clover(Grid, RBGrid,
-                                                   mass_run, csw_run);
-  Action<TXQCDField> *PF = (csw_run == 0.0)
-                            ? (Action<TXQCDField> *)&PF_wilson_eo
-                            : (Action<TXQCDField> *)&PF_clover_eo;
-  Action<TXQCDField> *LogDet = (csw_run == 0.0)
-                            ? (Action<TXQCDField> *)&LogDet_wilson
-                            : (Action<TXQCDField> *)&LogDet_clover;
+  TXQCDWilsonRationalPseudoFermionAction PF_wilson(Grid, RBGrid,
+                                                    mass_run, rat_params);
+  Action<TXQCDField> *PF = (Action<TXQCDField> *)&PF_wilson;
   std::cout << GridLogMessage << "  PF: " << PF->action_name()
-            << "  LogDet: " << LogDet->action_name()
-            << "  csw=" << csw_run
-            << " (EO stack: RationalEO + LogDet)" << std::endl;
+            << "  csw=" << csw_run << " (non-EO stack: PF only)" << std::endl;
 
   // FREEZE gauge by zeroing gauge momentum (TXQCD_FREEZE_GAUGE knob, read by
   // TXQCDCompositeImpl::generate_momenta).  No gauge action needed — U just
@@ -163,7 +156,6 @@ int main(int argc, char **argv) {
   typedef Representations<EmptyRep<TXQCDField>> Reps;
   ActionLevel<TXQCDField, Reps> L1(1);
   L1.push_back(PF);
-  L1.push_back(LogDet);
   L1.push_back(&AuxAction);
   ActionSet<TXQCDField, Reps> Aset;
   Aset.push_back(L1);
@@ -235,7 +227,7 @@ int main(int argc, char **argv) {
     ckpt.reset(new TXQCDCheckpointer(CPp));
     Obs.push_back(ckpt.get());
   }
-  int fierz_avg_n_noise = 0;
+  int fierz_avg_n_noise = 16;
   if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
     fierz_avg_n_noise = std::atoi(v);
   if (fierz_avg_n_noise > 0) {
@@ -262,11 +254,11 @@ int main(int argc, char **argv) {
 
   TxqcdFierzCheckResult result;
   if (avg_obs) {
-    result = avg_obs->finalize(pass_tol, "Test_txqcd_freefield_qbarq_eo");
+    result = avg_obs->finalize(pass_tol, "Test_txqcd_freefield_qbarq");
   } else {
     result = TxqcdFierzCheck(U, Grid, RBGrid, mass_run, csw_run,
                               n_noise, meas_cg_tol, pass_tol,
-                              "Test_txqcd_freefield_qbarq_eo");
+                              "Test_txqcd_freefield_qbarq");
   }
 
   Grid_finalize();

@@ -192,6 +192,17 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
                           GridSerialRNG &sRNG,
                           GridParallelRNG &pRNG) override {
     if (traj < n_skip_) return;
+    // Inter-measurement stride to reduce autocorrelation in the per-traj
+    // sample list (default 5 — safer than measuring every traj since
+    // HMC autocorr at light mass is several trajs).  Override with
+    // FIERZ_AVG_MEAS_STRIDE=K (K=1 disables striding).
+    static const int meas_stride = []() {
+      if (const char *v = std::getenv("FIERZ_AVG_MEAS_STRIDE"); v && *v) {
+        return std::atoi(v);
+      }
+      return 5;
+    }();
+    if (meas_stride > 1 && ((traj - n_skip_) % meas_stride) != 0) return;
     RealD V = (RealD)grid_.gSites();
     auto tr_sigma = TensorRemove(sum(trace(U.sigma)));
     auto tr_pi    = TensorRemove(sum(trace(U.pi)));
@@ -215,9 +226,11 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
     noisePRNG.SeedFixedIntegers({2000 + 7 * traj, 2100 + 7 * traj,
                                   2200 + 7 * traj, 2300 + 7 * traj,
                                   2400 + 7 * traj});
+    // Use 4× the noise count for the plain-Wilson reference so its
+    // stochastic error is sub-dominant to the TXQCD aux-side error.
     RealD sigma_w = TxqcdFierzPlainWilsonTrminv(U.U, grid_, rbgrid_,
                                                  noisePRNG, mass_, csw_,
-                                                 n_noise_per_traj_, cg_tol_);
+                                                 4 * n_noise_per_traj_, cg_tol_);
     sigma_tx_.push_back(sigma_tx);
     sigma_w_.push_back(sigma_w);
     ratio_.push_back(sigma_tx / sigma_w);
@@ -255,7 +268,10 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
     RealD ratio_std = stdev(ratio_, mean(ratio_));
     RealD ratio_se = ratio_std / std::sqrt((RealD)N);
     RealD dev = std::fabs(ratio - 1.0);
-    bool pass = dev < pass_tol;
+    // PASS requires BOTH: |dev| < absolute tol AND dev < 3·SE (statistical).
+    bool pass_abs   = dev < pass_tol;
+    bool pass_3sig  = dev < 3.0 * ratio_se;
+    bool pass       = pass_abs && pass_3sig;
 
     // Saddle predictions for aux VEVs (free-field, isotropic flavor/color):
     //   ⟨Tr σ⟩ = Nf · Σ_W / λ²            (flavor Hermitian Nf×Nf)
@@ -304,7 +320,10 @@ class TxqcdFierzAveragingObserver : public HmcObservable<TXQCDField> {
               << "ratio  Σ_TX/Σ_W = " << ratio
               << " ± " << ratio_se << " (SE)"
               << "   |dev| = " << dev
-              << "   tol = " << pass_tol << std::endl;
+              << "   tol = " << pass_tol
+              << "   abs=" << (pass_abs ? "PASS" : "FAIL")
+              << "   3σ=" << (pass_3sig ? "PASS" : "FAIL")
+              << std::endl;
     // Aux VEV saddle checks (lambda=" << lambda_ << ", Nf=" << TxqcdNf << ")
     std::cout << GridLogMessage
               << "⟨Tr σ⟩ saddle: obs=" << mean_tr_sigma

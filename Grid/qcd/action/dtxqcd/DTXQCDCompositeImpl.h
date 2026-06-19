@@ -75,7 +75,7 @@ static inline bool DtxqcdDnComplexSymmetric() {
                 << std::endl;
       return on;
     }
-    return false;
+    return true;  // ON by default (Pfaffian-antisymmetry restored)
   }();
   return b;
 }
@@ -84,6 +84,28 @@ static inline bool DtxqcdDnComplexSymmetric() {
 // real-symmetric instead of merely Hermitian.  Restores formal Pfaffian
 // antisymmetry per the v2 algebra.  Default OFF (d, n stay Hermitian per
 // the empirically-verified-at-factor=1 setup).
+// Cached env knob: DTXQCD_SIGMA_PI_HERMITIAN_ONLY=1 leaves σ, π merely
+// Hermitian (skips the real-symmetric projection) under DN_COMPLEX_SYMMETRIC.
+// Used to isolate the σ/π real-symm vs d/n complex-symm contributions to
+// any Fierz violation.  Default OFF (σ, π get real-symm projection when
+// DN_COMPLEX_SYMMETRIC is ON).
+static inline bool DtxqcdSigmaPiHermitianOnly() {
+  static const bool b = []() {
+    if (const char *v = std::getenv("DTXQCD_SIGMA_PI_HERMITIAN_ONLY"); v && *v) {
+      bool on = std::atoi(v) != 0;
+      std::cout << GridLogMessage
+                << "[DTXQCD] SIGMA_PI_HERMITIAN_ONLY = " << (on ? "ON" : "OFF")
+                << "  (under DN_COMPLEX_SYMMETRIC: σ, π stay Hermitian, "
+                   "skip real-symm projection)"
+                << std::endl;
+      return on;
+    }
+    return true;  // ON by default — sigmaHerm is the correct convention
+                  // (preserves all aux DOFs for the H-S decoupling)
+  }();
+  return b;
+}
+
 static inline bool DtxqcdDnRealSymmetric() {
   static const bool b = []() {
     if (const char *v = std::getenv("DTXQCD_DN_REAL_SYMMETRIC"); v && *v) {
@@ -156,6 +178,18 @@ inline void DtxqcdHermitianCFGaussian(GridParallelRNG &pRNG,
   DtxqcdHermitizeAndTracelessCFInPlace(X);
 }
 
+// True complex-symmetric Gaussian: full complex Gaussian then complex-symm
+// project (preserving imaginary parts).  Generates d, n in the
+// "d, d* independent" form needed for the formal H-S decoupling under
+// DN_COMPLEX_SYMMETRIC.  (Distinct from
+// Hermitian-then-complex-symm which collapses to real-symmetric and loses
+// the imaginary-part DOFs.)
+inline void DtxqcdComplexSymmetricCFGaussian(GridParallelRNG &pRNG,
+                                              LatticeDtxqcdSigma &X) {
+  gaussian(pRNG, X);
+  DtxqcdComplexSymmetricCFInPlace(X);
+}
+
 // Real projection for singlet scalar (zero out imag part of the vComplex
 // container).  Same idiom as the v1 triplet real-projection.
 inline void DtxqcdRealScalarProjectInPlace(LatticeDtxqcdS &X) {
@@ -196,8 +230,18 @@ class DTXQCDCompositeImpl {
     RealD scale = ::sqrt(HMC_MOMENTUM_DENOMINATOR);
     DtxqcdHermitianCFGaussian(pRNG, P.sigma);  P.sigma = scale * P.sigma;
     DtxqcdHermitianCFGaussian(pRNG, P.pi);     P.pi    = scale * P.pi;
-    DtxqcdHermitianCFGaussian(pRNG, P.d);      P.d     = scale * P.d;
-    DtxqcdHermitianCFGaussian(pRNG, P.n);      P.n     = scale * P.n;
+    // Under DN_COMPLEX_SYMMETRIC: d, n generated as raw complex Gaussian
+    // then complex-symm projected (preserves imaginary parts → truly
+    // complex-symm, NOT real-symm).  Otherwise Hermitian.
+    if (DtxqcdDnComplexSymmetric()) {
+      DtxqcdComplexSymmetricCFGaussian(pRNG, P.d);
+      DtxqcdComplexSymmetricCFGaussian(pRNG, P.n);
+    } else {
+      DtxqcdHermitianCFGaussian(pRNG, P.d);
+      DtxqcdHermitianCFGaussian(pRNG, P.n);
+    }
+    P.d = scale * P.d;
+    P.n = scale * P.n;
     DtxqcdRealScalarGaussian(pRNG, P.s);       P.s     = scale * P.s;
     DtxqcdRealScalarGaussian(pRNG, P.p);       P.p     = scale * P.p;
     if (DtxqcdDnColorTraceless()) {
@@ -208,6 +252,13 @@ class DTXQCDCompositeImpl {
       DtxqcdRealSymmetricCFInPlace(P.d);
       DtxqcdRealSymmetricCFInPlace(P.n);
     }
+    if (DtxqcdDnComplexSymmetric()) {
+      if (!DtxqcdSigmaPiHermitianOnly()) {
+        DtxqcdRealSymmetricCFInPlace(P.sigma);
+        DtxqcdRealSymmetricCFInPlace(P.pi);
+      }
+      // d, n already complex-symm from generation; no re-projection needed.
+    }
   }
 
   static inline Field projectForce(Field &Fforce) {
@@ -215,8 +266,14 @@ class DTXQCDCompositeImpl {
     out.U = PeriodicGimplR::projectForce(Fforce.U);
     out.sigma = Fforce.sigma;  DtxqcdHermitizeAndTracelessCFInPlace(out.sigma);
     out.pi    = Fforce.pi;     DtxqcdHermitizeAndTracelessCFInPlace(out.pi);
-    out.d     = Fforce.d;      DtxqcdHermitizeAndTracelessCFInPlace(out.d);
-    out.n     = Fforce.n;      DtxqcdHermitizeAndTracelessCFInPlace(out.n);
+    // Under DN_COMPLEX_SYMMETRIC: skip Hermitize for d, n (Hermitize +
+    // then complex-symm collapses to real-symm, losing imag DOFs).
+    out.d     = Fforce.d;
+    out.n     = Fforce.n;
+    if (!DtxqcdDnComplexSymmetric()) {
+      DtxqcdHermitizeAndTracelessCFInPlace(out.d);
+      DtxqcdHermitizeAndTracelessCFInPlace(out.n);
+    }
     out.s     = Fforce.s;      DtxqcdRealScalarProjectInPlace(out.s);
     out.p     = Fforce.p;      DtxqcdRealScalarProjectInPlace(out.p);
     if (DtxqcdDnColorTraceless()) {
@@ -226,6 +283,14 @@ class DTXQCDCompositeImpl {
     if (DtxqcdDnRealSymmetric()) {
       DtxqcdRealSymmetricCFInPlace(out.d);
       DtxqcdRealSymmetricCFInPlace(out.n);
+    }
+    if (DtxqcdDnComplexSymmetric()) {
+      if (!DtxqcdSigmaPiHermitianOnly()) {
+        DtxqcdRealSymmetricCFInPlace(out.sigma);
+        DtxqcdRealSymmetricCFInPlace(out.pi);
+      }
+      DtxqcdComplexSymmetricCFInPlace(out.d);
+      DtxqcdComplexSymmetricCFInPlace(out.n);
     }
     return out;
   }
@@ -258,8 +323,10 @@ class DTXQCDCompositeImpl {
     PeriodicGimplR::Project(U.U);
     DtxqcdHermitizeAndTracelessCFInPlace(U.sigma);
     DtxqcdHermitizeAndTracelessCFInPlace(U.pi);
-    DtxqcdHermitizeAndTracelessCFInPlace(U.d);
-    DtxqcdHermitizeAndTracelessCFInPlace(U.n);
+    if (!DtxqcdDnComplexSymmetric()) {
+      DtxqcdHermitizeAndTracelessCFInPlace(U.d);
+      DtxqcdHermitizeAndTracelessCFInPlace(U.n);
+    }
     DtxqcdRealScalarProjectInPlace(U.s);
     DtxqcdRealScalarProjectInPlace(U.p);
     if (DtxqcdDnColorTraceless()) {
@@ -270,14 +337,27 @@ class DTXQCDCompositeImpl {
       DtxqcdRealSymmetricCFInPlace(U.d);
       DtxqcdRealSymmetricCFInPlace(U.n);
     }
+    if (DtxqcdDnComplexSymmetric()) {
+      if (!DtxqcdSigmaPiHermitianOnly()) {
+        DtxqcdRealSymmetricCFInPlace(U.sigma);
+        DtxqcdRealSymmetricCFInPlace(U.pi);
+      }
+      DtxqcdComplexSymmetricCFInPlace(U.d);
+      DtxqcdComplexSymmetricCFInPlace(U.n);
+    }
   }
 
   static inline void HotConfiguration(GridParallelRNG &pRNG, Field &U) {
     PeriodicGimplR::HotConfiguration(pRNG, U.U);
     DtxqcdHermitianCFGaussian(pRNG, U.sigma);
     DtxqcdHermitianCFGaussian(pRNG, U.pi);
-    DtxqcdHermitianCFGaussian(pRNG, U.d);
-    DtxqcdHermitianCFGaussian(pRNG, U.n);
+    if (DtxqcdDnComplexSymmetric()) {
+      DtxqcdComplexSymmetricCFGaussian(pRNG, U.d);
+      DtxqcdComplexSymmetricCFGaussian(pRNG, U.n);
+    } else {
+      DtxqcdHermitianCFGaussian(pRNG, U.d);
+      DtxqcdHermitianCFGaussian(pRNG, U.n);
+    }
     DtxqcdRealScalarGaussian(pRNG, U.s);
     DtxqcdRealScalarGaussian(pRNG, U.p);
     if (DtxqcdDnColorTraceless()) {
@@ -287,6 +367,13 @@ class DTXQCDCompositeImpl {
     if (DtxqcdDnRealSymmetric()) {
       DtxqcdRealSymmetricCFInPlace(U.d);
       DtxqcdRealSymmetricCFInPlace(U.n);
+    }
+    if (DtxqcdDnComplexSymmetric()) {
+      if (!DtxqcdSigmaPiHermitianOnly()) {
+        DtxqcdRealSymmetricCFInPlace(U.sigma);
+        DtxqcdRealSymmetricCFInPlace(U.pi);
+      }
+      // d, n already truly complex-symm from generation.
     }
   }
 
@@ -334,8 +421,15 @@ class DTXQCDCompositeImpl {
     RealD scale = 1.0 / lambda_var;
     DtxqcdHermitianCFGaussian(pRNG, U.sigma);  U.sigma = scale * U.sigma;
     DtxqcdHermitianCFGaussian(pRNG, U.pi);     U.pi    = scale * U.pi;
-    DtxqcdHermitianCFGaussian(pRNG, U.d);      U.d     = scale * U.d;
-    DtxqcdHermitianCFGaussian(pRNG, U.n);      U.n     = scale * U.n;
+    if (DtxqcdDnComplexSymmetric()) {
+      DtxqcdComplexSymmetricCFGaussian(pRNG, U.d);
+      DtxqcdComplexSymmetricCFGaussian(pRNG, U.n);
+    } else {
+      DtxqcdHermitianCFGaussian(pRNG, U.d);
+      DtxqcdHermitianCFGaussian(pRNG, U.n);
+    }
+    U.d = scale * U.d;
+    U.n = scale * U.n;
     DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale * U.s;
     DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale * U.p;
     if (DtxqcdDnColorTraceless()) {
@@ -345,6 +439,13 @@ class DTXQCDCompositeImpl {
     if (DtxqcdDnRealSymmetric()) {
       DtxqcdRealSymmetricCFInPlace(U.d);
       DtxqcdRealSymmetricCFInPlace(U.n);
+    }
+    if (DtxqcdDnComplexSymmetric()) {
+      if (!DtxqcdSigmaPiHermitianOnly()) {
+        DtxqcdRealSymmetricCFInPlace(U.sigma);
+        DtxqcdRealSymmetricCFInPlace(U.pi);
+      }
+      // d, n already truly complex-symm from generation.
     }
 
     if (Sigma != 0.0) {

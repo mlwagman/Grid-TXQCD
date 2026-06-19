@@ -10,8 +10,8 @@ TESTS_LIST = \
   Test_dtxqcd_clover_herm \
   Test_dtxqcd_delta_diag_lower \
   Test_dtxqcd_delta_herm \
-  Test_dtxqcd_freefield_qbarq \
-  Test_dtxqcd_freefield_qbarq_eo \
+  Test_dtxqcd_freefield_qbarq_heavy \
+  Test_dtxqcd_freefield_qbarq_eo_heavy \
   Test_dtxqcd_freefield_qbarq_eo_light \
   Test_dtxqcd_freefield_qbarq_light \
   Test_dtxqcd_g5M_evals \
@@ -52,8 +52,8 @@ Test_dtxqcd_aux_io_SOURCES = Test_dtxqcd_aux_io.cc
 Test_dtxqcd_clover_herm_SOURCES = Test_dtxqcd_clover_herm.cc
 Test_dtxqcd_delta_diag_lower_SOURCES = Test_dtxqcd_delta_diag_lower.cc
 Test_dtxqcd_delta_herm_SOURCES = Test_dtxqcd_delta_herm.cc
-Test_dtxqcd_freefield_qbarq_SOURCES = Test_dtxqcd_freefield_qbarq.cc
-Test_dtxqcd_freefield_qbarq_eo_SOURCES = Test_dtxqcd_freefield_qbarq_eo.cc
+Test_dtxqcd_freefield_qbarq_heavy_SOURCES = Test_dtxqcd_freefield_qbarq_heavy.cc
+Test_dtxqcd_freefield_qbarq_eo_heavy_SOURCES = Test_dtxqcd_freefield_qbarq_eo_heavy.cc
 Test_dtxqcd_freefield_qbarq_eo_light_SOURCES = Test_dtxqcd_freefield_qbarq_eo_light.cc
 Test_dtxqcd_freefield_qbarq_light_SOURCES = Test_dtxqcd_freefield_qbarq_light.cc
 Test_dtxqcd_g5M_evals_SOURCES = Test_dtxqcd_g5M_evals.cc

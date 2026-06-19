@@ -55,6 +55,15 @@ int main(int argc, char **argv) {
   DtxqcdRealScalarGaussian(pRNG, p);
   DtxqcdHermitianCFGaussian(pRNG, d);
   DtxqcdHermitianCFGaussian(pRNG, n);
+  // Apply env-gated subspace projections to match the operator's expectations.
+  if (DtxqcdDnComplexSymmetric()) {
+    if (!DtxqcdSigmaPiHermitianOnly()) {
+      DtxqcdRealSymmetricCFInPlace(sigma);
+      DtxqcdRealSymmetricCFInPlace(pi);
+    }
+    DtxqcdComplexSymmetricCFGaussian(pRNG, d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, n);
+  }
 
   const RealD mass = 0.4;
   const RealD csw  = 1.25;
@@ -88,8 +97,8 @@ int main(int argc, char **argv) {
     DtxqcdApplyDeltaDiag     (sigma, pi, s, p, v.upper, delta_u);
     DtxqcdApplyDeltaDiagLower(sigma, pi, s, p, v.lower, delta_l);
     DTXQCDFermionNf cross_u(&Grid), cross_l(&Grid);
-    DtxqcdApplyDnCross(d, n, v.lower, cross_u);
-    DtxqcdApplyDnCross(d, n, v.upper, cross_l);
+    DtxqcdApplyDnCross(d, n, v.lower, cross_u, /*apply_conj=*/false);
+    DtxqcdApplyDnCross(d, n, v.upper, cross_l, /*apply_conj=*/true);
     DTXQCDFermionNf clov_u(&Grid), clov_l(&Grid);
     DtxqcdApplyCloverUpper(csw, M_wrap.FieldStrength(), v.upper, clov_u);
     DtxqcdApplyCloverLower(csw, M_wrap.FieldStrength(), v.lower, clov_l);

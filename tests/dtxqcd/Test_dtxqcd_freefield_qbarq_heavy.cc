@@ -1,25 +1,26 @@
-// Test_dtxqcd_freefield_qbarq_eo:
+// Test_dtxqcd_freefield_qbarq:
 //
-// EO-stack sibling of Test_dtxqcd_freefield_qbarq.  Uses the production
-// action stack (DTXQCDWilsonCloverRationalEOAction on M_pc + LogDet on
-// M_ee + AuxGaussian).  Where the non-EO sibling tests just Full-PF on
-// M48 (which covers |det M48|^1 by itself), this test verifies the EO
-// decomposition.  Both must give the same Fierz ratio and ⟨s⟩ saddle if
-// the Pfaffian factor accounting is internally consistent.
+// Free-field unit test for ⟨q̄q⟩ + aux saddles in DTXQCD.
+// Mirror of TXQCD's Test_txqcd_freefield_qbarq.
 //
-// Setup: U=I (DTXQCD_FREEZE_GAUGE=1), m=1000 → κ ≈ 0, csw=0.  Smoke
-// defaults complete in well under a minute.
+// Setup: U=I (DTXQCD_FREEZE_GAUGE=1 keeps it that way), m=1000 → kappa≈0,
+//        csw=0.  Hopping → 0, M48 ≈ block-diag (4+m) per site + X(aux).
 //
-// Env knobs match the non-EO sibling: LAMBDA, MASS, CSW, MDSTEPS, TRAJL,
-// N_THERM, N_PROD, MEAS_SKIP, CFG_DIR, RAT_LO, RAT_HI, RAT_DEGREE,
-// FIERZ_AVG_N_NOISE, GAUGE_INIT, AUX_INIT, AUX_INIT_AUTO, PASS_TOL.
+// Predicted free-field Σ_M48 at U=I, m large (trminv_compare convention,
+// /V with σ²=2 Gaussian noise):
+//   Σ_M48 = Tr[M48^{-1}]/(V·N_F·something)·2 ≈ 2·V·48/(4+m)/V/(2·N_F)
+//         = 48/((4+m)·N_F)·2/2N_F
+// Actually simplest: Σ_M48 in trminv_block_compare normalization should be
+// 2*Tr[M48^{-1}]/V/(2·N_F) = 2*(V·48)/(4+m)/V/(2·N_F) = 48/((4+m)·N_F) = 24/(4+m) for N_F=2.
+// So Σ_M48 = Σ_W = 24/(4+m) at U=I, m large — Fierz target.
+//
+// Env knobs match TXQCD analog (LAMBDA, MASS, MDSTEPS, TRAJL, N_PROD, N_THERM, MEAS_SKIP, CFG_DIR).
 
 #include "Test_dtxqcd_2pt_utils.h"
 #include "Test_dtxqcd_fierz_check_utils.h"
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
-#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOAction.h>
-#include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
@@ -28,15 +29,17 @@ using namespace Grid;
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
+  // Quick smoke defaults — m=1000 (κ ≈ 5e-4, BC irrelevant) so the
+  // entire run completes in well under 1 min.
   RealD lambda_run = 1.0;
   RealD mass_run   = 1000.0;
   RealD csw_run    = 0.0;
   int mdsteps      = 4;
   RealD trajL      = 1.0;
-  int n_therm_run  = 10;
-  int n_prod_run   = 20;
+  int n_therm_run  = 30;
+  int n_prod_run   = 40;
   int meas_skip_run = 5;
-  std::string cfg_dir = "free_dtxqcd_eo";
+  std::string cfg_dir = "free_dtxqcd";
 
   if (const char *v = std::getenv("LAMBDA");    v && *v) lambda_run = std::atof(v);
   if (const char *v = std::getenv("MASS");      v && *v) mass_run   = std::atof(v);
@@ -49,18 +52,15 @@ int main(int argc, char **argv) {
   if (const char *v = std::getenv("CFG_DIR");   v && *v) cfg_dir = v;
 
   setenv("DTXQCD_FREEZE_GAUGE", "1", 1);
-  setenv("USE_FULL_PF", "0", 1);  // EO stack
+  setenv("USE_FULL_PF", "1", 1);  // non-EO full PF, simpler at U=I
 
   std::cout << GridLogMessage
-            << "DTXQCD FREE-FIELD EO test: lambda=" << lambda_run
+            << "DTXQCD FREE-FIELD test: lambda=" << lambda_run
             << " mass=" << mass_run << " csw=" << csw_run
             << " MDsteps=" << mdsteps << " trajL=" << trajL
             << " cfg_dir=" << cfg_dir << std::endl;
   std::cout << GridLogMessage
             << "  predicted Σ = 24/(4+m) = " << (24.0/(4.0+mass_run)) << std::endl;
-  std::cout << GridLogMessage
-            << "  EO stack: RationalEO(M_pc) + LogDet(M_ee) + AuxGaussian"
-            << std::endl;
 
   std::vector<int> latt_dims{4,4,4,8};
   Coordinate latt(latt_dims);
@@ -77,11 +77,11 @@ int main(int argc, char **argv) {
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
-  RealD beta_dummy = 6.0;
+  RealD beta_dummy = 6.0;  // unused: gauge force frozen
   DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_dummy);
   DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lambda_run);
 
-  // Rational bracket sized for M_pc spectrum at m=1000.
+  // Rational bracket sized for M48 spectrum at m=1000: eigenvalues ~ (m+4)² = 1e6.
   RealD rat_lo     = 1e4;
   RealD rat_hi     = 1e7;
   int   rat_degree = 8;
@@ -94,16 +94,15 @@ int main(int argc, char **argv) {
             << "  rational bracket: lo=" << rat_lo
             << " hi=" << rat_hi << " degree=" << rat_degree << std::endl;
 
-  // Production EO stack: RationalEO covers |det M_pc|, LogDet covers
-  // |det M_ee|, together = |det M48|.
-  DTXQCDWilsonCloverRationalEOAction
-      PF_eo(Grid, RBGrid, mass_run, rat_params, csw_run);
-  DTXQCDLogDetCloverEOAction LogDet(Grid, RBGrid, mass_run, csw_run);
+  // Non-EO action stack: Full-PF on M48 alone covers |det M48|^1 weight.
+  // DO NOT add LogDetCloverEO here (it would double-count |det M_ee|).
+  // The EO sibling test is Test_dtxqcd_freefield_qbarq_eo.
+  DTXQCDWilsonCloverRationalFullAction
+      PF_full(Grid, RBGrid, mass_run, rat_params, csw_run);
 
   typedef Representations<EmptyRep<DTXQCDField>> Reps;
   ActionLevel<DTXQCDField, Reps> L1(1);
-  L1.push_back(&PF_eo);
-  L1.push_back(&LogDet);
+  L1.push_back(&PF_full);
   L1.push_back(&AuxAction);
   ActionSet<DTXQCDField, Reps> Aset;
   Aset.push_back(L1);
@@ -132,6 +131,9 @@ int main(int argc, char **argv) {
   IntT MDyn(&Grid, MD, Aset, Smear);
   Smear.set_Field(U);
 
+  // Optional observers (off by default):
+  //   SAVE_TRACE=PATH      — write cfgs every MEAS_SKIP trajs
+  //   FIERZ_AVG_N_NOISE=K  — in-line averaging Fierz measurement
   std::unique_ptr<DTXQCDCheckpointer> ckpt;
   std::unique_ptr<DtxqcdFierzAveragingObserver> avg_obs;
   std::vector<HmcObservable<DTXQCDField> *> Obs;
@@ -148,7 +150,7 @@ int main(int argc, char **argv) {
     ckpt.reset(new DTXQCDCheckpointer(CPp));
     Obs.push_back(ckpt.get());
   }
-  int fierz_avg_n_noise = 0;
+  int fierz_avg_n_noise = 16;
   if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
     fierz_avg_n_noise = std::atoi(v);
   if (fierz_avg_n_noise > 0) {
@@ -162,6 +164,7 @@ int main(int argc, char **argv) {
   HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
   HMC.evolve();
 
+  // ===== Post-HMC Fierz check =====
   RealD pass_tol = 0.02;
   if (const char *v = std::getenv("PASS_TOL"); v && *v) pass_tol = std::atof(v);
   int n_noise = 64;
@@ -171,11 +174,11 @@ int main(int argc, char **argv) {
 
   DtxqcdFierzCheckResult result;
   if (avg_obs) {
-    result = avg_obs->finalize(pass_tol, "Test_dtxqcd_freefield_qbarq_eo");
+    result = avg_obs->finalize(pass_tol, "Test_dtxqcd_freefield_qbarq");
   } else {
     result = DtxqcdFierzCheck(U, Grid, RBGrid, mass_run, csw_run,
                                n_noise, meas_cg_tol, pass_tol,
-                               "Test_dtxqcd_freefield_qbarq_eo");
+                               "Test_dtxqcd_freefield_qbarq");
   }
 
   Grid_finalize();

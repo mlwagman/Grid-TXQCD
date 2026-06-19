@@ -268,6 +268,17 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
                           GridSerialRNG &sRNG,
                           GridParallelRNG &pRNG) override {
     if (traj < n_skip_) return;
+    // Inter-measurement stride to reduce autocorrelation in the per-traj
+    // sample list (default 5 — safer than measuring every traj since
+    // HMC autocorr at light mass is several trajs).  Override with
+    // FIERZ_AVG_MEAS_STRIDE=K (K=1 disables striding).
+    static const int meas_stride = []() {
+      if (const char *v = std::getenv("FIERZ_AVG_MEAS_STRIDE"); v && *v) {
+        return std::atoi(v);
+      }
+      return 5;
+    }();
+    if (meas_stride > 1 && ((traj - n_skip_) % meas_stride) != 0) return;
     RealD V = (RealD)grid_.gSites();
     auto tr_sigma = TensorRemove(sum(trace(U.sigma)));
     auto tr_pi    = TensorRemove(sum(trace(U.pi)));
@@ -295,9 +306,12 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
     noisePRNG.SeedFixedIntegers({2000 + 7 * traj, 2100 + 7 * traj,
                                   2200 + 7 * traj, 2300 + 7 * traj,
                                   2400 + 7 * traj});
+    // Use 4× the noise count for the plain-Wilson reference so its
+    // stochastic error is sub-dominant to the DTXQCD aux-side error
+    // when forming the ratio.
     RealD sigma_w = DtxqcdFierzPlainWilsonTrminv(U.U, grid_, rbgrid_,
                                                   noisePRNG, mass_, csw_,
-                                                  n_noise_per_traj_, cg_tol_);
+                                                  4 * n_noise_per_traj_, cg_tol_);
     sigma_dtx_.push_back(sigma_dtx);
     sigma_w_.push_back(sigma_w);
     ratio_.push_back(sigma_dtx / sigma_w);
@@ -335,14 +349,26 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
     RealD ratio_std = stdev(ratio_, mean(ratio_));
     RealD ratio_se = ratio_std / std::sqrt((RealD)N);
     RealD dev = std::fabs(ratio - 1.0);
-    bool pass = dev < pass_tol;
+    // PASS requires BOTH: |dev| < absolute tol AND dev < 3·SE (statistical).
+    bool pass_abs   = dev < pass_tol;
+    bool pass_3sig  = dev < 3.0 * ratio_se;
+    bool pass       = pass_abs && pass_3sig;
 
     // Saddle predictions for aux VEVs (free-field, isotropic):
-    //   ⟨Tr σ⟩ = 0   (σ is traceless by construction after s ← s + Tr σ shift)
-    //   ⟨s⟩    = 2 · Nf · Σ_W / λ²   (singlet absorbs the σ trace)
+    //   Under DN_COMPLEX_SYMMETRIC: σ is real-symmetric (NOT traceless), so
+    //   it shares the singlet load with s:
+    //     ⟨Tr σ⟩ = ⟨s⟩ = Nf · Σ_W / λ²
+    //   Default Hermitian-traceless convention:
+    //     ⟨Tr σ⟩ = 0,   ⟨s⟩ = 2 · Nf · Σ_W / λ²   (singlet absorbs σ trace)
     RealD lam2 = lambda_ * lambda_;
-    RealD pred_tr_sigma = 0.0;
-    RealD pred_tr_s     = 2.0 * (RealD)DtxqcdNf * mean_sigma_w / lam2;
+    RealD pred_tr_sigma, pred_tr_s;
+    if (DtxqcdDnComplexSymmetric()) {
+      pred_tr_sigma = (RealD)DtxqcdNf * mean_sigma_w / lam2;
+      pred_tr_s     = (RealD)DtxqcdNf * mean_sigma_w / lam2;
+    } else {
+      pred_tr_sigma = 0.0;
+      pred_tr_s     = 2.0 * (RealD)DtxqcdNf * mean_sigma_w / lam2;
+    }
     RealD mean_tr_sigma = mean(tr_sigma_);
     RealD mean_tr_s     = mean(tr_s_);
     RealD se_tr_sigma = stdev(tr_sigma_, mean_tr_sigma) / std::sqrt((RealD)N);
@@ -386,15 +412,22 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
               << "ratio  Σ_DTXQCD/Σ_W = " << ratio
               << " ± " << ratio_se << " (SE)"
               << "   |dev| = " << dev
-              << "   tol = " << pass_tol << std::endl;
+              << "   tol = " << pass_tol
+              << "   abs=" << (pass_abs ? "PASS" : "FAIL")
+              << "   3σ=" << (pass_3sig ? "PASS" : "FAIL")
+              << std::endl;
+    const char *pred_sigma_str = DtxqcdDnComplexSymmetric() ? "Nf·Σ/λ²" : "0 (traceless)";
+    const char *pred_s_str     = DtxqcdDnComplexSymmetric() ? "Nf·Σ/λ²" : "2·Nf·Σ/λ²";
     std::cout << GridLogMessage
               << "⟨Tr σ⟩ saddle: obs=" << mean_tr_sigma
-              << " ± " << se_tr_sigma << " (SE)  pred=0 (traceless)"
+              << " ± " << se_tr_sigma << " (SE)  pred=" << pred_sigma_str
+              << "=" << pred_tr_sigma
               << "  |dev|=" << dev_tr_sigma << "  tol=" << tol_tr_sigma
               << "  [" << (pass_tr_sigma ? "PASS" : "FAIL") << "]" << std::endl;
     std::cout << GridLogMessage
               << "⟨s⟩ saddle: obs=" << mean_tr_s
-              << " ± " << se_tr_s << " (SE)  pred=2·Nf·Σ/λ²=" << pred_tr_s
+              << " ± " << se_tr_s << " (SE)  pred=" << pred_s_str
+              << "=" << pred_tr_s
               << "  |dev|=" << dev_tr_s << "  tol=" << tol_tr_s
               << "  [" << (pass_tr_s ? "PASS" : "FAIL") << "]" << std::endl;
     std::cout << GridLogMessage

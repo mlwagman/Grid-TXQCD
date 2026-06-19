@@ -45,8 +45,8 @@ inline void DtxqcdApplyMooeeDoubled(
 
   // Off-diagonal: (d g5 + n) cross-term.  No factor of 2 in v2.
   DTXQCDFermionNf off_upper(grid), off_lower(grid);
-  DtxqcdApplyDnCross(d, n, in_lower, off_upper);  // off-upper from in_lower
-  DtxqcdApplyDnCross(d, n, in_upper, off_lower);  // off-lower from in_upper
+  DtxqcdApplyDnCross(d, n, in_lower, off_upper, /*apply_conj=*/false);  // M_UR
+  DtxqcdApplyDnCross(d, n, in_upper, off_lower, /*apply_conj=*/true);   // M_LL = conj(M_UR) under DN_COMPLEX_SYMMETRIC
 
   // Assemble out = (mass + 4) * in + diag + off.
   const double mooee_diag = mass + 4.0;

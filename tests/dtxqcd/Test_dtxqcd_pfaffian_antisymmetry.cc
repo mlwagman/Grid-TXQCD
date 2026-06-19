@@ -97,8 +97,9 @@ int main(int argc, char **argv) {
     // σ, π: real-symmetric;  d, n: complex-symmetric (transpose-symm)
     DtxqcdRealSymmetricCFInPlace(sigma);
     DtxqcdRealSymmetricCFInPlace(pi);
-    DtxqcdComplexSymmetricCFInPlace(d_field);
-    DtxqcdComplexSymmetricCFInPlace(n_field);
+    // Truly complex-symm: raw complex Gaussian + complex-symm projection.
+    DtxqcdComplexSymmetricCFGaussian(pRNG, d_field);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, n_field);
   }
 
   Coordinate site0(std::vector<int>{0, 0, 0, 0});

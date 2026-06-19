@@ -83,6 +83,11 @@ inline void AuxForceAt(InvLookup Inv,
   // superseded M_lower = C D^T C - X form).  Trace formula now:
   //   F_sigma^{ij}_{ab} = -sum_alpha [ Inv((b,alpha,j,0), (a,alpha,i,0))
   //                                  + Inv((b,alpha,j,1), (a,alpha,i,1)) ]
+  // Under SIGMA_PI_HERMITIAN_ONLY the lower block uses σ^T (= -C σ^T C),
+  // so ∂M_lower/∂σ_{(a,i),(b,j)} hits the TRANSPOSED LL position
+  // → trace contribution is Inv(kDim24+ra, kDim24+cb) (rather than the
+  // un-transposed Inv(kDim24+cb, kDim24+ra)).
+  const bool sigpi_T = DtxqcdSigmaPiHermitianOnly();
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -91,7 +96,9 @@ inline void AuxForceAt(InvLookup Inv,
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(b, alpha, j);
-            val += Inv(cb, ra) + Inv(kDim24 + cb, kDim24 + ra);
+            val += Inv(cb, ra)
+                 + (sigpi_T ? Inv(kDim24 + ra, kDim24 + cb)
+                             : Inv(kDim24 + cb, kDim24 + ra));
           }
           sig_force()(a, b)(i, j) = -val;
         }
@@ -116,7 +123,9 @@ inline void AuxForceAt(InvLookup Inv,
               if (g5 == ComplexD(0, 0)) continue;
               int ra = DtxqcdSiteIdx24(a, alpha, i);
               int cb = DtxqcdSiteIdx24(b, beta,  j);
-              val += g5 * (Inv(cb, ra) + Inv(kDim24 + cb, kDim24 + ra));
+              val += g5 * (Inv(cb, ra)
+                          + (sigpi_T ? Inv(kDim24 + ra, kDim24 + cb)
+                                      : Inv(kDim24 + cb, kDim24 + ra)));
             }
           }
           pi_force()(a, b)(i, j) = -val;
@@ -131,7 +140,19 @@ inline void AuxForceAt(InvLookup Inv,
   //   F_d^{ij}_{ab} = -sqrt(2) * sum_{alpha,beta} gamma5(alpha, beta)
   //               * [ Inv((b,beta,j,1), (a,alpha,i,0))
   //                 + Inv((b,beta,j,0), (a,alpha,i,1)) ]
+  //
+  // Under DTXQCD_DN_COMPLEX_SYMMETRIC: M48_LL = conj(M48_UR), so a single
+  // complex variable d_{(a,i),(b,j)} embeds at M48_UR_{ra, kDim24+cb} =
+  // c*g5*d AND at M48_LL_{kDim24+ra, cb} = c*g5*conj(d).  For real
+  // S = -(1/2) log|det M48| the full directional derivative is
+  //   dS/dε = 2 Re { c*g5 * [∂S/∂M_UR + conj(∂S/∂M_LL)] * Y }
+  // where ∂S/∂M_UR = -(1/4) Inv(kDim24+cb, ra) and ∂S/∂M_LL =
+  // -(1/4) Inv(cb, kDim24+ra).  Matching to AuxInnerReal = Re Tr(F * adj Y)
+  // = Re Σ F * conj(Y) requires F = conj(holomorphic) + antiholomorphic, i.e.,
+  //   F_d ∝ conj(Inv(kDim24+cb, ra)) + Inv(cb, kDim24+ra).
+  // (FD vs analytic verified at rel ~ 1e-7 in Test_dtxqcd_logdet_aux_force.)
   const RealD sqrt2 = DtxqcdOffdiagFactor();
+  const bool dn_cs = DtxqcdDnComplexSymmetric();
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -143,7 +164,16 @@ inline void AuxForceAt(InvLookup Inv,
               if (g5 == ComplexD(0, 0)) continue;
               int ra = DtxqcdSiteIdx24(a, alpha, i);
               int cb = DtxqcdSiteIdx24(b, beta,  j);
-              val += g5 * (Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra));
+              if (dn_cs) {
+                // M48_LL = conj(M48_UR): the holomorphic ∂_d (via UR) and
+                // anti-holomorphic ∂_{d*} (via LL) contribute; AuxInnerReal
+                // uses conj(Y), so the holomorphic term needs a conj to
+                // land on the right Re/Im signs.
+                val += g5 * (std::conj(Inv(kDim24 + cb, ra)) + Inv(cb, kDim24 + ra));
+              } else {
+                // Hermitian d: both UR + LL positions contribute directly.
+                val += g5 * (Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra));
+              }
             }
           }
           d_force()(a, b)(i, j) = -sqrt2 * val;
@@ -157,6 +187,7 @@ inline void AuxForceAt(InvLookup Inv,
   // v2 corrected: same sqrt(2) factor as d.
   //   F_n^{ij}_{ab} = -sqrt(2) * sum_alpha [ Inv((b,alpha,j,1), (a,alpha,i,0))
   //                                        + Inv((b,alpha,j,0), (a,alpha,i,1)) ]
+  // (Same UR/LL split logic as d when DTXQCD_DN_COMPLEX_SYMMETRIC is ON.)
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -165,7 +196,11 @@ inline void AuxForceAt(InvLookup Inv,
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(b, alpha, j);
-            val += Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra);
+            if (dn_cs) {
+              val += std::conj(Inv(kDim24 + cb, ra)) + Inv(cb, kDim24 + ra);
+            } else {
+              val += Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra);
+            }
           }
           n_force()(a, b)(i, j) = -sqrt2 * val;
         }

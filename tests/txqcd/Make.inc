@@ -75,8 +75,8 @@ TESTS_LIST = \
   Test_txqcd_clover_vs_grid \
   Test_txqcd_delta_color \
   Test_txqcd_delta_sigmapi \
-  Test_txqcd_freefield_qbarq \
-  Test_txqcd_freefield_qbarq_eo \
+  Test_txqcd_freefield_qbarq_heavy \
+  Test_txqcd_freefield_qbarq_eo_heavy \
   Test_txqcd_freefield_qbarq_eo_light \
   Test_txqcd_freefield_qbarq_light \
   Test_txqcd_hasenbusch_force \
@@ -178,8 +178,8 @@ Test_txqcd_clover_psd_check_SOURCES = Test_txqcd_clover_psd_check.cc
 Test_txqcd_clover_vs_grid_SOURCES = Test_txqcd_clover_vs_grid.cc
 Test_txqcd_delta_color_SOURCES = Test_txqcd_delta_color.cc
 Test_txqcd_delta_sigmapi_SOURCES = Test_txqcd_delta_sigmapi.cc
-Test_txqcd_freefield_qbarq_SOURCES = Test_txqcd_freefield_qbarq.cc
-Test_txqcd_freefield_qbarq_eo_SOURCES = Test_txqcd_freefield_qbarq_eo.cc
+Test_txqcd_freefield_qbarq_heavy_SOURCES = Test_txqcd_freefield_qbarq_heavy.cc
+Test_txqcd_freefield_qbarq_eo_heavy_SOURCES = Test_txqcd_freefield_qbarq_eo_heavy.cc
 Test_txqcd_freefield_qbarq_eo_light_SOURCES = Test_txqcd_freefield_qbarq_eo_light.cc
 Test_txqcd_freefield_qbarq_light_SOURCES = Test_txqcd_freefield_qbarq_light.cc
 Test_txqcd_hasenbusch_force_SOURCES = Test_txqcd_hasenbusch_force.cc

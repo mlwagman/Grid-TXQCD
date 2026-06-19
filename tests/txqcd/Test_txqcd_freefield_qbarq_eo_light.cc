@@ -199,7 +199,7 @@ int main(int argc, char **argv) {
     std::cout << GridLogMessage << "SAVE_TRACE=" << trace_path
               << "  (cfg every " << meas_skip << " trajs)" << std::endl;
   }
-  int fierz_avg_n_noise = 0;
+  int fierz_avg_n_noise = 16;
   if (const char *v = std::getenv("FIERZ_AVG_N_NOISE"); v && *v)
     fierz_avg_n_noise = std::atoi(v);
   if (fierz_avg_n_noise > 0) {

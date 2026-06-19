@@ -69,8 +69,8 @@ static void ApplyMDoubled(
 
   // Off-diagonal d, n cross term (couples upper and lower).
   DTXQCDFermionNf cross_upper(grid), cross_lower(grid);
-  DtxqcdApplyDnCross(d, n, in_lower, cross_upper);
-  DtxqcdApplyDnCross(d, n, in_upper, cross_lower);
+  DtxqcdApplyDnCross(d, n, in_lower, cross_upper, /*apply_conj=*/false);
+  DtxqcdApplyDnCross(d, n, in_upper, cross_lower, /*apply_conj=*/true);
 
   // Combine the pieces so far.
   for (int a = 0; a < DtxqcdNf; ++a) {
@@ -134,6 +134,16 @@ int main(int argc, char **argv) {
   DtxqcdHermitianCFGaussian(pRNG, n);
   DtxqcdRealScalarGaussian(pRNG, s);
   DtxqcdRealScalarGaussian(pRNG, p);
+  // Apply env-gated subspace projections to match the operator's expectation.
+  // Under DN_COMPLEX_SYMMETRIC: σ/π real-symmetric, d/n complex-symmetric.
+  if (DtxqcdDnComplexSymmetric()) {
+    if (!DtxqcdSigmaPiHermitianOnly()) {
+      DtxqcdRealSymmetricCFInPlace(sigma);
+      DtxqcdRealSymmetricCFInPlace(pi);
+    }
+    DtxqcdComplexSymmetricCFGaussian(pRNG, d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, n);
+  }
 
   std::vector<LatticeColourMatrix> FS;
   FS.reserve(6);

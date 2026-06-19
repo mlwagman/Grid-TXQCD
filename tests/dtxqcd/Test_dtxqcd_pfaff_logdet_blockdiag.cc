@@ -77,26 +77,18 @@ int main(int argc, char** argv) {
         (M_offdiag_full - M_offdiag_full.adjoint()).norm()
             / std::max(M_offdiag_full.norm(), 1.0), 1e-12);
 
-  // Validate that aux fields alone (no clover) produce distinct upper/lower
-  // diagonal blocks: the tensor piece of Delta_diag sign-flips under the
-  // Cstar M_22 = C^T X^T C construction (C^T sigma^T C = -sigma), giving
-  // M_upper - M_lower = 2 * Delta_tensor.  This must be substantially
-  // nonzero or the lower-block tensor sign-flip has been silently lost.
+  // In v2 (corrected 2026-06-12), both M_upper and M_lower carry +X with
+  // the same sigma/pi/s/p insertion.  After the real-symmetric projection
+  // of sigma, pi (2026-06-13) the lower block has no transpose flip: the
+  // doubled action's antisymmetry (K·M48)^T = -(K·M48) is carried entirely
+  // by the block-swap K, not by X^T = -X.  So M_upper - M_lower must be
+  // exactly zero from the aux contribution alone (csw=0 here, no clover).
   RealD upper_lower_rel = (M_upper - M_lower).norm()
                         / std::max(M_upper.norm(), 1.0);
   std::cout << GridLogMessage << "||M_upper - M_lower|| / ||M_upper|| = "
             << upper_lower_rel
-            << "  (= 2 ||Delta_tensor|| / ||M_upper||)" << std::endl;
-  if (upper_lower_rel < 1e-6) {
-    std::cout << GridLogError
-              << "[FAIL] M_upper and M_lower agree to 1e-6 from aux alone — "
-              << "the lower-block tensor sign-flip may be lost" << std::endl;
-    exitcode = 1;
-  } else {
-    std::cout << GridLogMessage
-              << "[ok] aux fields alone produce distinct upper/lower blocks"
-              << std::endl;
-  }
+            << "  (v2: both carry +X; should be ~0 at csw=0)" << std::endl;
+  check("M_upper == M_lower at csw=0 (rel)", upper_lower_rel, 1e-12);
 
   MatrixXcd M48_with_dn, M48_no_dn;
   DtxqcdAssembleDoubled48(M_upper, M_lower, M_offdiag_full, M48_with_dn);

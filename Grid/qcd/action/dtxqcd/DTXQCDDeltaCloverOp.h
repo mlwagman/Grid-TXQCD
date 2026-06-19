@@ -105,11 +105,15 @@ inline void DtxqcdApplyCloverUpper(
   DtxqcdApplyCloverGeneric(-0.5 * csw, FS, in, out);
 }
 
-// Lower-block clover (v2 corrected 2026-06-12, M_lower = -C D^T C + X):
-//   -C D_clover^T C = -(csw/2) F^T sigma_{mu,nu}
-// (same -csw/2 sign as upper; the earlier +0.5*csw was tied to the old
-// M_lower = C D^T C - X form which is now superseded).  F replaced by
-// its color transpose because of the C-transpose.
+// Lower-block clover:
+//   out[a] = +(csw/2) sum_{mu<nu} F^T_{mu,nu} (sigma_{mu,nu} v[a])
+// Opposite sign from the upper block.  Required by the C·K Pfaffian
+// antisymmetry M_ll = -K_b·M_uu^T·K_b with K_b = Cγ5, K_b² = -I:
+//   M_ll^clover = -K_b·(-csw/2·F·σ_{μν})^T·K_b
+//               = (csw/2)·F^T·(K_b·σ_{μν}^T·K_b)
+//               = (csw/2)·F^T·σ_{μν}
+// (see DtxqcdAddCloverToDiagBlock24 for full derivation; restored
+// 2026-06-13 alongside the real-symmetric aux projector).
 // Transposes FS on the fly; for repeated applies, pre-transpose with
 // DtxqcdTransposeFS and call DtxqcdApplyCloverGeneric directly.
 inline void DtxqcdApplyCloverLower(
@@ -117,7 +121,7 @@ inline void DtxqcdApplyCloverLower(
     const std::vector<LatticeColourMatrix> &FS,
     const DTXQCDFermionNf &in, DTXQCDFermionNf &out) {
   std::vector<LatticeColourMatrix> FT = DtxqcdTransposeFS(FS);
-  DtxqcdApplyCloverGeneric(-0.5 * csw, FT, in, out);
+  DtxqcdApplyCloverGeneric(+0.5 * csw, FT, in, out);
 }
 
 NAMESPACE_END(Grid);
