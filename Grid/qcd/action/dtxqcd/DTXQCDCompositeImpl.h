@@ -60,65 +60,62 @@ inline void DtxqcdComplexSymmetricCFInPlace(LatticeDtxqcdSigma &X) {
   X = 0.5 * (X + transpose(X));
 }
 
-// Cached env knob: DTXQCD_DN_COMPLEX_SYMMETRIC=1 enables the formal
-// "complex d, d* independent" variant.  When ON:
-//   - σ, π projected real-symmetric
-//   - d, n projected complex-symmetric (transpose-symm, Im allowed)
-//   - M48 LL block uses conj(UR) — handled in DtxqcdAssembleDoubled48
-static inline bool DtxqcdDnComplexSymmetric() {
-  static const bool b = []() {
-    if (const char *v = std::getenv("DTXQCD_DN_COMPLEX_SYMMETRIC"); v && *v) {
-      bool on = std::atoi(v) != 0;
-      std::cout << GridLogMessage
-                << "[DTXQCD] DN_COMPLEX_SYMMETRIC = " << (on ? "ON" : "OFF")
-                << "  (complex-symm d/n + real-symm σ/π + LL=conj(UR) in M48)"
-                << std::endl;
-      return on;
-    }
-    return true;  // ON by default (Pfaffian-antisymmetry restored)
-  }();
-  return b;
-}
+// =====================================================================
+// sigmaHerm production convention (2026-06-19) — BAKED IN.
+//
+// All DTXQCD production now runs the sigmaHerm convention:
+//   - σ, π are stored Hermitian (36 real DOFs/site each, full DOFs
+//     preserved for exact H-S decoupling of quark bilinears)
+//   - d, n are stored truly complex-symmetric (42 real DOFs/site each,
+//     joint color+flavor transpose symmetry, imaginary parts kept)
+//   - M48 has M_LL = conj(M_UR) at the assembly AND on-the-fly Apply
+//     level so γ5-Hermiticity and Pfaffian antisymmetry both hold
+//   - M_lower applies +X^T (joint color+flavor transpose of σ, π)
+//
+// Three gates defended (all tests pass under sigmaHerm):
+//   1. γ5-Hermiticity of full M48 (Test_dtxqcd_gamma5_herm_full)
+//   2. (K·M48)^T = -(K·M48) Pfaffian antisymmetry (Test_dtxqcd_pfaffian_antisymmetry)
+//   3. Full complex DOFs in every aux field (Test_dtxqcd_freefield_qbarq_*
+//      — silently-projected real-symmetric d/n gave ~0.5% Fierz residual
+//      at light mass, caught and fixed 2026-06-18/19)
+//
+// The DtxqcdDnComplexSymmetric() / DtxqcdSigmaPiHermitianOnly() helpers
+// returned `true` by default during the convention finalization; they
+// are now hardcoded to true so production cannot silently revert.  The
+// DTXQCD_DN_COMPLEX_SYMMETRIC, DTXQCD_SIGMA_PI_HERMITIAN_ONLY, and
+// DTXQCD_DN_REAL_SYMMETRIC env knobs are ignored — if set, a one-time
+// warning is emitted at first call.
+// =====================================================================
 
-// Cached env knob: DTXQCD_DN_REAL_SYMMETRIC=1 projects d, n to be
-// real-symmetric instead of merely Hermitian.  Restores formal Pfaffian
-// antisymmetry per the v2 algebra.  Default OFF (d, n stay Hermitian per
-// the empirically-verified-at-factor=1 setup).
-// Cached env knob: DTXQCD_SIGMA_PI_HERMITIAN_ONLY=1 leaves σ, π merely
-// Hermitian (skips the real-symmetric projection) under DN_COMPLEX_SYMMETRIC.
-// Used to isolate the σ/π real-symm vs d/n complex-symm contributions to
-// any Fierz violation.  Default OFF (σ, π get real-symm projection when
-// DN_COMPLEX_SYMMETRIC is ON).
-static inline bool DtxqcdSigmaPiHermitianOnly() {
-  static const bool b = []() {
-    if (const char *v = std::getenv("DTXQCD_SIGMA_PI_HERMITIAN_ONLY"); v && *v) {
-      bool on = std::atoi(v) != 0;
-      std::cout << GridLogMessage
-                << "[DTXQCD] SIGMA_PI_HERMITIAN_ONLY = " << (on ? "ON" : "OFF")
-                << "  (under DN_COMPLEX_SYMMETRIC: σ, π stay Hermitian, "
-                   "skip real-symm projection)"
-                << std::endl;
-      return on;
-    }
-    return true;  // ON by default — sigmaHerm is the correct convention
-                  // (preserves all aux DOFs for the H-S decoupling)
+namespace dtxqcd_detail {
+inline void WarnIfLegacyKnobSet() {
+  static const bool warned = []() {
+    auto check = [](const char *name) {
+      if (const char *v = std::getenv(name); v && *v) {
+        std::cout << GridLogWarning
+                  << "[DTXQCD] env knob " << name << "='" << v
+                  << "' is IGNORED — sigmaHerm convention is hardcoded "
+                     "(complex-symm d/n + Hermitian σ/π)."
+                  << std::endl;
+      }
+    };
+    check("DTXQCD_DN_COMPLEX_SYMMETRIC");
+    check("DTXQCD_SIGMA_PI_HERMITIAN_ONLY");
+    check("DTXQCD_DN_REAL_SYMMETRIC");
+    return true;
   }();
-  return b;
+  (void)warned;
 }
+}  // namespace dtxqcd_detail
 
-static inline bool DtxqcdDnRealSymmetric() {
-  static const bool b = []() {
-    if (const char *v = std::getenv("DTXQCD_DN_REAL_SYMMETRIC"); v && *v) {
-      bool on = std::atoi(v) != 0;
-      std::cout << GridLogMessage
-                << "[DTXQCD] DN_REAL_SYMMETRIC = " << (on ? "ON" : "OFF")
-                << "  (project d, n to real-symmetric; σ, π stay Hermitian)"
-                << std::endl;
-      return on;
-    }
-    return false;
-  }();
-  return b;
+static inline constexpr bool DtxqcdDnComplexSymmetric() {
+  return true;
+}
+static inline constexpr bool DtxqcdSigmaPiHermitianOnly() {
+  return true;
+}
+static inline constexpr bool DtxqcdDnRealSymmetric() {
+  return false;
 }
 
 // Color-traceless projection: for each (a,b) flavor pair, subtract the
@@ -186,6 +183,7 @@ inline void DtxqcdHermitianCFGaussian(GridParallelRNG &pRNG,
 // the imaginary-part DOFs.)
 inline void DtxqcdComplexSymmetricCFGaussian(GridParallelRNG &pRNG,
                                               LatticeDtxqcdSigma &X) {
+  dtxqcd_detail::WarnIfLegacyKnobSet();
   gaussian(pRNG, X);
   DtxqcdComplexSymmetricCFInPlace(X);
 }

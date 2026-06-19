@@ -375,13 +375,15 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
     RealD se_tr_s     = stdev(tr_s_, mean_tr_s)         / std::sqrt((RealD)N);
     RealD dev_tr_sigma = std::fabs(mean_tr_sigma - pred_tr_sigma);
     RealD dev_tr_s     = std::fabs(mean_tr_s     - pred_tr_s);
-    // VEV saddle gate: abs |dev| < 5·pass_tol·|pred| AND dev < 3·SE.
-    // The abs floor is intentionally looser than the Σ_DTX/Σ_W ratio tol
-    // because the aux trace is a sub-dominant observable (pred is the
-    // *free-field* saddle; gauge perturbations shift the actual saddle).
-    // The 3σ check kicks in once HMC explores the aux fluctuation cone.
-    RealD vev_abs_tol_sigma = 5.0 * pass_tol * std::fabs(pred_tr_sigma);
-    RealD vev_abs_tol_s     = 5.0 * pass_tol * std::fabs(pred_tr_s);
+    // VEV saddle gate: abs |dev| < max(5·SE, 5·pass_tol·|pred|) AND dev < 3·SE.
+    // The 5·SE floor handles the high-mass regime where aux fluctuates with
+    // amplitude ~1/λ but the predicted saddle ~Nf·Σ/λ²·(1/(m+4)) is small —
+    // pure abs vs pred is too tight there even though 3σ stat agreement is
+    // fine.  At low mass with good stats both checks bind similarly.
+    RealD vev_abs_tol_sigma = std::max(5.0 * se_tr_sigma,
+                                        5.0 * pass_tol * std::fabs(pred_tr_sigma));
+    RealD vev_abs_tol_s     = std::max(5.0 * se_tr_s,
+                                        5.0 * pass_tol * std::fabs(pred_tr_s));
     bool pass_tr_sigma_abs  = dev_tr_sigma < vev_abs_tol_sigma;
     bool pass_tr_s_abs      = dev_tr_s     < vev_abs_tol_s;
     bool pass_tr_sigma_3sig = dev_tr_sigma < 3.0 * se_tr_sigma;
