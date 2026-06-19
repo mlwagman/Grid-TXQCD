@@ -61,9 +61,19 @@ class TXQCDLogDetCloverEOAction : public Action<TXQCDField> {
 
   RealD S(const TXQCDField &U) override {
     static int use_gpu = []() {
+#ifndef GRID_CUDA
+      // S_gpu's LU step is a cuBLAS call guarded by #ifdef GRID_CUDA;
+      // on non-CUDA builds the matrix isn't factorized but the trace
+      // logic still reads M_dev's diagonal — silently returning garbage.
+      // Force CPU fallback unless the user explicitly opts in (which
+      // would be wrong on non-CUDA but we honor the env knob).
+      const char *e = std::getenv("TXQCD_LOGDET_S_GPU");
+      return (e && *e) ? std::atoi(e) : 0;
+#else
       const char *e = std::getenv("TXQCD_LOGDET_S_GPU");
       if (!e || !*e) return 1;        // default ON (Phase J + cuBLAS getrf)
       return std::atoi(e);             // explicit "0" disables
+#endif
     }();
     if (use_gpu) return S_gpu(U);
     return S_cpu(U);
