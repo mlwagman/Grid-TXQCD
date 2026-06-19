@@ -63,9 +63,12 @@ int main(int argc, char **argv) {
   LatticePFieldC p(&grid); p = Zero();
   LatticeTField t(&grid); t = Zero();
 
-  // Grid's WilsonClover
+  // Grid's WilsonClover — match TXQCD operator BC (APBC time).
+  WilsonImplR::ImplParams ip;
+  ip.boundary_phases.resize(Nd, 1.0);
+  ip.boundary_phases[Nd - 1] = -1.0;
   WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> Dwc(
-      U, grid, rbgrid, mass, csw, csw);
+      U, grid, rbgrid, mass, csw, csw, WilsonAnisotropyCoefficients(), ip);
 
   // TXQCD operators
   TXQCDWilsonCloverOp fullOp(U, grid, rbgrid, mass, sigma, pi, s, p, t, csw);

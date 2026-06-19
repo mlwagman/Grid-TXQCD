@@ -1,17 +1,13 @@
-// Test_dtxqcd_zero_aux_doubled_qcd: when aux = 0 (and csw = 0), the DTXQCD
-// doubled Wilson operator must reduce to two independent copies of the
-// stock QCD Wilson Dirac operator:
+// Test_dtxqcd_zero_aux_doubled_qcd: when aux = 0 and csw = 0, the doubled
+// DTXQCD operator decouples into two independent single-flavor Wilson
+// blocks.  The hopping path uses conj(U) on the lower block (see
+// DTXQCDMeooeOp.h:DtxqcdConjugateGauge), so:
 //
-//   M_dtxqcd[U,aux=0] (psi_u, psi_l) = (D_W[U] psi_u, D_W[U^*] psi_l)
+//   M_dtxqcd[U, aux=0] (ψ_u, ψ_l) = (D_W[U] ψ_u, D_W[U*] ψ_l)
 //
-// where D_W is Grid's WilsonFermion at the same mass.  The lower-block
-// gauge is conjugate(U) because Cstar M_22 = C^T D[U]^T C^T = D[U^*]
-// (the dtxqcd doubling rotation).  At aux = 0 the off-diagonal coupling
-// 2 d gamma_5 + 2 n vanishes, so the two blocks decouple completely.
-//
-// This is the sharpest physical sanity check on the DTXQCD operator
-// convention -- it would have caught the Mooee +4 normalization bug
-// immediately.
+// where U* = conjugate(U).  Mooee and MooeeInv at aux=0, csw=0 are
+// (m+4)·I per block — U-independent — so both upper and lower reduce
+// to the stock Wilson Mooee on U.
 //
 // Run: ./tests/dtxqcd/Test_dtxqcd_zero_aux_doubled_qcd --grid 4.4.4.4 --mpi 1.1.1.1
 
@@ -52,12 +48,15 @@ int main(int argc, char **argv) {
   DTXQCDWilsonCloverFermionEO Dw(U.U, Grid, RBGrid, mass, /*csw=*/0.0,
                                   U.sigma, U.pi, U.d, U.n, U.s, U.p);
 
-  // Stock Grid WilsonFermion references on U (upper) and conj(U) (lower).
-  // U_lower needs to be a mutable LatticeGaugeField with the right grid.
+  // Stock Grid WilsonFermion on U; lower-block reference is conj(D_W[U]·conj(·))
+  // applied to ψ_l (the matrix conjugate of the upper Wilson op).
+  WilsonImplR::ImplParams ip;
+  ip.boundary_phases.resize(Nd, 1.0);
+  ip.boundary_phases[Nd - 1] = -1.0;  // APBC time matches DTXQCD default
   LatticeGaugeField U_lower(&Grid);
   U_lower = conjugate(U.U);
-  WilsonFermion<WilsonImplR> Dw_upper(U.U,     Grid, RBGrid, mass);
-  WilsonFermion<WilsonImplR> Dw_lower(U_lower, Grid, RBGrid, mass);
+  WilsonFermion<WilsonImplR> Dw_upper(U.U,     Grid, RBGrid, mass, ip);
+  WilsonFermion<WilsonImplR> Dw_lower(U_lower, Grid, RBGrid, mass, ip);
 
   // Random doubled fermion on full grid.
   DTXQCDFermionDoubled psi(&Grid), out_dtxqcd(&Grid);
@@ -95,7 +94,7 @@ int main(int argc, char **argv) {
   for (int a = 0; a < DtxqcdNf; ++a) {
     LatticeFermion ref_u(&RBGrid), ref_l(&RBGrid);
     Dw_upper.Mooee(psi_e.upper.f[a], ref_u);
-    Dw_lower.Mooee(psi_e.lower.f[a], ref_l);
+    Dw_upper.Mooee(psi_e.lower.f[a], ref_l);  // Mooee = (m+4)·I, U-independent
     LatticeFermion du = out_e.upper.f[a] - ref_u;
     LatticeFermion dl = out_e.lower.f[a] - ref_l;
     du.Checkerboard() = Even;
@@ -104,7 +103,7 @@ int main(int argc, char **argv) {
     RealD rl = std::sqrt(norm2(dl) / std::max(norm2(ref_l), 1e-30));
     worst_rel_Mooee = std::max({worst_rel_Mooee, ru, rl});
   }
-  check("DTXQCD.Mooee[aux=0] vs (Wilson.Mooee[U], Wilson.Mooee[U*])",
+  check("DTXQCD.Mooee[aux=0] vs (Wilson.Mooee[U], Wilson.Mooee[U])",
         worst_rel_Mooee, 1e-13);
 
   // ---------- check 3: EO MooeeInv on a CB fermion ----------
@@ -117,7 +116,7 @@ int main(int argc, char **argv) {
   for (int a = 0; a < DtxqcdNf; ++a) {
     LatticeFermion ref_u(&RBGrid), ref_l(&RBGrid);
     Dw_upper.MooeeInv(psi_e.upper.f[a], ref_u);
-    Dw_lower.MooeeInv(psi_e.lower.f[a], ref_l);
+    Dw_upper.MooeeInv(psi_e.lower.f[a], ref_l);  // MooeeInv = 1/(m+4)·I
     LatticeFermion du = inv_e.upper.f[a] - ref_u;
     LatticeFermion dl = inv_e.lower.f[a] - ref_l;
     du.Checkerboard() = Even;
@@ -126,7 +125,7 @@ int main(int argc, char **argv) {
     RealD rl = std::sqrt(norm2(dl) / std::max(norm2(ref_l), 1e-30));
     worst_rel_MooeeInv = std::max({worst_rel_MooeeInv, ru, rl});
   }
-  check("DTXQCD.MooeeInv[aux=0] vs (Wilson.MooeeInv[U], Wilson.MooeeInv[U*])",
+  check("DTXQCD.MooeeInv[aux=0] vs (Wilson.MooeeInv[U], Wilson.MooeeInv[U])",
         worst_rel_MooeeInv, 1e-10);
 
   std::cout << GridLogMessage

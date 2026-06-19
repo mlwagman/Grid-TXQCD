@@ -54,6 +54,14 @@ int main(int argc, char **argv) {
   DtxqcdRealScalarGaussian(pRNG, p);
   DtxqcdHermitianCFGaussian(pRNG, d);
   DtxqcdHermitianCFGaussian(pRNG, n);
+  if (DtxqcdDnComplexSymmetric()) {
+    if (!DtxqcdSigmaPiHermitianOnly()) {
+      DtxqcdRealSymmetricCFInPlace(sigma);
+      DtxqcdRealSymmetricCFInPlace(pi);
+    }
+    DtxqcdComplexSymmetricCFGaussian(pRNG, d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, n);
+  }
 
   DTXQCDFermionNf w_u(&Grid), w_l(&Grid), v_u(&Grid), v_l(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {

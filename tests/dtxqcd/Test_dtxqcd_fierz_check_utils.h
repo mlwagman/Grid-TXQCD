@@ -375,10 +375,19 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
     RealD se_tr_s     = stdev(tr_s_, mean_tr_s)         / std::sqrt((RealD)N);
     RealD dev_tr_sigma = std::fabs(mean_tr_sigma - pred_tr_sigma);
     RealD dev_tr_s     = std::fabs(mean_tr_s     - pred_tr_s);
-    RealD tol_tr_sigma = std::max(5.0 * se_tr_sigma, pass_tol * std::fabs(pred_tr_sigma));
-    RealD tol_tr_s     = std::max(5.0 * se_tr_s,     pass_tol * std::fabs(pred_tr_s));
-    bool pass_tr_sigma = dev_tr_sigma < tol_tr_sigma;
-    bool pass_tr_s     = dev_tr_s     < tol_tr_s;
+    // VEV saddle gate: abs |dev| < 5·pass_tol·|pred| AND dev < 3·SE.
+    // The abs floor is intentionally looser than the Σ_DTX/Σ_W ratio tol
+    // because the aux trace is a sub-dominant observable (pred is the
+    // *free-field* saddle; gauge perturbations shift the actual saddle).
+    // The 3σ check kicks in once HMC explores the aux fluctuation cone.
+    RealD vev_abs_tol_sigma = 5.0 * pass_tol * std::fabs(pred_tr_sigma);
+    RealD vev_abs_tol_s     = 5.0 * pass_tol * std::fabs(pred_tr_s);
+    bool pass_tr_sigma_abs  = dev_tr_sigma < vev_abs_tol_sigma;
+    bool pass_tr_s_abs      = dev_tr_s     < vev_abs_tol_s;
+    bool pass_tr_sigma_3sig = dev_tr_sigma < 3.0 * se_tr_sigma;
+    bool pass_tr_s_3sig     = dev_tr_s     < 3.0 * se_tr_s;
+    bool pass_tr_sigma = pass_tr_sigma_abs && pass_tr_sigma_3sig;
+    bool pass_tr_s     = pass_tr_s_abs     && pass_tr_s_3sig;
     pass = pass && pass_tr_sigma && pass_tr_s;
 
     std::cout << GridLogMessage << std::endl
@@ -422,14 +431,18 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
               << "⟨Tr σ⟩ saddle: obs=" << mean_tr_sigma
               << " ± " << se_tr_sigma << " (SE)  pred=" << pred_sigma_str
               << "=" << pred_tr_sigma
-              << "  |dev|=" << dev_tr_sigma << "  tol=" << tol_tr_sigma
-              << "  [" << (pass_tr_sigma ? "PASS" : "FAIL") << "]" << std::endl;
+              << "  |dev|=" << dev_tr_sigma
+              << "  abs_tol=" << vev_abs_tol_sigma
+              << "  abs=" << (pass_tr_sigma_abs ? "PASS" : "FAIL")
+              << "  3σ=" << (pass_tr_sigma_3sig ? "PASS" : "FAIL") << std::endl;
     std::cout << GridLogMessage
               << "⟨s⟩ saddle: obs=" << mean_tr_s
               << " ± " << se_tr_s << " (SE)  pred=" << pred_s_str
               << "=" << pred_tr_s
-              << "  |dev|=" << dev_tr_s << "  tol=" << tol_tr_s
-              << "  [" << (pass_tr_s ? "PASS" : "FAIL") << "]" << std::endl;
+              << "  |dev|=" << dev_tr_s
+              << "  abs_tol=" << vev_abs_tol_s
+              << "  abs=" << (pass_tr_s_abs ? "PASS" : "FAIL")
+              << "  3σ=" << (pass_tr_s_3sig ? "PASS" : "FAIL") << std::endl;
     std::cout << GridLogMessage
               << "[" << test_name << " AVG] " << (pass ? "PASS" : "FAIL")
               << std::endl;

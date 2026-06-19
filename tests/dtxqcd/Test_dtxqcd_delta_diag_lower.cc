@@ -1,13 +1,15 @@
-// Test_dtxqcd_delta_diag_lower (v2 corrected 2026-06-12): validate that
-// DtxqcdApplyDeltaDiagLower and DtxqcdApplyDeltaDiag apply the SAME +X
-// insertion (both upper and lower blocks of M48 carry +X) and that the
-// lower block is Hermitian.
+// Test_dtxqcd_delta_diag_lower (sigmaHerm 2026-06-19): validate that
+// DtxqcdApplyDeltaDiagLower applies the joint-transposed aux X^T (σ^T,
+// π^T) under DTXQCD_SIGMA_PI_HERMITIAN_ONLY, and that the lower block
+// is Hermitian on a Hermitian σ, π configuration.
 //
-// Pre-correction (v1/early v2) had lower = -X; the corrected derivation
-// in dtxqcd_v2.tex (2026-06-12) and the C·K Pfaffian doubling both put
-// +X in both blocks.  After the real-symmetric projection of sigma, pi
-// (2026-06-13) this is the only sign convention that simultaneously
-// preserves (K·M48)^T = -(K·M48).
+// History:
+//   v1 / early v2 (2026-06-12): both blocks carried +X (raw, no
+//   transpose), valid under real-symmetric aux projection.
+//   sigmaHerm (2026-06-19): σ, π are Hermitian (full DOFs preserved for
+//   H-S decoupling); M_lower carries +X^T (joint color+flavor transpose).
+//   When σ, π happen to be REAL-symmetric, X^T = X and the two blocks
+//   coincide — that's the gate we now test.
 
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
@@ -47,21 +49,31 @@ int main(int argc, char **argv) {
   DtxqcdRealScalarGaussian(pRNG, s);
   DtxqcdRealScalarGaussian(pRNG, p);
 
-  // ---------- 1. upper = +lower on any X configuration (v2: both blocks +X) ----------
+  // ---------- 1. upper == lower on REAL-symmetric aux only -----------
+  // Under sigmaHerm, M_lower applies +X^T (joint color+flavor transpose
+  // of σ, π).  For complex Hermitian aux, σ^T = σ̄ ≠ σ, so the two block
+  // applications differ in their imaginary parts — that's required for
+  // Pfaffian antisymmetry (gate covered by Test_dtxqcd_pfaffian_antisymmetry).
+  // We exhibit the consistency here on REAL-symmetric aux, where σ^T = σ.
   {
+    LatticeDtxqcdSigma sigma_rs(sigma);
+    LatticeDtxqcdPi    pi_rs(pi);
+    DtxqcdRealSymmetricCFInPlace(sigma_rs);
+    DtxqcdRealSymmetricCFInPlace(pi_rs);
+
     DTXQCDFermionNf up(&Grid), lo(&Grid);
-    DtxqcdApplyDeltaDiag     (sigma, pi, s, p, v, up);
-    DtxqcdApplyDeltaDiagLower(sigma, pi, s, p, v, lo);
+    DtxqcdApplyDeltaDiag     (sigma_rs, pi_rs, s, p, v, up);
+    DtxqcdApplyDeltaDiagLower(sigma_rs, pi_rs, s, p, v, lo);
 
     DTXQCDFermionNf diff(&Grid);
     for (int a = 0; a < DtxqcdNf; ++a) diff.f[a] = up.f[a] - lo.f[a];
 
     RealD up_norm   = std::sqrt(norm2(up));
     RealD diff_norm = std::sqrt(norm2(diff));
-    std::cout << GridLogMessage << "X-insert: ||up|| = " << up_norm
+    std::cout << GridLogMessage << "X-insert (real-symm aux): ||up|| = " << up_norm
               << "  ||up - lo|| = " << diff_norm
-              << "  (should be ~0; both blocks carry +X in v2)" << std::endl;
-    check("upper - lower ~ 0 (rel)",
+              << "  (should be ~0; X^T = X on real-symm aux)" << std::endl;
+    check("upper - lower ~ 0 on real-symm aux (rel)",
           diff_norm / std::max(up_norm, 1e-30), 1e-13);
   }
 

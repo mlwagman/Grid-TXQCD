@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
   };
 
   const RealD mass = 0.3;
+  // Match DTXQCDMeooeDoubled's BC default (APBC in time = chroma convention).
+  WilsonImplR::ImplParams ip = DTXQCDMeooeDoubled::DefaultImplParams();
 
   // Random doubled fermion (input on even checkerboard, will be hopped to odd).
   DTXQCDFermionNf in_upper(&Grid), in_lower(&Grid);
@@ -78,7 +80,7 @@ int main(int argc, char **argv) {
     check("U=I, same input: ||upper - lower|| / ||upper||", worst_rel, 1e-14);
 
     // Confirm wrapping matches stock single-flavor WilsonFermion.
-    WilsonFermion<WilsonImplR> Dw_ref(U, Grid, RBGrid, mass);
+    WilsonFermion<WilsonImplR> Dw_ref(U, Grid, RBGrid, mass, ip);
     RealD worst_ref = 0.0;
     for (int a = 0; a < DtxqcdNf; ++a) {
       LatticeFermion ref_out(&RBGrid);
@@ -126,10 +128,10 @@ int main(int argc, char **argv) {
                 << std::endl;
     }
 
-    // Lower block must match stock WilsonFermion on conjugate(U).
+    // Lower block uses conj(U) (see DTXQCDMeooeOp.h:DtxqcdConjugateGauge).
     LatticeGaugeField U_conj(&Grid);
     U_conj = conjugate(U);
-    WilsonFermion<WilsonImplR> Dw_ref_lower(U_conj, Grid, RBGrid, mass);
+    WilsonFermion<WilsonImplR> Dw_ref_lower(U_conj, Grid, RBGrid, mass, ip);
     RealD worst_lo_ref = 0.0;
     for (int a = 0; a < DtxqcdNf; ++a) {
       LatticeFermion ref_out(&RBGrid);
@@ -146,7 +148,7 @@ int main(int argc, char **argv) {
           worst_lo_ref, 1e-13);
 
     // Upper block must match stock WilsonFermion on U.
-    WilsonFermion<WilsonImplR> Dw_ref_upper(U, Grid, RBGrid, mass);
+    WilsonFermion<WilsonImplR> Dw_ref_upper(U, Grid, RBGrid, mass, ip);
     RealD worst_up_ref = 0.0;
     for (int a = 0; a < DtxqcdNf; ++a) {
       LatticeFermion ref_out(&RBGrid);

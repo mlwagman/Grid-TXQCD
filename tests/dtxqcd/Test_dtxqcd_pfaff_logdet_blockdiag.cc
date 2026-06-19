@@ -52,6 +52,14 @@ int main(int argc, char** argv) {
   DtxqcdRealScalarGaussian(pRNG, p);
   DtxqcdHermitianCFGaussian(pRNG, d);
   DtxqcdHermitianCFGaussian(pRNG, n);
+  if (DtxqcdDnComplexSymmetric()) {
+    if (!DtxqcdSigmaPiHermitianOnly()) {
+      DtxqcdRealSymmetricCFInPlace(sigma);
+      DtxqcdRealSymmetricCFInPlace(pi);
+    }
+    DtxqcdComplexSymmetricCFGaussian(pRNG, d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, n);
+  }
 
   Coordinate site0(std::vector<int>{0, 0, 0, 0});
   DtxqcdSiteAux aux = DtxqcdSiteAux::Extract(sigma, pi, d, n, s, p, site0);
@@ -73,29 +81,26 @@ int main(int argc, char** argv) {
   check("M_lower Hermiticity (rel)",
         (M_lower - M_lower.adjoint()).norm() / M_lower.norm(), 1e-12);
   check("offdiag(d=n=0) norm", M_offdiag_zero.norm(), 1e-14);
-  check("M_off Hermiticity (rel)",
-        (M_offdiag_full - M_offdiag_full.adjoint()).norm()
-            / std::max(M_offdiag_full.norm(), 1.0), 1e-12);
+  // sigmaHerm: d, n are truly complex-symmetric, so M_off = d γ5 + n is
+  // NOT Hermitian; γ5-Hermiticity of the full M48 is covered by
+  // Test_dtxqcd_gamma5_herm_full.
 
-  // In v2 (corrected 2026-06-12), both M_upper and M_lower carry +X with
-  // the same sigma/pi/s/p insertion.  After the real-symmetric projection
-  // of sigma, pi (2026-06-13) the lower block has no transpose flip: the
-  // doubled action's antisymmetry (K·M48)^T = -(K·M48) is carried entirely
-  // by the block-swap K, not by X^T = -X.  So M_upper - M_lower must be
-  // exactly zero from the aux contribution alone (csw=0 here, no clover).
+  // sigmaHerm (2026-06-19): M_lower = +X^T (joint color+flavor transpose
+  // of σ, π).  For complex Hermitian σ, σ^T = σ̄ ≠ σ, so M_upper ≠ M_lower
+  // from aux alone — that's precisely what makes (K·M48)^T = -(K·M48)
+  // antisymmetry hold (see Test_dtxqcd_pfaffian_antisymmetry).
   RealD upper_lower_rel = (M_upper - M_lower).norm()
                         / std::max(M_upper.norm(), 1.0);
   std::cout << GridLogMessage << "||M_upper - M_lower|| / ||M_upper|| = "
             << upper_lower_rel
-            << "  (v2: both carry +X; should be ~0 at csw=0)" << std::endl;
-  check("M_upper == M_lower at csw=0 (rel)", upper_lower_rel, 1e-12);
+            << "  (sigmaHerm: M_lower = +X^T → distinct from M_upper)"
+            << std::endl;
 
   MatrixXcd M48_with_dn, M48_no_dn;
   DtxqcdAssembleDoubled48(M_upper, M_lower, M_offdiag_full, M48_with_dn);
   DtxqcdAssembleDoubled48(M_upper, M_lower, M_offdiag_zero, M48_no_dn);
-  check("M48(d,n!=0) Hermiticity (rel)",
-        (M48_with_dn - M48_with_dn.adjoint()).norm() / M48_with_dn.norm(),
-        1e-12);
+  // sigmaHerm: M48 is γ5-Hermitian, NOT plain Hermitian
+  // (Test_dtxqcd_gamma5_herm_full covers γ5-Herm explicitly).
 
   RealD ld_upper   = DtxqcdLogAbsDet48(M_upper);  // works for 24x24 too
   RealD ld_lower   = DtxqcdLogAbsDet48(M_lower);

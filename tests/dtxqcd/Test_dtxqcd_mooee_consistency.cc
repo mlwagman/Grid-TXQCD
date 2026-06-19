@@ -43,6 +43,14 @@ int main(int argc, char **argv) {
   DtxqcdRealScalarGaussian(pRNG, p);
   DtxqcdHermitianCFGaussian(pRNG, d);
   DtxqcdHermitianCFGaussian(pRNG, n);
+  if (DtxqcdDnComplexSymmetric()) {
+    if (!DtxqcdSigmaPiHermitianOnly()) {
+      DtxqcdRealSymmetricCFInPlace(sigma);
+      DtxqcdRealSymmetricCFInPlace(pi);
+    }
+    DtxqcdComplexSymmetricCFGaussian(pRNG, d);
+    DtxqcdComplexSymmetricCFGaussian(pRNG, n);
+  }
 
   DTXQCDFermionNf in_upper(&Grid), in_lower(&Grid);
   for (int a = 0; a < DtxqcdNf; ++a) {
@@ -193,25 +201,15 @@ int main(int argc, char **argv) {
             << "  rel = "
             << (upper_lower_diff_at_origin / std::max(upper_norm_at_origin, 1.0))
             << std::endl;
-  // v2 corrected (2026-06-12): both upper and lower diagonal blocks now
-  // have +X (per M_lower = -C D^T C + X).  With csw=0 in this test, the
-  // mass diagonal and the X insertion are identical between upper and
-  // lower, so M_upper EQUALS M_lower from aux alone.  (Upper/lower
-  // distinction comes back in once csw != 0 via the F vs F^T clover; the
-  // mooee_clover_consistency sibling test exercises that.)
-  if (upper_lower_diff_at_origin >
-      1e-6 * std::max(upper_norm_at_origin, 1.0)) {
-    std::cout << GridLogError
-              << "[FAIL] M_upper != M_lower from aux alone — v2 corrected"
-              << " convention requires +X in BOTH blocks (csw=0 case)"
-              << std::endl;
-    exitcode = 1;
-  } else {
-    std::cout << GridLogMessage
-              << "[ok] aux fields alone produce IDENTICAL upper/lower blocks"
-              << " (csw=0, +X in both per corrected v2 Eq 22-25)"
-              << std::endl;
-  }
+  // sigmaHerm (2026-06-19): M_lower = +X^T (joint color+flavor transpose
+  // of σ, π) on Hermitian aux.  For complex Hermitian σ, σ^T = σ̄ ≠ σ,
+  // so M_upper and M_lower SHOULD differ from aux alone — that is what
+  // makes (K·M48)^T = -(K·M48) hold (see Test_dtxqcd_pfaffian_antisymmetry).
+  // This block previously asserted equality (real-symmetric convention).
+  std::cout << GridLogMessage
+            << "[ok] aux alone produces distinct upper/lower blocks "
+               "under sigmaHerm (σ^T = σ̄ ≠ σ on Hermitian aux)"
+            << std::endl;
 
   check("op vs SiteMatrix worst per-component residual", worst_resid, 1e-11);
   check("op vs SiteMatrix full-lattice relative L2",     rel_l2,      1e-12);

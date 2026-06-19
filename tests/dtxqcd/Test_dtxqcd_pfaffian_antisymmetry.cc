@@ -171,35 +171,14 @@ int main(int argc, char **argv) {
           asym / ref, 1e-11);
   }
 
-  // ----- sanity: with Hermitian (NOT real-symmetric) aux the test must FAIL.
-  // We construct a deliberately non-real-symmetric sigma (Hermitian only) and
-  // re-extract aux, then confirm the antisymmetry is broken.  This guards
-  // against silent regression of the projector to plain Hermitian.
-  {
-    LatticeDtxqcdSigma sigma_herm(&Grid);
-    gaussian(pRNG, sigma_herm);
-    sigma_herm = 0.5 * (sigma_herm + adj(sigma_herm));  // Hermitian only
-    DtxqcdSiteAux aux_herm = DtxqcdSiteAux::Extract(sigma_herm, pi, d_field,
-                                                     n_field, s_field, p_field,
-                                                     site0);
-    MatrixXcd M_upper, M_lower, M_off, M48;
-    DtxqcdBuildUpperBlock24(mass, aux_herm, spin, M_upper, 0.0, nullptr);
-    DtxqcdBuildLowerBlock24(mass, aux_herm, spin, M_lower, 0.0, nullptr);
-    DtxqcdBuildOffDiagBlock24(aux_herm, spin, M_off);
-    DtxqcdAssembleDoubled48(M_upper, M_lower, M_off, M48);
-    MatrixXcd KM = K * M48;
-    RealD asym = (KM + KM.transpose()).norm();
-    RealD ref  = std::max(KM.norm(), 1e-30);
-    RealD rel  = asym / ref;
-    std::cout << GridLogMessage
-              << "Hermitian-only sigma (sanity): rel = " << rel
-              << " (expect O(1), real-symmetric ≪ 1e-11)" << std::endl;
-    bool sanity_ok = (rel > 1e-3);
-    std::cout << GridLogMessage << "[" << (sanity_ok ? "ok" : "FAIL")
-              << "] sanity: Hermitian aux breaks Pfaff antisymmetry as expected"
-              << std::endl;
-    if (!sanity_ok) exitcode = 1;
-  }
+  // sigmaHerm (2026-06-19): The previous sanity check expected Hermitian
+  // (non-real-symmetric) σ to BREAK Pfaffian antisymmetry — true under the
+  // older real-symmetric projection convention, where M_lower applied raw
+  // σ.  Under sigmaHerm the operator code applies σ^T in M_lower (via
+  // DtxqcdBuildDiagBlock24(..., transpose_aux=true)), restoring
+  // (K·M48)^T = -(K·M48) for Hermitian aux as well.  The two checks above
+  // (csw=0, csw=1.249) exercise both real-symmetric and Hermitian aux
+  // paths and are sufficient; the obsolete sanity is dropped.
 
   std::cout << GridLogMessage
             << (exitcode ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED")
