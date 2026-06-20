@@ -42,6 +42,26 @@ static constexpr int DtxqcdNf = DTXQCD_Nf;
 // Combined color x flavor dimension (= 6 for Nc=3, Nf=2).
 static constexpr int DtxqcdNfNc = DtxqcdNf * Nc;
 
+// ---- Portable complex helpers (CPU std::complex / GPU thrust::complex) ----
+// Under GRID_CUDA, Grid's ComplexD is thrust::complex<double>, for which
+// std::conj/abs/arg have no overload and which cannot be mixed with Eigen's
+// std::complex<double> matrices.  These helpers work on both and are defined
+// in this foundational header so every DTXQCD TU (ops, actions, tests) sees
+// them.  DtxqcdToStd converts a Grid complex into the std::complex<double>
+// expected by the per-site Eigen matrices in DTXQCDSiteMatrix.h.
+inline std::complex<double> DtxqcdToStd(const ComplexD &z) {
+  return std::complex<double>(z.real(), z.imag());
+}
+accelerator_inline ComplexD DtxqcdConj(const ComplexD &z) {
+  return ComplexD(z.real(), -z.imag());
+}
+inline double DtxqcdAbs(const ComplexD &z) {
+  return std::sqrt(z.real() * z.real() + z.imag() * z.imag());
+}
+inline double DtxqcdArg(const ComplexD &z) {
+  return std::atan2(z.imag(), z.real());
+}
+
 // -----------------------------------------------------------------------
 // Site tensors
 // -----------------------------------------------------------------------

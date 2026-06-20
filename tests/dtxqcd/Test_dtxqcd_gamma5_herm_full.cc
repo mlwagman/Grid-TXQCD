@@ -192,8 +192,8 @@ int main(int argc, char **argv) {
     ComplexD LHS = DoubledInner(w_u, w_l, g5_M_g5_v_u, g5_M_g5_v_l);
     // RHS = <M w, v>     (= <w, M^dag v>)
     ComplexD RHS = DoubledInner(M_w_u, M_w_l, v_u, v_l);
-    RealD resid = std::abs(LHS - RHS);
-    RealD ref   = std::max({std::abs(LHS), std::abs(RHS), 1.0});
+    RealD resid = DtxqcdAbs(LHS - RHS);
+    RealD ref   = std::max({DtxqcdAbs(LHS), DtxqcdAbs(RHS), 1.0});
     std::cout << GridLogMessage
               << "csw=0:  <w, g5 M g5 v> = " << LHS
               << "  <M w, v> = " << RHS << std::endl;
@@ -217,8 +217,8 @@ int main(int argc, char **argv) {
 
     ComplexD LHS = DoubledInner(w_u, w_l, g5_M_g5_v_u, g5_M_g5_v_l);
     ComplexD RHS = DoubledInner(M_w_u, M_w_l, v_u, v_l);
-    RealD resid = std::abs(LHS - RHS);
-    RealD ref   = std::max({std::abs(LHS), std::abs(RHS), 1.0});
+    RealD resid = DtxqcdAbs(LHS - RHS);
+    RealD ref   = std::max({DtxqcdAbs(LHS), DtxqcdAbs(RHS), 1.0});
     std::cout << GridLogMessage
               << "csw=1.25:  <w, g5 M g5 v> = " << LHS
               << "  <M w, v> = " << RHS << std::endl;

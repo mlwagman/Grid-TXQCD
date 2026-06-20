@@ -41,6 +41,9 @@ inline int DtxqcdSiteIdx24(int a, int alpha, int color) {
   return a * (Ns * Nc) + alpha * Nc + color;
 }
 
+// Portable complex helpers (DtxqcdToStd / DtxqcdConj / DtxqcdAbs / DtxqcdArg)
+// live in DTXQCDAuxFieldTypes.h (included above) so every DTXQCD TU sees them.
+
 // ---------- gamma5 + sigma_{mu,nu} 4x4 spin matrices ----------
 
 // Cached gamma5 and sigma_{mu,nu} (mu<nu) as 4x4 Eigen matrices in Grid's
@@ -77,7 +80,7 @@ class DtxqcdSpinMatrices {
       Site s_out;
       peekSite(s_out, out, coord);
       for (int alpha = 0; alpha < Ns; ++alpha) {
-        M(alpha, beta) = ComplexD(TensorRemove(s_out()(alpha)(0)));
+        M(alpha, beta) = DtxqcdToStd(TensorRemove(s_out()(alpha)(0)));
       }
     }
     return M;
@@ -89,10 +92,10 @@ class DtxqcdSpinMatrices {
 // Site-local aux values.  sigma, pi, d, n are 6x6 = (Nf x Nc) x (Nf x Nc)
 // color-flavor matrices in dense Eigen form; s, p are real scalars.
 struct DtxqcdSiteAux {
-  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> sigma;
-  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> pi;
-  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> d;
-  Eigen::Matrix<ComplexD, DtxqcdNfNc, DtxqcdNfNc> n;
+  Eigen::Matrix<std::complex<double>, DtxqcdNfNc, DtxqcdNfNc> sigma;
+  Eigen::Matrix<std::complex<double>, DtxqcdNfNc, DtxqcdNfNc> pi;
+  Eigen::Matrix<std::complex<double>, DtxqcdNfNc, DtxqcdNfNc> d;
+  Eigen::Matrix<std::complex<double>, DtxqcdNfNc, DtxqcdNfNc> n;
   RealD s;
   RealD p;
 
@@ -124,19 +127,42 @@ struct DtxqcdSiteAux {
         for (int i = 0; i < Nc; ++i) {
           for (int j = 0; j < Nc; ++j) {
             out.sigma(Kab(a, i), Kab(b, j)) =
-                ComplexD(TensorRemove(sig_s()(a, b)(i, j)));
+                DtxqcdToStd(TensorRemove(sig_s()(a, b)(i, j)));
             out.pi(Kab(a, i), Kab(b, j)) =
-                ComplexD(TensorRemove(pi_s()(a, b)(i, j)));
+                DtxqcdToStd(TensorRemove(pi_s()(a, b)(i, j)));
             out.d(Kab(a, i), Kab(b, j)) =
-                ComplexD(TensorRemove(d_s()(a, b)(i, j)));
+                DtxqcdToStd(TensorRemove(d_s()(a, b)(i, j)));
             out.n(Kab(a, i), Kab(b, j)) =
-                ComplexD(TensorRemove(n_s()(a, b)(i, j)));
+                DtxqcdToStd(TensorRemove(n_s()(a, b)(i, j)));
           }
         }
       }
     }
-    out.s = ComplexD(TensorRemove(s_s()()())).real();
-    out.p = ComplexD(TensorRemove(p_s()()())).real();
+    out.s = DtxqcdToStd(TensorRemove(s_s()()())).real();
+    out.p = DtxqcdToStd(TensorRemove(p_s()()())).real();
+    return out;
+  }
+
+  // Build from already-peeked per-site objects (no peekSite).  Used by the
+  // multi-rank-LOCAL, GPU-safe cache build: unvectorizeToLexOrdArray the per-CB
+  // aux lattices once, then call this per local lex site.  Templated on the
+  // scalar_object types so callers don't repeat the typedefs.
+  template <class SigS, class PiS, class DS, class NS, class SS, class PS>
+  static DtxqcdSiteAux FromSobjs(const SigS &sig_s, const PiS &pi_s,
+                                 const DS &d_s, const NS &n_s,
+                                 const SS &s_s, const PS &p_s) {
+    DtxqcdSiteAux out;
+    for (int a = 0; a < DtxqcdNf; ++a)
+      for (int b = 0; b < DtxqcdNf; ++b)
+        for (int i = 0; i < Nc; ++i)
+          for (int j = 0; j < Nc; ++j) {
+            out.sigma(Kab(a, i), Kab(b, j)) = DtxqcdToStd(TensorRemove(sig_s()(a, b)(i, j)));
+            out.pi   (Kab(a, i), Kab(b, j)) = DtxqcdToStd(TensorRemove(pi_s()(a, b)(i, j)));
+            out.d    (Kab(a, i), Kab(b, j)) = DtxqcdToStd(TensorRemove(d_s()(a, b)(i, j)));
+            out.n    (Kab(a, i), Kab(b, j)) = DtxqcdToStd(TensorRemove(n_s()(a, b)(i, j)));
+          }
+    out.s = DtxqcdToStd(TensorRemove(s_s()()())).real();
+    out.p = DtxqcdToStd(TensorRemove(p_s()()())).real();
     return out;
   }
 };
@@ -156,7 +182,21 @@ struct DtxqcdSiteClover {
       out.F_munu[p] = Eigen::Matrix3cd::Zero();
       for (int i = 0; i < Nc; ++i)
         for (int j = 0; j < Nc; ++j)
-          out.F_munu[p](i, j) = ComplexD(TensorRemove(f_s()()(i, j)));
+          out.F_munu[p](i, j) = DtxqcdToStd(TensorRemove(f_s()()(i, j)));
+    }
+    return out;
+  }
+
+  // Build from already-peeked per-site F_{mu,nu} objects (no peekSite), for the
+  // multi-rank-local cache build.
+  template <class FmnS>
+  static DtxqcdSiteClover FromSobjs(const std::array<FmnS, 6> &f_arr) {
+    DtxqcdSiteClover out;
+    for (int p = 0; p < 6; ++p) {
+      out.F_munu[p] = Eigen::Matrix3cd::Zero();
+      for (int i = 0; i < Nc; ++i)
+        for (int j = 0; j < Nc; ++j)
+          out.F_munu[p](i, j) = DtxqcdToStd(TensorRemove(f_arr[p]()()(i, j)));
     }
     return out;
   }
@@ -185,7 +225,7 @@ inline void DtxqcdBuildDiagBlock24(double mass,
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int row = 0; row < kDtxqcdSiteDim24; ++row) M(row, row) = ComplexD(mass_diag, 0);
 
-  const ComplexD bs(block_sign, 0.0);
+  const std::complex<double> bs(block_sign, 0.0);
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       for (int i = 0; i < Nc; ++i) {
@@ -199,8 +239,8 @@ inline void DtxqcdBuildDiagBlock24(double mass,
           // the Fierz identity is exact).
           int aab = transpose_aux ? kab2 : kab1;
           int bab = transpose_aux ? kab1 : kab2;
-          ComplexD sig_ij_ab = aux.sigma(aab, bab);
-          ComplexD pi_ij_ab  = aux.pi   (aab, bab);
+          std::complex<double> sig_ij_ab = aux.sigma(aab, bab);
+          std::complex<double> pi_ij_ab  = aux.pi   (aab, bab);
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int row = DtxqcdSiteIdx24(a, alpha, i);
             // Scalar sigma: diagonal in spin.
@@ -222,11 +262,11 @@ inline void DtxqcdBuildDiagBlock24(double mass,
       for (int alpha = 0; alpha < Ns; ++alpha) {
         int row = DtxqcdSiteIdx24(a, alpha, i);
         // s I in spin
-        M(row, row) += bs * ComplexD(aux.s, 0.0);
+        M(row, row) += bs * std::complex<double>(aux.s, 0.0);
         // p gamma5
         for (int beta = 0; beta < Ns; ++beta) {
           int col = DtxqcdSiteIdx24(a, beta, i);
-          M(row, col) += bs * ComplexD(aux.p, 0.0) * spin.gamma5(alpha, beta);
+          M(row, col) += bs * std::complex<double>(aux.p, 0.0) * spin.gamma5(alpha, beta);
         }
       }
     }
@@ -265,7 +305,7 @@ inline void DtxqcdAddCloverToDiagBlock24(
     for (int a = 0; a < DtxqcdNf; ++a) {
       for (int alpha = 0; alpha < Ns; ++alpha) {
         for (int beta = 0; beta < Ns; ++beta) {
-          ComplexD smn_ab = spin.sigma_munu[p](alpha, beta);
+          std::complex<double> smn_ab = spin.sigma_munu[p](alpha, beta);
           for (int i = 0; i < Nc; ++i) {
             for (int j = 0; j < Nc; ++j) {
               int row = DtxqcdSiteIdx24(a, alpha, i);
@@ -320,7 +360,7 @@ inline void DtxqcdBuildLowerBlock24(double mass,
 inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
                                       const DtxqcdSpinMatrices& spin,
                                       Eigen::MatrixXcd& M) {
-  const ComplexD sqrt2(DtxqcdOffdiagFactor(), 0.0);
+  const std::complex<double> sqrt2(DtxqcdOffdiagFactor(), 0.0);
   M = Eigen::MatrixXcd::Zero(kDtxqcdSiteDim24, kDtxqcdSiteDim24);
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
@@ -328,8 +368,8 @@ inline void DtxqcdBuildOffDiagBlock24(const DtxqcdSiteAux& aux,
         for (int j = 0; j < Nc; ++j) {
           int kab1 = DtxqcdSiteAux::Kab(a, i);
           int kab2 = DtxqcdSiteAux::Kab(b, j);
-          ComplexD d_ij_ab = sqrt2 * aux.d(kab1, kab2);
-          ComplexD n_ij_ab = sqrt2 * aux.n(kab1, kab2);
+          std::complex<double> d_ij_ab = sqrt2 * aux.d(kab1, kab2);
+          std::complex<double> n_ij_ab = sqrt2 * aux.n(kab1, kab2);
           for (int alpha = 0; alpha < Ns; ++alpha) {
             int row = DtxqcdSiteIdx24(a, alpha, i);
             // n: diagonal in spin

@@ -368,8 +368,8 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
             // Symmetrized bilinear (same Wirtinger argument as EO).
             auto Bil = [&X_x, &Y_x](int R, int C) -> ComplexD {
               return ComplexD(0.5, 0.0) *
-                  (std::conj(Y_x[C]) * X_x[R]
-                 + std::conj(X_x[C]) * Y_x[R]);
+                  (DtxqcdConj(Y_x[C]) * X_x[R]
+                 + DtxqcdConj(X_x[C]) * Y_x[R]);
             };
 
             SigSobj sig_force;

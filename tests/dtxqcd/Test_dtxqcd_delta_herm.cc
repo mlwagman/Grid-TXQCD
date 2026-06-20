@@ -42,8 +42,8 @@ int main(int argc, char **argv) {
                         const DTXQCDFermionNf &Dw) {
     ComplexD wDv = innerProduct(w, Dv);
     ComplexD vDw = innerProduct(v, Dw);
-    RealD herm_resid = std::abs(wDv - std::conj(vDw));
-    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
+    RealD herm_resid = DtxqcdAbs(wDv - DtxqcdConj(vDw));
+    RealD ref = std::max({DtxqcdAbs(wDv), DtxqcdAbs(vDw), 1.0});
     check(name, herm_resid / ref, 1e-10);
   };
 

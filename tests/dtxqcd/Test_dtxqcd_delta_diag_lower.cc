@@ -84,8 +84,8 @@ int main(int argc, char **argv) {
     DtxqcdApplyDeltaDiagLower(sigma, pi, s, p, w, Dw);
     ComplexD wDv = innerProduct(w, Dv);
     ComplexD vDw = innerProduct(v, Dw);
-    RealD resid = std::abs(wDv - std::conj(vDw));
-    RealD refnorm = std::max({std::abs(wDv), std::abs(vDw), 1.0});
+    RealD resid = DtxqcdAbs(wDv - DtxqcdConj(vDw));
+    RealD refnorm = std::max({DtxqcdAbs(wDv), DtxqcdAbs(vDw), 1.0});
     check("Delta_diag_lower Hermiticity (rel)", resid / refnorm, 1e-12);
   }
 

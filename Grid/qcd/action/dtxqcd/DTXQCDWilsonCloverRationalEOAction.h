@@ -163,8 +163,12 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     Xk.reserve(Npole);
     for (int k = 0; k < Npole; ++k) Xk.emplace_back(&rbgrid_);
     std::vector<RealD> md_tol(Npole, param_.mdtolerance);
+    GridStopWatch t_cg, t_force;  // perf instrumentation: CG vs force-assembly
+    t_cg.Start();
     DTXQCDMultiShiftCG(Mop, PowerNegQuarter.poles, md_tol, Phi_, Xk,
                        param_.MaxIter);
+    t_cg.Stop();
+    t_force.Start();
 
     // ---- Build F_{mu,nu} field strength (for clover, csw != 0 only) ----
     std::vector<LatticeColourMatrix> FS;
@@ -306,6 +310,10 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       // hopping gauge force (already added per pole) is preserved.
       dSdU.U = dSdU.U + ComplexD(-0.5, 0.0) * clover_force;
     }
+    t_force.Stop();
+    std::cout << GridLogMessage << "[" << action_name()
+              << "] deriv timing: CG=" << t_cg.Elapsed()
+              << "  force-assembly=" << t_force.Elapsed() << std::endl;
   }
 
   DTXQCDFermionDoubled &PseudoFermion() { return Phi_; }
@@ -428,6 +436,22 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     dSdU.U = dSdU.U + ak * (gforce_upper + gforce_lower);
   }
 
+  // Accumulate (+= coef * arr) a lex-ordered CB host array into the CB sites of
+  // a full-grid lattice (odd/even sites of `full`; the other parity untouched).
+  // Used by AccumulateSiteForces, which sums per-pole/per-CB into dSdU.
+  template <class Field, class Sobj>
+  void AddEvenOddToFull(std::vector<Sobj> &arr, Field &full, int cb,
+                        ComplexD coef) {
+    Field contrib(&rbgrid_);
+    contrib.Checkerboard() = cb;
+    vectorizeFromLexOrdArray(arr, contrib);
+    Field cur(&rbgrid_);
+    cur.Checkerboard() = cb;
+    pickCheckerboard(cb, cur, full);
+    cur = cur + coef * contrib;
+    setCheckerboard(full, cur);
+  }
+
   // Per-pole per-CB site loop: accumulate aux + clover-sigma contributions
   // from the bilinear (Y, X) into dSdU and clover_sigma_full.
   //
@@ -449,102 +473,85 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     using DtxqcdSiteForceKernel::PSobj;
     using DtxqcdSiteForceKernel::CMsobj;
 
-    Coordinate gd(grid_.GlobalDimensions());
+    typedef typename LatticeFermion::vector_object::scalar_object Fsobj;
+    const int cb = odd_cb ? Odd : Even;
     const ComplexD coef(2.0 * ak, 0.0);
 
-    for (int x = 0; x < gd[0]; ++x)
-      for (int y = 0; y < gd[1]; ++y)
-        for (int z = 0; z < gd[2]; ++z)
-          for (int s = 0; s < gd[3]; ++s) {
-            bool site_is_odd = (((x + y + z + s) & 1) == 1);
-            if (site_is_odd != odd_cb) continue;
-            Coordinate coord(std::vector<int>{x, y, z, s});
+    // Unvectorize the per-pole CG solutions on THIS rank's CB sublattice.  The
+    // rational force uses ONLY the fermion bilinear Bil(R,C) (no aux peek), so
+    // X, Y are all we unvectorize.  Local + parallel; replaces the serial
+    // global-coord peekSite loop (the ~69 s/eval bottleneck + multi-rank
+    // OOM/over-count).  Accumulation (+=) into dSdU is preserved per CB.
+    std::array<std::vector<Fsobj>, DtxqcdNf> Xu, Xl, Yu, Yl;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      unvectorizeToLexOrdArray(Xu[a], X.upper.f[a]);
+      unvectorizeToLexOrdArray(Xl[a], X.lower.f[a]);
+      unvectorizeToLexOrdArray(Yu[a], Y.upper.f[a]);
+      unvectorizeToLexOrdArray(Yl[a], Y.lower.f[a]);
+    }
+    const uint64_t Nsite = Xu[0].size();
 
-            std::array<ComplexD, kDim48> X_x, Y_x;
-            ExtractSiteVec48(X, coord, X_x);
-            ExtractSiteVec48(Y, coord, Y_x);
+    std::vector<SigSobj> fsig(Nsite); std::vector<PiSobj> fpi(Nsite);
+    std::vector<DSobj>   fd(Nsite);   std::vector<NSobj>  fn(Nsite);
+    std::vector<SSobj>   fss(Nsite);  std::vector<PSobj>  fpp(Nsite);
+    std::array<std::vector<CMsobj>, 6> fcs;
+    if (csw_ != 0.0) for (int k = 0; k < 6; ++k) fcs[k].resize(Nsite);
 
-            // Bil(R, C) = 0.5 * [conj(Y[C]) * X[R] + conj(X[C]) * Y[R]]
-            //
-            // (Y, X) symmetrization, mirroring TXQCDWilsonCloverRationalEOAction's
-            // conj(Y)*X + conj(X)*Y clover-sigma formula.  Without it, the
-            // asymmetric conj(Y[C])*X[R] is the natural-Wirtinger bilinear
-            // (gives the right Re value when summed against a real direction
-            // for the aux force test), but its complex Im part leaks into the
-            // clover_sigma_full and pollutes Cmunu's chain rule when the FD
-            // gauge-perturbation test extracts Re Tr(E * F_mu).  The
-            // symmetrization sets val_sym = Re(val_orig) for the aux force
-            // kernels (no change in effective Re-projected output) and gives
-            // the proper "cs = -conj(dS_k/dF)" form for the clover kernel.
-            //
-            // The R↔C swap of indices (vs LogDet's Inv(R, C) = M^{-1}[R][C])
-            // is still needed: the kernel evaluates Tr-formula entries
-            // A[K, R] * dM[R, K] (K is the column of dM), while we want
-            // Y^dag dM X = sum dM[R, C] conj(Y[R]) X[C], so the natural-
-            // Wirtinger half stores conj(Y[C])*X[R].  The 0.5*(...) average
-            // and the (X, Y)-swap cancel the Wirtinger Im contribution.
-            auto Bil = [&X_x, &Y_x](int R, int C) -> ComplexD {
-              return ComplexD(0.5, 0.0) *
-                  (std::conj(Y_x[C]) * X_x[R]
-                 + std::conj(X_x[C]) * Y_x[R]);
-            };
-
-            SigSobj sig_force;
-            PiSobj  pi_force;
-            DSobj   d_force;
-            NSobj   n_force;
-            SSobj   s_force;
-            PSobj   p_force;
-            DtxqcdSiteForceKernel::AuxForceAt(Bil, spin_, sig_force,
-                                               pi_force, d_force, n_force,
-                                               s_force, p_force);
-
-            // Accumulate into dSdU (peek + add scaled + poke).  For the four
-            // CF Hermitian fields we iterate the combined (a, b, i, j) index.
-            // Wirtinger -> physical-gradient conversion: transpose(F_W) for
-            // Hermitian F_W.  See companion comment in
-            // DTXQCDLogDetCloverEOAction.h::deriv() for the derivation.
-            auto AddCF = [&](LatticeDtxqcdSigma &dst, const SigSobj &fv) {
-              SigSobj cur; peekSite(cur, dst, coord);
-              for (int a = 0; a < DtxqcdNf; ++a)
-                for (int b = 0; b < DtxqcdNf; ++b)
-                  for (int i = 0; i < Nc; ++i)
-                    for (int j = 0; j < Nc; ++j)
-                      cur()(a, b)(i, j) =
-                          cur()(a, b)(i, j) + coef * fv()(b, a)(j, i);
-              pokeSite(cur, dst, coord);
-            };
-            AddCF(dSdU.sigma, sig_force);
-            AddCF(dSdU.pi,    pi_force);
-            AddCF(dSdU.d,     d_force);
-            AddCF(dSdU.n,     n_force);
-
-            // Singlet scalars.
-            {
-              SSobj cur; peekSite(cur, dSdU.s, coord);
-              cur()()() = cur()()() + coef * s_force()()();
-              pokeSite(cur, dSdU.s, coord);
-            }
-            {
-              PSobj cur; peekSite(cur, dSdU.p, coord);
-              cur()()() = cur()()() + coef * p_force()()();
-              pokeSite(cur, dSdU.p, coord);
-            }
-
-            // Clover sigma contribution (csw != 0 only).
-            if (csw_ != 0.0) {
-              std::array<CMsobj, 6> cs_arr;
-              DtxqcdSiteForceKernel::CloverSigmaAt(Bil, spin_, csw_, cs_arr);
-              for (int p = 0; p < 6; ++p) {
-                CMsobj cur; peekSite(cur, clover_sigma_full[p], coord);
-                for (int i_c = 0; i_c < Nc; ++i_c)
-                  for (int j_c = 0; j_c < Nc; ++j_c)
-                    cur()()(i_c, j_c) = cur()()(i_c, j_c)
-                                      + coef * cs_arr[p]()()(i_c, j_c);
-                pokeSite(cur, clover_sigma_full[p], coord);
-              }
-            }
+    thread_for(idx, Nsite, {
+      std::array<ComplexD, kDim48> X_x, Y_x;
+      for (int a = 0; a < DtxqcdNf; ++a)
+        for (int alpha = 0; alpha < Ns; ++alpha)
+          for (int i = 0; i < Nc; ++i) {
+            int r = DtxqcdSiteIdx24(a, alpha, i);
+            X_x[r]          = ComplexD(Xu[a][idx]()(alpha)(i).real(),
+                                       Xu[a][idx]()(alpha)(i).imag());
+            X_x[kDim24 + r] = ComplexD(Xl[a][idx]()(alpha)(i).real(),
+                                       Xl[a][idx]()(alpha)(i).imag());
+            Y_x[r]          = ComplexD(Yu[a][idx]()(alpha)(i).real(),
+                                       Yu[a][idx]()(alpha)(i).imag());
+            Y_x[kDim24 + r] = ComplexD(Yl[a][idx]()(alpha)(i).real(),
+                                       Yl[a][idx]()(alpha)(i).imag());
           }
+      // Bil(R,C) = 0.5*[conj(Y[C])X[R] + conj(X[C])Y[R]]  (Y<->X symmetrized
+      // Wirtinger bilinear; cancels the Im leak into the clover chain rule).
+      auto Bil = [&X_x, &Y_x](int R, int C) -> ComplexD {
+        return ComplexD(0.5, 0.0) *
+            (DtxqcdConj(Y_x[C]) * X_x[R] + DtxqcdConj(X_x[C]) * Y_x[R]);
+      };
+      SigSobj sig_force; PiSobj pi_force; DSobj d_force;
+      NSobj n_force; SSobj s_force; PSobj p_force;
+      DtxqcdSiteForceKernel::AuxForceAt(Bil, spin_, sig_force, pi_force,
+                                        d_force, n_force, s_force, p_force);
+      if (csw_ != 0.0) {
+        std::array<CMsobj, 6> cs_arr;
+        DtxqcdSiteForceKernel::CloverSigmaAt(Bil, spin_, csw_, cs_arr);
+        for (int k = 0; k < 6; ++k) fcs[k][idx] = cs_arr[k];
+      }
+      // Wirtinger -> physical: transpose (a<->b, i<->j) on the CF fields.
+      auto T = [](const auto &fv, auto &ft) {
+        for (int a = 0; a < DtxqcdNf; ++a)
+          for (int b = 0; b < DtxqcdNf; ++b)
+            for (int i = 0; i < Nc; ++i)
+              for (int j = 0; j < Nc; ++j)
+                ft()(a, b)(i, j) = fv()(b, a)(j, i);
+      };
+      T(sig_force, fsig[idx]);
+      T(pi_force,  fpi[idx]);
+      T(d_force,   fd[idx]);
+      T(n_force,   fn[idx]);
+      fss[idx] = s_force;
+      fpp[idx] = p_force;
+    });
+
+    AddEvenOddToFull(fsig, dSdU.sigma, cb, coef);
+    AddEvenOddToFull(fpi,  dSdU.pi,    cb, coef);
+    AddEvenOddToFull(fd,   dSdU.d,     cb, coef);
+    AddEvenOddToFull(fn,   dSdU.n,     cb, coef);
+    AddEvenOddToFull(fss,  dSdU.s,     cb, coef);
+    AddEvenOddToFull(fpp,  dSdU.p,     cb, coef);
+    if (csw_ != 0.0)
+      for (int k = 0; k < 6; ++k)
+        AddEvenOddToFull(fcs[k], clover_sigma_full[k], cb, coef);
   }
 
   GridCartesian         &grid_;

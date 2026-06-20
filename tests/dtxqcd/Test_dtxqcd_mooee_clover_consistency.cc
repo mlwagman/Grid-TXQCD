@@ -158,8 +158,8 @@ int main(int argc, char **argv) {
                 ComplexD dl =
                     ComplexD(TensorRemove(sl_op()(alpha)(i)))
                   - ComplexD(TensorRemove(sl_ref()(alpha)(i)));
-                worst_resid = std::max(worst_resid, std::abs(du));
-                worst_resid = std::max(worst_resid, std::abs(dl));
+                worst_resid = std::max(worst_resid, DtxqcdAbs(du));
+                worst_resid = std::max(worst_resid, DtxqcdAbs(dl));
               }
             }
           }

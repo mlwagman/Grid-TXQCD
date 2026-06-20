@@ -73,10 +73,10 @@ int main(int argc, char **argv) {
     DtxqcdApplyCloverUpper(csw, FS, w, Dw);
     ComplexD wDv = innerProduct(w, Dv);
     ComplexD vDw = innerProduct(v, Dw);
-    RealD resid = std::abs(wDv - std::conj(vDw));
-    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
+    RealD resid = DtxqcdAbs(wDv - DtxqcdConj(vDw));
+    RealD ref = std::max({DtxqcdAbs(wDv), DtxqcdAbs(vDw), 1.0});
     std::cout << GridLogMessage << "  upper: <w,Dv> = " << wDv
-              << "  conj(<v,Dw>) = " << std::conj(vDw) << std::endl;
+              << "  conj(<v,Dw>) = " << DtxqcdConj(vDw) << std::endl;
     check("upper-block Hermiticity (rel)", resid / ref, 1e-12);
   }
 
@@ -87,10 +87,10 @@ int main(int argc, char **argv) {
     DtxqcdApplyCloverLower(csw, FS, w, Dw);
     ComplexD wDv = innerProduct(w, Dv);
     ComplexD vDw = innerProduct(v, Dw);
-    RealD resid = std::abs(wDv - std::conj(vDw));
-    RealD ref = std::max({std::abs(wDv), std::abs(vDw), 1.0});
+    RealD resid = DtxqcdAbs(wDv - DtxqcdConj(vDw));
+    RealD ref = std::max({DtxqcdAbs(wDv), DtxqcdAbs(vDw), 1.0});
     std::cout << GridLogMessage << "  lower: <w,Dv> = " << wDv
-              << "  conj(<v,Dw>) = " << std::conj(vDw) << std::endl;
+              << "  conj(<v,Dw>) = " << DtxqcdConj(vDw) << std::endl;
     check("lower-block Hermiticity (rel)", resid / ref, 1e-12);
   }
 

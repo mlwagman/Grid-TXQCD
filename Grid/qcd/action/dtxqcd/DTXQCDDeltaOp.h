@@ -34,22 +34,11 @@ NAMESPACE_BEGIN(Grid);
 // the DOF count and effectively rescales the off-diagonal coupling by
 // 1/√2 — exactly cancelling the algebraic √2.
 //
-// Env knob DTXQCD_OFFDIAG_FACTOR overrides the default 1.0 for
-// diagnostic runs (e.g. testing the complex-d/n variant with factor=√2).
-static inline RealD DtxqcdOffdiagFactor() {
-  static const RealD f = []() {
-    if (const char *v = std::getenv("DTXQCD_OFFDIAG_FACTOR"); v && *v) {
-      RealD x = std::atof(v);
-      std::cout << GridLogMessage
-                << "[DTXQCD] off-diagonal d/n factor overridden via "
-                   "DTXQCD_OFFDIAG_FACTOR=" << x
-                << "  (default 1.0)" << std::endl;
-      return x;
-    }
-    return 1.0;
-  }();
-  return f;
-}
+// LOCKED to 1.0.  constexpr -- like DtxqcdDnComplexSymmetric() and
+// DtxqcdSigmaPiHermitianOnly() -- so it folds to a literal in the GPU kernels
+// and the CPU path alike.  The legacy DTXQCD_OFFDIAG_FACTOR env knob is now
+// IGNORED (the complex-d/n sqrt(2) variant is no longer a runtime option).
+constexpr RealD DtxqcdOffdiagFactor() { return 1.0; }
 
 // Nf-flavor doublet fermion.  Same struct as v1; unchanged in v2 since it
 // only depends on Nf, not the aux roster.

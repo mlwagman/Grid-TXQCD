@@ -85,10 +85,10 @@ int main(int argc, char **argv) {
   ComplexD vMw = doubled_inner(v_u, v_l, Mw_u, Mw_l);
 
   std::cout << GridLogMessage << "<w, M v>           = " << wMv << std::endl;
-  std::cout << GridLogMessage << "conj(<v, M w>)     = " << std::conj(vMw) << std::endl;
+  std::cout << GridLogMessage << "conj(<v, M w>)     = " << DtxqcdConj(vMw) << std::endl;
 
-  RealD herm = std::abs(wMv - std::conj(vMw));
-  RealD ref  = std::max({std::abs(wMv), std::abs(vMw), 1.0});
+  RealD herm = DtxqcdAbs(wMv - DtxqcdConj(vMw));
+  RealD ref  = std::max({DtxqcdAbs(wMv), DtxqcdAbs(vMw), 1.0});
   check("M_ee Hermiticity |<w,Mv> - conj(<v,Mw>)| (rel)", herm / ref, 1e-12);
 
   std::cout << GridLogMessage

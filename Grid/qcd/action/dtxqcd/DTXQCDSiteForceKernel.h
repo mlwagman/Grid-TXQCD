@@ -169,7 +169,7 @@ inline void AuxForceAt(InvLookup Inv,
                 // anti-holomorphic ∂_{d*} (via LL) contribute; AuxInnerReal
                 // uses conj(Y), so the holomorphic term needs a conj to
                 // land on the right Re/Im signs.
-                val += g5 * (std::conj(Inv(kDim24 + cb, ra)) + Inv(cb, kDim24 + ra));
+                val += g5 * (DtxqcdConj(Inv(kDim24 + cb, ra)) + Inv(cb, kDim24 + ra));
               } else {
                 // Hermitian d: both UR + LL positions contribute directly.
                 val += g5 * (Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra));
@@ -197,7 +197,7 @@ inline void AuxForceAt(InvLookup Inv,
             int ra = DtxqcdSiteIdx24(a, alpha, i);
             int cb = DtxqcdSiteIdx24(b, alpha, j);
             if (dn_cs) {
-              val += std::conj(Inv(kDim24 + cb, ra)) + Inv(cb, kDim24 + ra);
+              val += DtxqcdConj(Inv(kDim24 + cb, ra)) + Inv(cb, kDim24 + ra);
             } else {
               val += Inv(kDim24 + cb, ra) + Inv(cb, kDim24 + ra);
             }
@@ -284,7 +284,7 @@ inline void CloverSigmaAt(InvLookup Inv,
             }
           }
         }
-        cs()()(i_c, j_c) = ComplexD(-0.5 * csw, 0.0) * std::conj(val);
+        cs()()(i_c, j_c) = ComplexD(-0.5 * csw, 0.0) * DtxqcdConj(val);
       }
     }
     clover_sigma[p_idx] = cs;

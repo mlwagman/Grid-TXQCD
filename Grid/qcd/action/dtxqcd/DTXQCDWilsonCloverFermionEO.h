@@ -41,7 +41,9 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMooeeOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDDeltaCloverOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDBatchedInverse48.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
+#include <cstring>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -336,31 +338,57 @@ class DTXQCDWilsonCloverFermionEO {
     inv = Zero();
     inv.Checkerboard() = cb;
 
-    Coordinate gd(grid_.GlobalDimensions());
+    // LOCAL, per-rank build.  Unvectorize the per-CB aux (+FS) copies ONCE into
+    // lex-ordered host arrays for THIS rank's sublattice, then build/invert M48
+    // per local site.  Previously this looped grid_.GlobalDimensions() with
+    // peekSite -> every rank built the entire global cache (3.6 GB buffers ->
+    // OOM at mpi != 1.1.1.1) and the work was N_ranks-redundant.  Unvectorizing
+    // also removes peekSite from the hot loop, so the build is GPU-safe to
+    // thread_for (no per-lattice view-lock corruption).  Mirrors TXQCD.
+    const auto &sig_L = (cb == Even) ? sigma_e_ : sigma_o_;
+    const auto &pi_L  = (cb == Even) ? pi_e_    : pi_o_;
+    const auto &d_L   = (cb == Even) ? d_e_     : d_o_;
+    const auto &n_L   = (cb == Even) ? n_e_     : n_o_;
+    const auto &s_L   = (cb == Even) ? s_e_     : s_o_;
+    const auto &p_L   = (cb == Even) ? p_e_     : p_o_;
 
-    // Flatten the 4D grid into a 1D index list for the requested CB so we
-    // can thread_for over it.  Inverse construction is per-site independent.
-    std::vector<Coordinate> coords;
-    coords.reserve(grid_.lSites() / 2);
-    for (int x = 0; x < gd[0]; ++x)
-      for (int y = 0; y < gd[1]; ++y)
-        for (int z = 0; z < gd[2]; ++z)
-          for (int s = 0; s < gd[3]; ++s) {
-            int parity = (x + y + z + s) & 1;
-            if (parity != cb) continue;
-            coords.push_back(Coordinate(std::vector<int>{x, y, z, s}));
-          }
+    typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSob;
+    typedef typename LatticeDtxqcdPi::vector_object::scalar_object    PiSob;
+    typedef typename LatticeDtxqcdD::vector_object::scalar_object     DSob;
+    typedef typename LatticeDtxqcdN::vector_object::scalar_object     NSob;
+    typedef typename LatticeDtxqcdS::vector_object::scalar_object     SSob;
+    typedef typename LatticeDtxqcdP::vector_object::scalar_object     PSob;
+    typedef typename LatticeColourMatrix::vector_object::scalar_object CMSob;
 
-    const uint64_t Nsite = coords.size();
-    std::vector<SmatSobj> sobjs(Nsite);
+    std::vector<SigSob> sig_a; std::vector<PiSob> pi_a;
+    std::vector<DSob>   d_a;   std::vector<NSob>  n_a;
+    std::vector<SSob>   s_a;   std::vector<PSob>  p_a;
+    unvectorizeToLexOrdArray(sig_a, sig_L);
+    unvectorizeToLexOrdArray(pi_a,  pi_L);
+    unvectorizeToLexOrdArray(d_a,   d_L);
+    unvectorizeToLexOrdArray(n_a,   n_L);
+    unvectorizeToLexOrdArray(s_a,   s_L);
+    unvectorizeToLexOrdArray(p_a,   p_L);
+    const uint64_t Nsite = sig_a.size();
 
-    thread_for(idx, Nsite, {
-      const Coordinate &coord = coords[idx];
-      DtxqcdSiteAux aux =
-          DtxqcdSiteAux::Extract(sigma_, pi_, d_, n_, s_, p_, coord);
-      Eigen::MatrixXcd M_upper, M_lower, M_off, M48;
+    std::vector<std::array<CMSob, 6>> fs_a;  // per-local-site F_{mu,nu} (csw!=0)
+    if (csw_ != 0.0) {
+      const auto &FS_L = (cb == Even) ? FS_e_ : FS_o_;
+      std::array<std::vector<CMSob>, 6> fk;
+      for (int k = 0; k < 6; ++k) unvectorizeToLexOrdArray(fk[k], FS_L[k]);
+      fs_a.resize(Nsite);
+      for (uint64_t x = 0; x < Nsite; ++x)
+        for (int k = 0; k < 6; ++k) fs_a[x][k] = fk[k][x];
+    }
+
+    // Build the forward 48x48 M_ee at local lex site idx (host Eigen, no
+    // peekSite -> safe + parallel under thread_for).
+    auto build_M48 = [&](uint64_t idx, Eigen::MatrixXcd &M48) {
+      DtxqcdSiteAux aux = DtxqcdSiteAux::FromSobjs(
+          sig_a[idx], pi_a[idx], d_a[idx], n_a[idx], s_a[idx], p_a[idx]);
+      Eigen::MatrixXcd M_upper, M_lower, M_off;
       if (csw_ != 0.0) {
-        DtxqcdSiteClover clover = DtxqcdSiteClover::Extract(FS_, coord);
+        DtxqcdSiteClover clover = DtxqcdSiteClover::FromSobjs(fs_a[idx]);
         DtxqcdBuildUpperBlock24(mass_, aux, spin_, M_upper, csw_, &clover);
         DtxqcdBuildLowerBlock24(mass_, aux, spin_, M_lower, csw_, &clover);
       } else {
@@ -369,38 +397,99 @@ class DTXQCDWilsonCloverFermionEO {
       }
       DtxqcdBuildOffDiagBlock24(aux, spin_, M_off);
       DtxqcdAssembleDoubled48(M_upper, M_lower, M_off, M48);
+    };
 
-      Eigen::MatrixXcd Minv = M48.inverse();
+    std::vector<SmatSobj> sobjs(Nsite);
 
-      SmatSobj sobj;
-      sobj = Zero();
-      for (int r = 0; r < kDim48; ++r)
-        for (int c = 0; c < kDim48; ++c)
-          sobj()()(r, c) = Minv(r, c);
-      sobjs[idx] = sobj;
-    });
+    // Gate the per-site 48x48 inversion -- the dominant cost -- onto one batched
+    // cuBLAS getrf+getri (DTXQCD_PRECOMPUTE_GPU, default ON on CUDA).  CPU
+    // reference keeps the per-site Eigen inverse.  Both fill sobjs identically.
+    static int use_gpu = []() {
+#ifndef GRID_CUDA
+      return 0;
+#else
+      const char *e = std::getenv("DTXQCD_PRECOMPUTE_GPU");
+      if (!e || !*e) return 1;
+      return std::atoi(e);
+#endif
+    }();
 
-    // pokeSite is not thread-safe on the same lattice; do the pokes serially
-    // (much cheaper than the per-site inversion above).
-    for (uint64_t idx = 0; idx < Nsite; ++idx) {
-      pokeSite(sobjs[idx], inv, coords[idx]);
+#ifdef GRID_CUDA
+    if (use_gpu) {
+      const int N = kDim48, N2 = N * N;
+      std::vector<std::complex<double>> h_fwd((size_t)Nsite * N2);
+      thread_for(idx, Nsite, {
+        Eigen::MatrixXcd M48;
+        build_M48(idx, M48);                   // Eigen storage is column-major
+        std::memcpy(&h_fwd[(size_t)idx * N2], M48.data(),
+                    (size_t)N2 * sizeof(std::complex<double>));
+      });
+      DtxqcdBlas::BatchedInverse48::Ensure(Nsite, /*need_inv=*/true);
+      acceleratorCopyToDevice((void *)h_fwd.data(),
+                              (void *)&DtxqcdBlas::BatchedInverse48::M_fwd[0],
+                              (size_t)Nsite * N2 * sizeof(ComplexD));
+      DtxqcdBlas::BatchedInverse48::Invert(Nsite);
+      std::vector<std::complex<double>> h_inv((size_t)Nsite * N2);
+      acceleratorCopyFromDevice((void *)&DtxqcdBlas::BatchedInverse48::M_inv[0],
+                                (void *)h_inv.data(),
+                                (size_t)Nsite * N2 * sizeof(ComplexD));
+      thread_for(idx, Nsite, {
+        const std::complex<double> *src = &h_inv[(size_t)idx * N2];
+        SmatSobj sobj;
+        sobj = Zero();
+        for (int r = 0; r < N; ++r)
+          for (int c = 0; c < N; ++c)
+            sobj()()(r, c) = src[(size_t)c * N + r];  // column-major -> (r,c)
+        sobjs[idx] = sobj;
+      });
+    } else
+#endif
+    {
+      thread_for(idx, Nsite, {
+        Eigen::MatrixXcd M48;
+        build_M48(idx, M48);
+        Eigen::MatrixXcd Minv = M48.inverse();
+        SmatSobj sobj;
+        sobj = Zero();
+        for (int r = 0; r < kDim48; ++r)
+          for (int c = 0; c < kDim48; ++c)
+            sobj()()(r, c) = Minv(r, c);
+        sobjs[idx] = sobj;
+      });
     }
 
-    // Multi-RHS path also needs a lex-ordered std::vector<Eigen::MatrixXcd>
-    // matching Grid's CB-lex convention (the same order unvectorizeToLexOrdArray
-    // produces on the input fermion).  Build by unvectorizing the SIMD field
-    // we just populated -- this guarantees index alignment with the fermion
-    // pack/unpack in ApplyInverseLex below, regardless of how my (x,y,z,t)
-    // iteration order above maps onto Grid's CB-lex enumeration.
-    std::vector<SmatSobj> lex_sobjs;
-    unvectorizeToLexOrdArray(lex_sobjs, inv);
+#ifdef GRID_CUDA
+    // Phase 1b: persistent per-CB device inverse (batched column-major) for the
+    // cuBLAS MooeeInvN path in ApplyInverseLex.  Same local lex order as sobjs.
+    {
+      const int Nb = kDim48, Nb2 = Nb * Nb;
+      deviceVector<ComplexD> &inv_dev = (cb == Even) ? inv_dev_e_ : inv_dev_o_;
+      uint64_t &inv_dev_n = (cb == Even) ? inv_dev_n_e_ : inv_dev_n_o_;
+      if (inv_dev.size() < (size_t)Nsite * Nb2) inv_dev.resize((size_t)Nsite * Nb2);
+      std::vector<ComplexD> h_id((size_t)Nsite * Nb2);
+      thread_for(idx, Nsite, {
+        ComplexD *dst = &h_id[(size_t)idx * Nb2];
+        for (int r = 0; r < Nb; ++r)
+          for (int c = 0; c < Nb; ++c)
+            dst[(size_t)c * Nb + r] = sobjs[idx]()()(r, c);  // column-major
+      });
+      acceleratorCopyToDevice((void *)h_id.data(), (void *)&inv_dev[0],
+                              (size_t)Nsite * Nb2 * sizeof(ComplexD));
+      inv_dev_n = Nsite;
+    }
+#endif
+
+    // Pack the local lex-ordered inverses into the SIMD cache (inverse of the
+    // unvectorize above) and the Eigen multi-RHS cache.  inv_lex[s] aligns with
+    // the fermion lex order in ApplyInverseLex (same grid + CB).
+    vectorizeFromLexOrdArray(sobjs, inv);
     inv_lex.clear();
-    inv_lex.resize(lex_sobjs.size());
-    thread_for(s, lex_sobjs.size(), {
+    inv_lex.resize(Nsite);
+    thread_for(s, Nsite, {
       Eigen::MatrixXcd M(kDim48, kDim48);
       for (int r = 0; r < kDim48; ++r)
         for (int c = 0; c < kDim48; ++c)
-          M(r, c) = ComplexD(lex_sobjs[s]()()(r, c));
+          M(r, c) = ComplexD(sobjs[s]()()(r, c));
       inv_lex[s] = std::move(M);
     });
   }
@@ -410,6 +499,10 @@ class DTXQCDWilsonCloverFermionEO {
   // LatticeFermion views (upper × DtxqcdNf, lower × DtxqcdNf) as the input
   // vector lanes.  Direct port of TXQCD's ApplyMooeeInvSimd pattern with
   // an outer block (upper, lower) dimension added.
+ public:
+  // Public because nvcc (--expt-extended-lambda) forbids an extended
+  // __host__ __device__ lambda (the accelerator_for below) inside a private
+  // or protected member function.
   void ApplyInverseSimd(const Field &in, Field &out, int cb) {
     InvField &inv = (cb == Even) ? inv_e_ : inv_o_;
     GridBase *fg = in.upper.f[0].Grid();
@@ -481,6 +574,7 @@ class DTXQCDWilsonCloverFermionEO {
     }
   }
 
+ private:
   // Multi-RHS apply via per-site Eigen 48 x NRHS gemm.  Mirrors TXQCD's
   // ApplyMooeeInvScalar pattern with an outer NRHS dimension and the
   // doubled (upper, lower) block layout.  Threaded across CB sites; each
@@ -642,6 +736,16 @@ class DTXQCDWilsonCloverFermionEO {
   // unvectorizing the SIMD InvField so the lex index matches what
   // unvectorizeToLexOrdArray produces on input fermions in ApplyInverseLex.
   std::vector<Eigen::MatrixXcd> inv_lex_e_, inv_lex_o_;
+
+#ifdef GRID_CUDA
+  // Phase 1b: persistent per-CB device inverse in batched [Nsite*48*48]
+  // column-major layout for the cuBLAS MooeeInvN path (ApplyInverseLex).
+  // inline static (grow-only, shared) to avoid per-MakeEOp device churn -- safe
+  // because only one FermionEO is alive at a time (MakeEOp is sequential).
+  // Same local lex order as inv_lex_e_/o_.
+  inline static deviceVector<ComplexD> inv_dev_e_, inv_dev_o_;
+  inline static uint64_t inv_dev_n_e_{0}, inv_dev_n_o_{0};
+#endif
 
   DtxqcdSpinMatrices spin_;
 };

@@ -127,8 +127,8 @@ int main(int argc, char **argv) {
     // <Mdag w, v> should equal <w, M v>.
     ComplexD A = innerProduct(Mdag_w, v);
     ComplexD B = innerProduct(w, Mv);
-    RealD resid = std::abs(A - B);
-    RealD ref = std::max({std::abs(A), std::abs(B), 1.0});
+    RealD resid = DtxqcdAbs(A - B);
+    RealD ref = std::max({DtxqcdAbs(A), DtxqcdAbs(B), 1.0});
     std::cout << GridLogMessage << "<Mdag w, v> = " << A
               << "  <w, M v> = " << B << std::endl;
     check("Wrapper.Mdag identity |<Mdag w, v> - <w, M v>| (rel)",
