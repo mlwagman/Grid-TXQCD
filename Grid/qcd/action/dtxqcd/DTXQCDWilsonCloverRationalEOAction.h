@@ -51,6 +51,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCG.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDRationalForceGpuKernel.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 #include <Grid/qcd/action/fermion/WilsonImpl.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -169,6 +170,8 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
                        param_.MaxIter);
     t_cg.Stop();
     t_force.Start();
+    // Finer force-assembly sub-timers (usecond-based accumulators, cheap).
+    double us_schur = 0.0, us_site = 0.0, us_hop = 0.0, us_clov = 0.0;
 
     // ---- Build F_{mu,nu} field strength (for clover, csw != 0 only) ----
     std::vector<LatticeColourMatrix> FS;
@@ -224,6 +227,7 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       Moeh_Yk.emplace_back(&rbgrid_);
     }
 
+    us_schur -= usecond();
     // Meooe X_k for all k (per-RHS Wilson stencil; no natural batched apply).
     for (int k = 0; k < Npole; ++k) Dw.Meooe(Xk[k], Meo_Xk[k]);
 
@@ -257,18 +261,29 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       for (int k = 0; k < Npole; ++k) { ins[k] = &Moeh_Yk[k]; outs[k] = &Zek[k]; }
       Dw.MooeeInvDagN(ins, outs);
     }
+    us_schur += usecond();
 
-    // ---- Per-pole force accumulation (sequential -- each has its own ak) ----
+    // ---- Per-pole site/aux force accumulation (each has its own ak) ----
     for (int k = 0; k < Npole; ++k) {
       const RealD ak = PowerNegQuarter.residues[k];
+      us_site -= usecond();
       AccumulateSiteForces(Xk[k],  Yk[k], /*odd_cb=*/true,  ak,
                            dSdU, clover_sigma_full);
       AccumulateSiteForces(Wek[k], Zek[k], /*odd_cb=*/false, ak,
                            dSdU, clover_sigma_full);
-      AccumulateHoppingForce(Xk[k], Yk[k], Wek[k], Zek[k], ak, Dw, dSdU);
+      us_site += usecond();
     }
+    // ---- Hopping (Wilson dslash-deriv) gauge force, all poles ----
+    // Virtual hook: the QUDA-primitive subclass batches all (flavor, pole) rhs
+    // into computeCloverWilsonForceWithSchurFields (one call per doubled block,
+    // upper on U + lower on conj(U)); the default loops per-pole over the Grid
+    // MoeDeriv/MeoDeriv reference path.
+    us_hop -= usecond();
+    AccumulateHoppingForceAllPoles(U, Xk, Yk, Wek, Zek, Dw, dSdU);
+    us_hop += usecond();
 
     // ---- Gauge clover force via Cmunu chain rule (csw != 0 only) ----
+    us_clov -= usecond();
     if (csw_ != 0.0) {
       typedef WilsonImplR Impl;
       std::vector<LatticeColourMatrix> Ulinks;
@@ -310,10 +325,16 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       // hopping gauge force (already added per pole) is preserved.
       dSdU.U = dSdU.U + ComplexD(-0.5, 0.0) * clover_force;
     }
+    us_clov += usecond();
     t_force.Stop();
     std::cout << GridLogMessage << "[" << action_name()
               << "] deriv timing: CG=" << t_cg.Elapsed()
               << "  force-assembly=" << t_force.Elapsed() << std::endl;
+    std::cout << GridLogMessage << "[" << action_name()
+              << "] deriv timing: schur=" << (us_schur * 1e-6)
+              << "  siteforce=" << (us_site * 1e-6)
+              << "  hopping=" << (us_hop * 1e-6)
+              << "  clover=" << (us_clov * 1e-6) << " (s)" << std::endl;
   }
 
   DTXQCDFermionDoubled &PseudoFermion() { return Phi_; }
@@ -370,6 +391,27 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
           v[kDim24 + idx]   = ComplexD(sL()(alpha)(i).real(),
                                        sL()(alpha)(i).imag());
         }
+    }
+  }
+
+  // All-poles hopping gauge force.  Virtual so the QUDA-primitive subclass can
+  // batch every (flavor, pole) rhs into one computeCloverWilsonForceWithSchur-
+  // Fields call per doubled block.  Default = the per-pole Grid reference path
+  // (bit-identical to the previous in-loop behaviour; accumulation commutes).
+  // U is supplied so a QUDA override can SetGauge(U.U) / SetGauge(conj(U.U)).
+  virtual void AccumulateHoppingForceAllPoles(
+      const DTXQCDField &U,
+      const std::vector<DTXQCDFermionDoubled> &Xk,
+      const std::vector<DTXQCDFermionDoubled> &Yk,
+      const std::vector<DTXQCDFermionDoubled> &Wek,
+      const std::vector<DTXQCDFermionDoubled> &Zek,
+      DTXQCDWilsonCloverFermionEO &Dw,
+      DTXQCDField &dSdU) {
+    (void)U;
+    const int Npole = static_cast<int>(Xk.size());
+    for (int k = 0; k < Npole; ++k) {
+      const RealD ak = PowerNegQuarter.residues[k];
+      AccumulateHoppingForce(Xk[k], Yk[k], Wek[k], Zek[k], ak, Dw, dSdU);
     }
   }
 
@@ -452,6 +494,34 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     setCheckerboard(full, cur);
   }
 
+  // GPU twin of AddEvenOddToFull: contrib is already a CB-resident Lattice
+  // (written by the GPU kernel), so no vectorize roundtrip -- pick the cb
+  // parity of `full`, accumulate coef*contrib, set it back.
+  template <class Field>
+  void AddCBLatticeToFull(const Field &contrib, Field &full, int cb,
+                          ComplexD coef) {
+    Field cur(&rbgrid_);
+    cur.Checkerboard() = cb;
+    pickCheckerboard(cb, cur, full);
+    cur = cur + coef * contrib;
+    setCheckerboard(full, cur);
+  }
+
+  // DTXQCD_RATFORCE_GPU: route AccumulateSiteForces through the GPU kernel
+  // (DTXQCDRationalForceGpuKernel.h).  DEFAULT OFF everywhere (CPU thread_for
+  // is the bit-comparable reference) until FD-verified; off-CUDA always CPU.
+  static int RatForceGpuEnabled() {
+    static int v = []() {
+#ifndef GRID_CUDA
+      return 0;
+#else
+      const char *e = std::getenv("DTXQCD_RATFORCE_GPU");
+      return (e && *e) ? std::atoi(e) : 0;
+#endif
+    }();
+    return v;
+  }
+
   // Per-pole per-CB site loop: accumulate aux + clover-sigma contributions
   // from the bilinear (Y, X) into dSdU and clover_sigma_full.
   //
@@ -476,6 +546,32 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     typedef typename LatticeFermion::vector_object::scalar_object Fsobj;
     const int cb = odd_cb ? Odd : Even;
     const ComplexD coef(2.0 * ak, 0.0);
+
+    // ---- GPU path (DTXQCD_RATFORCE_GPU): device kernel + CB accumulate ----
+    if (RatForceGpuEnabled()) {
+      LatticeDtxqcdSigma F_sig(&rbgrid_);
+      LatticeDtxqcdPi    F_pi (&rbgrid_);
+      LatticeDtxqcdD     F_d  (&rbgrid_);
+      LatticeDtxqcdN     F_n  (&rbgrid_);
+      LatticeDtxqcdS     F_s  (&rbgrid_);
+      LatticeDtxqcdP     F_p  (&rbgrid_);
+      std::array<LatticeColourMatrix, 6> F_cs{
+          LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_),
+          LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_),
+          LatticeColourMatrix(&rbgrid_), LatticeColourMatrix(&rbgrid_)};
+      DtxqcdRatForceGpu::Extract(X, Y, cb, csw_, spin_,
+                                 F_sig, F_pi, F_d, F_n, F_s, F_p, F_cs);
+      AddCBLatticeToFull(F_sig, dSdU.sigma, cb, coef);
+      AddCBLatticeToFull(F_pi,  dSdU.pi,    cb, coef);
+      AddCBLatticeToFull(F_d,   dSdU.d,     cb, coef);
+      AddCBLatticeToFull(F_n,   dSdU.n,     cb, coef);
+      AddCBLatticeToFull(F_s,   dSdU.s,     cb, coef);
+      AddCBLatticeToFull(F_p,   dSdU.p,     cb, coef);
+      if (csw_ != 0.0)
+        for (int k = 0; k < 6; ++k)
+          AddCBLatticeToFull(F_cs[k], clover_sigma_full[k], cb, coef);
+      return;
+    }
 
     // Unvectorize the per-pole CG solutions on THIS rank's CB sublattice.  The
     // rational force uses ONLY the fermion bilinear Bil(R,C) (no aux peek), so

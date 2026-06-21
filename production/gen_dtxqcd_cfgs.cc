@@ -27,11 +27,225 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOAction.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOActionQudaPrimitive.h>
+#endif
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/action/gauge/WilsonGaugeAction.h>
+#include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
 
 using namespace TXQCDProduction;
+
+// Fresh-start DTXQCD field initialisation, ported from
+// Test_dtxqcd_2pt_gencfgs.cc (csw-parametrized for production):
+//   - weak-field gauge (GenerateWeakFieldGauge, wf=0.1),
+//   - aux drawn at AUX_FLUCT_LAMBDA width (default 10) + a saddle shift Σ,
+//   - AUX_INIT=value  → Σ fixed explicitly,
+//   - AUX_INIT_AUTO=1 → self-consistent saddle by bisection on
+//                       g(Σ)=Σ−Σ_DTXQCD(Σ) (avoids the slow singlet
+//                       equilibration / cold-aux=0 LogDet divergence),
+//   - ZERO_DN_INIT / ZERO_ALL_AUX post-init overrides.
+static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
+                                 Grid::GridRedBlackCartesian &RBGrid_,
+                                 Grid::DTXQCDField &U,
+                                 Grid::GridSerialRNG &sRNG,
+                                 Grid::GridParallelRNG &pRNG,
+                                 Grid::RealD mass, Grid::RealD csw,
+                                 Grid::RealD lambda, int cg_max) {
+  using namespace Grid;
+  sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
+  pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+
+  // Fluctuation width for FillAuxFields, decoupled from the physical lambda
+  // (FLUCT=10 keeps the doubled M well-conditioned on the cold gauge).
+  if (std::getenv("AUX_FLUCT_LAMBDA") == nullptr)
+    setenv("AUX_FLUCT_LAMBDA", "10.0", 0);
+
+  RealD Sigma_init = 0.0;
+  bool sigma_auto = false;
+  if (const char *si = std::getenv("AUX_INIT"); si && *si) {
+    Sigma_init = std::atof(si);
+  } else if (const char *sa = std::getenv("AUX_INIT_AUTO");
+             sa && std::atoi(sa) != 0) {
+    sigma_auto = true;
+  }
+
+  // Step 1: weak-field gauge (so Σ can be measured on it).
+  DTXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, /*wf=*/0.1);
+
+  if (sigma_auto) {
+    // Bare-Σ seed: Hutchinson Tr M^{-1} on plain Wilson (csw=0, periodic) —
+    // only the bisection upper bracket; the operator below uses the real csw.
+    WilsonImplParams impl_p;
+    typedef WilsonFermion<WilsonImplR> MeasFermOp;
+    MeasFermOp Dw(U.U, Grid_, RBGrid_, mass, impl_p);
+    MdagMLinearOperator<MeasFermOp, LatticeFermion> HermOp(Dw);
+    ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+    const RealD V = (RealD)Grid_.gSites();
+    GridParallelRNG noisePRNG(&Grid_);
+    noisePRNG.SeedFixedIntegers({110, 120, 130, 140, 150});
+    const int n_noise = 8;
+    RealD acc = 0.0;
+    for (int h = 0; h < n_noise; ++h) {
+      LatticeFermion eta(&Grid_), b(&Grid_), x(&Grid_);
+      gaussian(noisePRNG, eta);
+      Dw.Mdag(eta, b);
+      x = Zero();
+      CG(HermOp, b, x);
+      acc += innerProduct(eta, x).real() / (2.0 * V);
+    }
+    Sigma_init = acc / n_noise;
+    std::cout << GridLogMessage << "[AUX_INIT_AUTO] Sigma_bare = vev_trminv = "
+              << Sigma_init << std::endl;
+  } else if (Sigma_init != 0.0) {
+    std::cout << GridLogMessage << "[AUX_INIT] Sigma = " << Sigma_init << std::endl;
+  }
+
+  // Step 2: fill aux with Gaussian + saddle shift.
+  DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_init);
+
+  // Step 2b (AUX_INIT_AUTO): bisect g(Σ)=Σ−Σ_DTXQCD(Σ) on the FULL doubled op.
+  if (sigma_auto) {
+    auto measure_sigma_dtxqcd = [&](RealD Sigma_at) -> RealD {
+      pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+      DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_at);
+      DTXQCDWilsonCloverFermionEO Dw_dtxqcd(U.U, Grid_, RBGrid_, mass, csw,
+                                            U.sigma, U.pi, U.d, U.n, U.s, U.p);
+      const RealD V = (RealD)Grid_.gSites();
+      GridParallelRNG noisePRNG(&Grid_);
+      noisePRNG.SeedFixedIntegers({400, 410, 420, 430, 440});
+      const int n_noise_iter = 4;
+      RealD acc = 0.0;
+      for (int h = 0; h < n_noise_iter; ++h) {
+        DTXQCDFermionDoubled eta(&Grid_), b(&Grid_), x(&Grid_);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          gaussian(noisePRNG, eta.upper.f[a]);
+          gaussian(noisePRNG, eta.lower.f[a]);
+        }
+        Dw_dtxqcd.Mdag(eta, b);
+        DTXQCDFermionDoubled r(&Grid_), p(&Grid_), Ap(&Grid_), tmp(&Grid_);
+        x = Zero();
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          r.upper.f[a] = b.upper.f[a]; r.lower.f[a] = b.lower.f[a];
+          p.upper.f[a] = b.upper.f[a]; p.lower.f[a] = b.lower.f[a];
+        }
+        RealD r2 = norm2(r), b2 = norm2(b);
+        RealD cg_tol2 = 1e-8 * b2;  // Sigma estimate to ~1e-4, ample for AUX_INIT_TOL
+        for (int k = 0; k < cg_max; ++k) {
+          Dw_dtxqcd.M(p, tmp);
+          Dw_dtxqcd.Mdag(tmp, Ap);
+          RealD pAp = innerProduct(p, Ap).real();
+          RealD alpha = r2 / pAp;
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            x.upper.f[a] = x.upper.f[a] + alpha * p.upper.f[a];
+            x.lower.f[a] = x.lower.f[a] + alpha * p.lower.f[a];
+            r.upper.f[a] = r.upper.f[a] - alpha * Ap.upper.f[a];
+            r.lower.f[a] = r.lower.f[a] - alpha * Ap.lower.f[a];
+          }
+          RealD r2_new = norm2(r);
+          if (r2_new < cg_tol2) break;
+          RealD beta = r2_new / r2;
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            p.upper.f[a] = r.upper.f[a] + beta * p.upper.f[a];
+            p.lower.f[a] = r.lower.f[a] + beta * p.lower.f[a];
+          }
+          r2 = r2_new;
+        }
+        acc += innerProduct(eta, x).real() / (2.0 * V);
+      }
+      return (acc / n_noise_iter) / (2.0 * DtxqcdNf);
+    };
+
+    int aux_iter_max = 15;
+    if (const char *m = std::getenv("AUX_INIT_MAX_ITER"); m && *m)
+      aux_iter_max = std::atoi(m);
+    RealD aux_iter_tol = 0.1;  // 10% is plenty for an HMC init -- the trajectory
+                               // equilibrates the residual; tighten via AUX_INIT_TOL
+    if (const char *t = std::getenv("AUX_INIT_TOL"); t && *t)
+      aux_iter_tol = std::atof(t);
+    bool aux_done = false;
+    // --- Picard fixed-point first (cheap): Sigma_{n+1} = Sigma_DTXQCD(Sigma_n)
+    //     from Sigma_0 = 0.  At large lambda the map Jacobian ~ N_F/lambda^2
+    //     << 1, so it contracts to the saddle in 1-2 evaluations.  Bail to
+    //     bisection if it is NOT contracting (small lambda, Jacobian > 1, where
+    //     Picard oscillates/diverges -- the regime the bisection guards).
+    const int picard_max =
+        TXQCDProduction::detail::env_int("AUX_INIT_PICARD_MAX", 4);
+    if (TXQCDProduction::detail::env_int("AUX_INIT_PICARD", 1) != 0 &&
+        picard_max > 0) {
+      RealD Scur = measure_sigma_dtxqcd(0.0);  // mean-field condensate (aux=0)
+      std::cout << GridLogMessage << "[AUX_INIT Picard 0] Sigma_DTXQCD(0) = "
+                << Scur << "  (mean-field)" << std::endl;
+      RealD prev_delta = 1e300;
+      for (int it = 1; it <= picard_max; ++it) {
+        RealD Snew  = measure_sigma_dtxqcd(Scur);
+        RealD delta = std::abs(Snew - Scur);
+        RealD rel   = delta / std::max(std::abs(Snew), 1e-30);
+        std::cout << GridLogMessage << "[AUX_INIT Picard " << it << "] Sigma = "
+                  << Snew << "  rel_change = " << rel << std::endl;
+        if (rel < aux_iter_tol) { Sigma_init = Snew; aux_done = true; break; }
+        if (delta >= prev_delta) {  // not contracting -> small-lambda regime
+          std::cout << GridLogMessage
+                    << "[AUX_INIT Picard] not contracting -> bisection fallback"
+                    << std::endl;
+          break;
+        }
+        prev_delta = delta;
+        Scur = Snew;
+      }
+    }
+    // --- Bisection fallback (robust at small lambda) ---
+    if (!aux_done) {
+      RealD Sigma_lo = 0.0;
+      RealD g_lo = Sigma_lo - measure_sigma_dtxqcd(Sigma_lo);
+      RealD Sigma_hi = (Sigma_init > 1e-12) ? Sigma_init : 1.0;
+      RealD g_hi = Sigma_hi - measure_sigma_dtxqcd(Sigma_hi);
+      // The saddle can sit just ABOVE Sigma_bare; grow the upper bound until g
+      // changes sign.
+      for (int gi = 0; gi < 6 && g_lo * g_hi > 0.0; ++gi) {
+        Sigma_hi *= 1.8;
+        g_hi = Sigma_hi - measure_sigma_dtxqcd(Sigma_hi);
+      }
+      std::cout << GridLogMessage << "[AUX_INIT bracket] g(0)=" << g_lo
+                << "  g(" << Sigma_hi << ")=" << g_hi << std::endl;
+      if (g_lo * g_hi > 0.0) {
+        Sigma_init = (std::abs(g_hi) <= std::abs(g_lo)) ? Sigma_hi : Sigma_lo;
+        std::cout << GridLogMessage
+                  << "[AUX_INIT_AUTO] no sign change after growth — nearest "
+                     "endpoint Sigma = " << Sigma_init << std::endl;
+      } else {
+        for (int it = 0; it < aux_iter_max; ++it) {
+          RealD Sigma_mid = 0.5 * (Sigma_lo + Sigma_hi);
+          RealD g_mid = Sigma_mid - measure_sigma_dtxqcd(Sigma_mid);
+          std::cout << GridLogMessage << "[AUX_INIT iter " << it << "] Sigma_mid="
+                    << Sigma_mid << "  g=" << g_mid << std::endl;
+          if (g_mid * g_lo < 0.0) { Sigma_hi = Sigma_mid; g_hi = g_mid; }
+          else { Sigma_lo = Sigma_mid; g_lo = g_mid; }
+          if ((Sigma_hi - Sigma_lo) /
+                  std::max(0.5 * (Sigma_hi + Sigma_lo), 1e-30) < aux_iter_tol)
+            break;
+        }
+        Sigma_init = 0.5 * (Sigma_lo + Sigma_hi);
+      }
+    }
+    pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
+    DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_init);
+    std::cout << GridLogMessage << "[AUX_INIT_AUTO converged] Sigma* = "
+              << Sigma_init << "  -> <s>* = 2 N_F Sigma*/lambda^2 = "
+              << (2.0 * DtxqcdNf * Sigma_init / (lambda * lambda)) << std::endl;
+  }
+
+  if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {
+    std::cout << GridLogMessage << "Zeroing d, n diquark fields at init" << std::endl;
+    U.d = Zero(); U.n = Zero();
+  }
+  if (const char *z = std::getenv("ZERO_ALL_AUX"); z && std::atoi(z) != 0) {
+    std::cout << GridLogMessage << "Zeroing ALL aux fields at init (cold)" << std::endl;
+    U.sigma = Zero(); U.pi = Zero(); U.d = Zero();
+    U.n = Zero(); U.s = Zero(); U.p = Zero();
+  }
+}
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
@@ -47,8 +261,8 @@ int main(int argc, char **argv) {
 
   GridSerialRNG   sRNG;
   GridParallelRNG pRNG(&Grid);
-  sRNG.SeedFixedIntegers({11, 12, 13, 14, 15});
-  pRNG.SeedFixedIntegers({16, 17, 18, 19, 20});
+  // RNG seeding deferred: DTXQCDCheckpointer::ReadConfig restores it on resume;
+  // InitFreshDtxqcdField seeds it on a fresh start.
 
   // ---- physics parameters (env-overridable via params.h knobs) ----
   const RealD mass  = mass_light_dtxqcd;
@@ -76,16 +290,63 @@ int main(int argc, char **argv) {
             << "RHMC rational: lo=" << rp.lo << " hi=" << rp.hi
             << " degree=" << rp.degree << " tol=" << rp.tolerance << std::endl;
 
-  // ---- composite field (gauge + aux), cold initialisation ----
+  // ---- checkpoint directory + resume scan ----
+  // TRAJ is a TARGET total (not an increment): a resubmit with TRAJ <= latest
+  // exits immediately.  Sidecar suffix is "_daux" (DTX3), per DTXQCDCheckpointer.
+  const std::string cfg_dir = dtxqcd_cfg_dir();
+  mkdir_p(cfg_dir);
+  const int total_traj =
+      TXQCDProduction::detail::env_int("TRAJ", n_therm + n_prod);
+  int start_traj = 0, latest = -1;
+  for (int t = meas_skip; t <= total_traj; t += meas_skip) {
+    if (file_exists(cfg_dir + "/ckpoint_lat."      + std::to_string(t)) &&
+        file_exists(cfg_dir + "/ckpoint_lat_daux." + std::to_string(t)) &&
+        file_exists(cfg_dir + "/ckpoint_rng."      + std::to_string(t)))
+      latest = t;
+  }
+
+  // ---- composite field (gauge + aux): resume or fresh start ----
   DTXQCDField U(&Grid);
-  DTXQCDCompositeImpl::ColdConfiguration(pRNG, U);  // U=I, aux=0
+  if (latest > 0) {
+    std::cout << GridLogMessage
+              << "Resuming DTXQCD from checkpoint at traj " << latest << std::endl;
+    DTXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
+                                   cfg_dir + "/ckpoint_lat",
+                                   cfg_dir + "/ckpoint_rng", latest);
+    start_traj = latest;
+  } else {
+    std::cout << GridLogMessage
+              << "Fresh DTXQCD start (weak-field gauge + aux saddle init)"
+              << std::endl;
+    InitFreshDtxqcdField(Grid, RBGrid, U, sRNG, pRNG, mass, csw_, lam, cgmax);
+  }
 
   // ---- actions ----
   DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_);
   DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lam);
   DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass, csw_);
-  DTXQCDWilsonCloverRationalEOAction
-      PFAction(Grid, RBGrid, mass, rp, csw_);
+  // DTXQCD_QUDA_HYBRID=1 swaps in the QUDA Wilson-hopping hybrid action (the
+  // dominant force-assembly cost moves to QUDA); default = pure-Grid rational.
+  std::unique_ptr<DTXQCDWilsonCloverRationalEOAction> PF_grid_holder;
+  Action<DTXQCDField> *PFActionPtr = nullptr;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<DTXQCDWilsonCloverRationalEOActionQudaPrimitive> PF_quda_holder;
+  if (const char *e = std::getenv("DTXQCD_QUDA_HYBRID"); e && std::atoi(e) != 0) {
+    PF_quda_holder =
+        std::make_unique<DTXQCDWilsonCloverRationalEOActionQudaPrimitive>(
+            Grid, RBGrid, mass, rp, csw_);
+    PFActionPtr = PF_quda_holder.get();
+    std::cout << GridLogMessage
+              << "[DTXQCD] PF action: QUDA Wilson-hopping hybrid "
+                 "(DTXQCD_QUDA_HYBRID=1)" << std::endl;
+  }
+#endif
+  if (!PFActionPtr) {
+    PF_grid_holder = std::make_unique<DTXQCDWilsonCloverRationalEOAction>(
+        Grid, RBGrid, mass, rp, csw_);
+    PFActionPtr = PF_grid_holder.get();
+  }
+  Action<DTXQCDField> &PFAction = *PFActionPtr;
 
   // ---- action levels.  Level 1 (innermost) bundles the two fermion-bilinear
   //      monomials that need the finest dt; gauge gets a 2x multiplier and
@@ -105,7 +366,7 @@ int main(int argc, char **argv) {
 
   // ---- integrator ----
   IntegratorParameters MD;
-  MD.name    = "ForceGradient";
+  MD.name    = "MinimumNorm2";  // canonical for 16^3x48 (MDSTEPS=10 TRAJL=sqrt2/4)
   if (const char *env = std::getenv("INTEGRATOR"); env && *env) MD.name = env;
   MD.MDsteps = 20;
   if (const char *ms = std::getenv("MDSTEPS"); ms && *ms) MD.MDsteps = std::atoi(ms);
@@ -116,21 +377,24 @@ int main(int argc, char **argv) {
             << " trajL=" << MD.trajL << std::endl;
 
   // ---- HMC parameters ----
+  // NoMetropolis force-accepts the thermalization trajectories (none left once
+  // start_traj >= n_therm).  Trajectories run = target total - no_metrop warmup
+  // - already-done, guarded non-negative (mirrors Test_dtxqcd_2pt_gencfgs).
+  int no_metrop = (start_traj < n_therm) ? (n_therm - start_traj) : 0;
+  if (const char *nm = std::getenv("NO_METROP"); nm && *nm)
+    no_metrop = std::atoi(nm);
+  int traj_to_run = total_traj - no_metrop - start_traj;
+  if (traj_to_run < 0) traj_to_run = 0;
   HMCparameters HMCp;
-  HMCp.StartTrajectory     = 0;
-  // Trajectories default to n_therm + n_prod; override via TRAJ env var for
-  // smoke runs (TRAJ=3) or scans.
-  HMCp.Trajectories        = TXQCDProduction::detail::env_int("TRAJ",
-                                                              n_therm + n_prod);
-  HMCp.NoMetropolisUntil   = TXQCDProduction::detail::env_int("NO_METROP", 0);
+  HMCp.StartTrajectory     = start_traj;
+  HMCp.Trajectories        = traj_to_run;
+  HMCp.NoMetropolisUntil   = no_metrop;
   HMCp.MetropolisTest      = true;
   HMCp.PerformRandomShift  = false;
   HMCp.StartingType        = "ColdStart";
   HMCp.MD = MD;
 
-  // ---- checkpointing ----
-  const std::string cfg_dir = dtxqcd_cfg_dir();
-  mkdir_p(cfg_dir);
+  // ---- checkpointing ---- (cfg_dir defined above for the resume scan)
   CheckpointerParameters CPp;
   CPp.config_prefix = cfg_dir + "/ckpoint_lat";
   CPp.rng_prefix    = cfg_dir + "/ckpoint_rng";
@@ -143,13 +407,32 @@ int main(int argc, char **argv) {
   NoSmearing<DTXQCDCompositeImpl> Smear;
   Smear.set_Field(U);
 
-  std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt};
+  // ---- signed-Pfaffian + aux diagnostics observer (the sign-reweighting
+  //      observable: per-traj gamma5.M48 low eigenvalues -> n_neg -> signPf,
+  //      plus aux VEVs / Tr M^-1 / per-action Fdt / aux correlators).  Writes
+  //      hmc_diagnostics.<traj>.h5 consumed by analyze_sign_reweighting.py.
+  const int n_vev_noise = TXQCDProduction::detail::env_int("VEV_NOISE", 4);
+  DtxqcdDiagnostics diag(cfg_dir + "/hmc_diagnostics", meas_skip,
+                         {PFActionPtr, &LogDet, &AuxAction, &GaugeAction},
+                         Grid, RBGrid, pRNG, mass, csw_, lam, n_vev_noise);
+  std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt, &diag};
 
-  typedef ForceGradient<DTXQCDCompositeImpl,
-                        NoSmearing<DTXQCDCompositeImpl>, Reps> IntT;
-  IntT MDyn(&Grid, MD, Aset, Smear);
-  HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
-  HMC.evolve();
+  // Runtime integrator selection (INTEGRATOR env): both template
+  // instantiations are compiled; MD.name picks one.  ForceGradient is the
+  // small-lattice Fierz-test default; MinimumNorm2 is canonical for production.
+  if (MD.name == "ForceGradient") {
+    typedef ForceGradient<DTXQCDCompositeImpl,
+                          NoSmearing<DTXQCDCompositeImpl>, Reps> IntT;
+    IntT MDyn(&Grid, MD, Aset, Smear);
+    HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
+    HMC.evolve();
+  } else {
+    typedef MinimumNorm2<DTXQCDCompositeImpl,
+                         NoSmearing<DTXQCDCompositeImpl>, Reps> IntT;
+    IntT MDyn(&Grid, MD, Aset, Smear);
+    HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
+    HMC.evolve();
+  }
 
   std::cout << GridLogMessage
             << "DTXQCD gauge generation complete." << std::endl;

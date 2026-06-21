@@ -68,11 +68,14 @@ DtxqcdSliceSumFlavorAll(const LatticeDtxqcdFlavorMat &P) {
   for (int a = 0; a < DtxqcdNf; ++a) {
     for (int b = 0; b < DtxqcdNf; ++b) {
       LatticeComplex Pab(g);
-      autoView(Pv, P, CpuRead);
-      autoView(pabv, Pab, CpuWrite);
-      thread_for(ss, g->oSites(), {
-        pabv[ss]()()() = Pv[ss]()(a, b)();
-      });
+      {  // close the views before sliceSum -- holding an open CpuWrite view of
+         // Pab across sliceSum(Pab) corrupts the GPU view lock (cpuLock assert).
+        autoView(Pv, P, CpuRead);
+        autoView(pabv, Pab, CpuWrite);
+        thread_for(ss, g->oSites(), {
+          pabv[ss]()()() = Pv[ss]()(a, b)();
+        });
+      }
       std::vector<TComplex> sl;
       sliceSum(Pab, sl, Nd - 1);
       for (int t = 0; t < T; ++t)
@@ -87,11 +90,13 @@ inline std::vector<ComplexD>
 DtxqcdSliceSumScalar(const LatticeDtxqcdS &S) {
   GridBase *g = S.Grid();
   LatticeComplex sc(g);
-  autoView(Sv, S, CpuRead);
-  autoView(scv, sc, CpuWrite);
-  thread_for(ss, g->oSites(), {
-    scv[ss]()()() = Sv[ss]()()();
-  });
+  {  // close the views before sliceSum (see DtxqcdSliceSumFlavorAll).
+    autoView(Sv, S, CpuRead);
+    autoView(scv, sc, CpuWrite);
+    thread_for(ss, g->oSites(), {
+      scv[ss]()()() = Sv[ss]()()();
+    });
+  }
   std::vector<TComplex> sl;
   sliceSum(sc, sl, Nd - 1);
   std::vector<ComplexD> out(sl.size());
