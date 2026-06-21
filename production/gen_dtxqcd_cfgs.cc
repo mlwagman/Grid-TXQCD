@@ -27,6 +27,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOAction.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
 #ifdef GRID_HAVE_QUDA
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOActionQudaPrimitive.h>
 #endif
@@ -347,22 +348,45 @@ int main(int argc, char **argv) {
   DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_);
   DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lam);
   DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass, csw_);
+
+  // USE_FULL_PF=1 swaps the EO Schur 1/4-root + LogDet pair for a SINGLE non-EO
+  // 1/4-root pseudofermion on the full doubled M^dag M.  The full operator
+  // absorbs the LogDet, so no LogDet companion is pushed in this branch (the EO
+  // Schur Mpc diverges below aux_std ~ 0.5, i.e. the low-lambda regime; the full
+  // M stays mild).  Mirrors Test_dtxqcd_2pt_gencfgs.cc.  Default = EO Schur.
+  bool use_full_pf = false;
+  if (const char *u = std::getenv("USE_FULL_PF"); u && *u)
+    use_full_pf = (std::atoi(u) != 0);
+  std::cout << GridLogMessage
+            << "DTXQCD pseudofermion = "
+            << (use_full_pf ? "FULL (non-EO, LogDet folded in)" : "EO Schur + LogDet")
+            << std::endl;
+
   // DTXQCD_QUDA_HYBRID=1 swaps in the QUDA Wilson-hopping hybrid action (the
   // dominant force-assembly cost moves to QUDA); default = pure-Grid rational.
-  std::unique_ptr<DTXQCDWilsonCloverRationalEOAction> PF_grid_holder;
+  // (QUDA hybrid is EO-only; ignored when USE_FULL_PF=1.)
+  std::unique_ptr<DTXQCDWilsonCloverRationalEOAction>   PF_grid_holder;
+  std::unique_ptr<DTXQCDWilsonCloverRationalFullAction> PF_full_holder;
   Action<DTXQCDField> *PFActionPtr = nullptr;
 #ifdef GRID_HAVE_QUDA
   std::unique_ptr<DTXQCDWilsonCloverRationalEOActionQudaPrimitive> PF_quda_holder;
-  if (const char *e = std::getenv("DTXQCD_QUDA_HYBRID"); e && std::atoi(e) != 0) {
-    PF_quda_holder =
-        std::make_unique<DTXQCDWilsonCloverRationalEOActionQudaPrimitive>(
-            Grid, RBGrid, mass, rp, csw_);
-    PFActionPtr = PF_quda_holder.get();
-    std::cout << GridLogMessage
-              << "[DTXQCD] PF action: QUDA Wilson-hopping hybrid "
-                 "(DTXQCD_QUDA_HYBRID=1)" << std::endl;
+  if (!use_full_pf) {
+    if (const char *e = std::getenv("DTXQCD_QUDA_HYBRID"); e && std::atoi(e) != 0) {
+      PF_quda_holder =
+          std::make_unique<DTXQCDWilsonCloverRationalEOActionQudaPrimitive>(
+              Grid, RBGrid, mass, rp, csw_);
+      PFActionPtr = PF_quda_holder.get();
+      std::cout << GridLogMessage
+                << "[DTXQCD] PF action: QUDA Wilson-hopping hybrid "
+                   "(DTXQCD_QUDA_HYBRID=1)" << std::endl;
+    }
   }
 #endif
+  if (!PFActionPtr && use_full_pf) {
+    PF_full_holder = std::make_unique<DTXQCDWilsonCloverRationalFullAction>(
+        Grid, RBGrid, mass, rp, csw_);
+    PFActionPtr = PF_full_holder.get();
+  }
   if (!PFActionPtr) {
     PF_grid_holder = std::make_unique<DTXQCDWilsonCloverRationalEOAction>(
         Grid, RBGrid, mass, rp, csw_);
@@ -370,13 +394,14 @@ int main(int argc, char **argv) {
   }
   Action<DTXQCDField> &PFAction = *PFActionPtr;
 
-  // ---- action levels.  Level 1 (innermost) bundles the two fermion-bilinear
-  //      monomials that need the finest dt; gauge gets a 2x multiplier and
-  //      aux a 4x multiplier mirroring the TXQCD production hierarchy.
+  // ---- action levels.  Level 1 (innermost) bundles the fermion-bilinear
+  //      monomial(s) that need the finest dt; gauge gets a 2x multiplier and
+  //      aux a 4x multiplier mirroring the TXQCD production hierarchy.  In the
+  //      FULL branch L1 holds only the rational PF (no separate LogDet).
   typedef Representations<EmptyRep<DTXQCDField>> Reps;
   ActionLevel<DTXQCDField, Reps> L1(1);
   L1.push_back(&PFAction);
-  L1.push_back(&LogDet);
+  if (!use_full_pf) L1.push_back(&LogDet);
   ActionLevel<DTXQCDField, Reps> L2(TXQCDProduction::detail::env_int("GAUGE_MULT", 2));
   L2.push_back(&GaugeAction);
   ActionLevel<DTXQCDField, Reps> L3(TXQCDProduction::detail::env_int("AUX_MULT",  4));
@@ -429,8 +454,13 @@ int main(int argc, char **argv) {
   //      plus aux VEVs / Tr M^-1 / per-action Fdt / aux correlators).  Writes
   //      hmc_diagnostics.<traj>.h5 consumed by analyze_sign_reweighting.py.
   const int n_vev_noise = TXQCDProduction::detail::env_int("VEV_NOISE", 4);
+  // Force/Fdt-norm reporting list: include LogDet only when it is an active
+  // monomial (EO branch).  The signPf observable is independent of this list.
+  std::vector<Action<DTXQCDField> *> diag_actions =
+      use_full_pf ? std::vector<Action<DTXQCDField> *>{PFActionPtr, &AuxAction, &GaugeAction}
+                  : std::vector<Action<DTXQCDField> *>{PFActionPtr, &LogDet, &AuxAction, &GaugeAction};
   DtxqcdDiagnostics diag(cfg_dir + "/hmc_diagnostics", meas_skip,
-                         {PFActionPtr, &LogDet, &AuxAction, &GaugeAction},
+                         diag_actions,
                          Grid, RBGrid, pRNG, mass, csw_, lam, n_vev_noise);
   std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt, &diag};
 
@@ -448,7 +478,7 @@ int main(int argc, char **argv) {
     DTXQCDSmearedConfiguration Smear(&Grid, (unsigned int)n_stout, Stout);
     Smear.set_Field(U);
     PFAction.is_smeared    = true;
-    LogDet.is_smeared      = true;
+    if (!use_full_pf) LogDet.is_smeared = true;  // LogDet inactive in FULL branch
     GaugeAction.is_smeared = true;
     if (MD.name == "ForceGradient")
       RunDtxqcdHMC<ForceGradient>(Grid, MD, Aset, Smear, HMCp, sRNG, pRNG, Obs, U);

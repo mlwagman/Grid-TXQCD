@@ -49,6 +49,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCG.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDRationalForceGpuKernel.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 #include <Grid/qcd/action/fermion/WilsonImpl.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -272,25 +273,38 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     }
   }
 
-  // Extract a 48-component complex vector at one site of a doubled fermion.
-  // Same layout as the EO sibling.
-  static void ExtractSiteVec48(const DTXQCDFermionDoubled &F,
-                                const Coordinate &c,
-                                std::array<ComplexD, kDtxqcdSiteDim48> &v) {
-    typedef typename LatticeFermion::vector_object::scalar_object Fsobj;
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      Fsobj sU, sL;
-      peekSite(sU, F.upper.f[a], c);
-      peekSite(sL, F.lower.f[a], c);
-      for (int alpha = 0; alpha < Ns; ++alpha)
-        for (int i = 0; i < Nc; ++i) {
-          int idx = DtxqcdSiteIdx24(a, alpha, i);
-          v[idx]            = ComplexD(sU()(alpha)(i).real(),
-                                       sU()(alpha)(i).imag());
-          v[kDim24 + idx]   = ComplexD(sL()(alpha)(i).real(),
-                                       sL()(alpha)(i).imag());
-        }
-    }
+  // Accumulate (+= coef * arr) a lex-ordered FULL-grid host array into a
+  // full-grid lattice.  Twin of the EO sibling's AddEvenOddToFull, but with
+  // no checkerboard: vectorizeFromLexOrdArray packs the per-rank local-lex
+  // array back to the SIMD-vectorized full grid, then += coef*contrib.
+  template <class Field, class Sobj>
+  void AddLexToFull(std::vector<Sobj> &arr, Field &full, ComplexD coef) {
+    Field contrib(&grid_);
+    vectorizeFromLexOrdArray(arr, contrib);
+    full = full + coef * contrib;
+  }
+
+  // GPU twin of AddLexToFull: contrib is already a full-grid Lattice (written
+  // by the GPU kernel), so no vectorize roundtrip -- just += coef*contrib.
+  template <class Field>
+  void AddFullLatticeToFull(const Field &contrib, Field &full, ComplexD coef) {
+    full = full + coef * contrib;
+  }
+
+  // DTXQCD_RATFORCE_GPU: route AccumulateSiteForcesAll through the GPU kernel
+  // (DTXQCDRationalForceGpuKernel.h, ExtractAll variant).  DEFAULT OFF
+  // everywhere (the CPU thread_for is the bit-comparable reference) until
+  // FD-verified; off-CUDA always returns the CPU path.
+  static int RatForceGpuEnabled() {
+    static int v = []() {
+#ifndef GRID_CUDA
+      return 0;
+#else
+      const char *e = std::getenv("DTXQCD_RATFORCE_GPU");
+      return (e && *e) ? std::atoi(e) : 0;
+#endif
+    }();
+    return v;
   }
 
   // Per-pole hopping gauge force on the full operator.
@@ -336,9 +350,16 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     dSdU.U = dSdU.U + ak * (gforce_upper + gforce_lower);
   }
 
-  // Per-pole aux + clover-sigma site loop on ALL sites (no CB filter).
+  // Per-pole aux + clover-sigma site loop on ALL local sites (no CB filter).
   // Bilinear and coefficient identical to the EO sibling's
-  // AccumulateSiteForces; only the CB filter is removed.
+  // AccumulateSiteForces; the only difference is no checkerboard (X, Y and
+  // the force outputs all live on the full Cartesian grid).
+  //
+  // Multi-rank correctness: unvectorizeToLexOrdArray gives THIS rank's local
+  // sublattice (lSites() entries), the thread_for runs over local indices, and
+  // vectorizeFromLexOrdArray packs the per-rank result back -- no global-coord
+  // peekSite/pokeSite (which built the whole global lattice on every rank and
+  // over-counted under GlobalSum at mpi != 1.1.1.1).
   void AccumulateSiteForcesAll(const DTXQCDFermionDoubled &X,
                                const DTXQCDFermionDoubled &Y,
                                RealD ak,
@@ -352,78 +373,107 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     using DtxqcdSiteForceKernel::PSobj;
     using DtxqcdSiteForceKernel::CMsobj;
 
-    Coordinate gd(grid_.GlobalDimensions());
+    typedef typename LatticeFermion::vector_object::scalar_object Fsobj;
     const ComplexD coef(2.0 * ak, 0.0);
 
-    for (int x = 0; x < gd[0]; ++x)
-      for (int y = 0; y < gd[1]; ++y)
-        for (int z = 0; z < gd[2]; ++z)
-          for (int s = 0; s < gd[3]; ++s) {
-            Coordinate coord(std::vector<int>{x, y, z, s});
+    // ---- GPU path (DTXQCD_RATFORCE_GPU): device kernel + full accumulate ----
+    if (RatForceGpuEnabled()) {
+      LatticeDtxqcdSigma F_sig(&grid_);
+      LatticeDtxqcdPi    F_pi (&grid_);
+      LatticeDtxqcdD     F_d  (&grid_);
+      LatticeDtxqcdN     F_n  (&grid_);
+      LatticeDtxqcdS     F_s  (&grid_);
+      LatticeDtxqcdP     F_p  (&grid_);
+      std::array<LatticeColourMatrix, 6> F_cs{
+          LatticeColourMatrix(&grid_), LatticeColourMatrix(&grid_),
+          LatticeColourMatrix(&grid_), LatticeColourMatrix(&grid_),
+          LatticeColourMatrix(&grid_), LatticeColourMatrix(&grid_)};
+      DtxqcdRatForceGpu::ExtractAll(X, Y, csw_, spin_,
+                                    F_sig, F_pi, F_d, F_n, F_s, F_p, F_cs);
+      AddFullLatticeToFull(F_sig, dSdU.sigma, coef);
+      AddFullLatticeToFull(F_pi,  dSdU.pi,    coef);
+      AddFullLatticeToFull(F_d,   dSdU.d,     coef);
+      AddFullLatticeToFull(F_n,   dSdU.n,     coef);
+      AddFullLatticeToFull(F_s,   dSdU.s,     coef);
+      AddFullLatticeToFull(F_p,   dSdU.p,     coef);
+      if (csw_ != 0.0)
+        for (int k = 0; k < 6; ++k)
+          AddFullLatticeToFull(F_cs[k], clover_sigma_full[k], coef);
+      return;
+    }
 
-            std::array<ComplexD, kDim48> X_x, Y_x;
-            ExtractSiteVec48(X, coord, X_x);
-            ExtractSiteVec48(Y, coord, Y_x);
+    // ---- CPU reference path: unvectorize -> thread_for -> vectorize ----
+    // The rational force uses ONLY the fermion bilinear Bil(R,C) (no aux peek),
+    // so X, Y are all we unvectorize.
+    std::array<std::vector<Fsobj>, DtxqcdNf> Xu, Xl, Yu, Yl;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      unvectorizeToLexOrdArray(Xu[a], X.upper.f[a]);
+      unvectorizeToLexOrdArray(Xl[a], X.lower.f[a]);
+      unvectorizeToLexOrdArray(Yu[a], Y.upper.f[a]);
+      unvectorizeToLexOrdArray(Yl[a], Y.lower.f[a]);
+    }
+    const uint64_t Nsite = Xu[0].size();
 
-            // Symmetrized bilinear (same Wirtinger argument as EO).
-            auto Bil = [&X_x, &Y_x](int R, int C) -> ComplexD {
-              return ComplexD(0.5, 0.0) *
-                  (DtxqcdConj(Y_x[C]) * X_x[R]
-                 + DtxqcdConj(X_x[C]) * Y_x[R]);
-            };
+    std::vector<SigSobj> fsig(Nsite); std::vector<PiSobj> fpi(Nsite);
+    std::vector<DSobj>   fd(Nsite);   std::vector<NSobj>  fn(Nsite);
+    std::vector<SSobj>   fss(Nsite);  std::vector<PSobj>  fpp(Nsite);
+    std::array<std::vector<CMsobj>, 6> fcs;
+    if (csw_ != 0.0) for (int k = 0; k < 6; ++k) fcs[k].resize(Nsite);
 
-            SigSobj sig_force;
-            PiSobj  pi_force;
-            DSobj   d_force;
-            NSobj   n_force;
-            SSobj   s_force;
-            PSobj   p_force;
-            DtxqcdSiteForceKernel::AuxForceAt(Bil, spin_, sig_force,
-                                               pi_force, d_force, n_force,
-                                               s_force, p_force);
-
-            // Wirtinger -> physical-gradient conversion: transpose(F_W) for
-            // Hermitian F_W.  See companion comment in
-            // DTXQCDLogDetCloverEOAction.h::deriv() for the derivation.
-            auto AddCF = [&](LatticeDtxqcdSigma &dst, const SigSobj &fv) {
-              SigSobj cur; peekSite(cur, dst, coord);
-              for (int a = 0; a < DtxqcdNf; ++a)
-                for (int b = 0; b < DtxqcdNf; ++b)
-                  for (int i = 0; i < Nc; ++i)
-                    for (int j = 0; j < Nc; ++j)
-                      cur()(a, b)(i, j) =
-                          cur()(a, b)(i, j) + coef * fv()(b, a)(j, i);
-              pokeSite(cur, dst, coord);
-            };
-            AddCF(dSdU.sigma, sig_force);
-            AddCF(dSdU.pi,    pi_force);
-            AddCF(dSdU.d,     d_force);
-            AddCF(dSdU.n,     n_force);
-
-            {
-              SSobj cur; peekSite(cur, dSdU.s, coord);
-              cur()()() = cur()()() + coef * s_force()()();
-              pokeSite(cur, dSdU.s, coord);
-            }
-            {
-              PSobj cur; peekSite(cur, dSdU.p, coord);
-              cur()()() = cur()()() + coef * p_force()()();
-              pokeSite(cur, dSdU.p, coord);
-            }
-
-            if (csw_ != 0.0) {
-              std::array<CMsobj, 6> cs_arr;
-              DtxqcdSiteForceKernel::CloverSigmaAt(Bil, spin_, csw_, cs_arr);
-              for (int p = 0; p < 6; ++p) {
-                CMsobj cur; peekSite(cur, clover_sigma_full[p], coord);
-                for (int i_c = 0; i_c < Nc; ++i_c)
-                  for (int j_c = 0; j_c < Nc; ++j_c)
-                    cur()()(i_c, j_c) = cur()()(i_c, j_c)
-                                      + coef * cs_arr[p]()()(i_c, j_c);
-                pokeSite(cur, clover_sigma_full[p], coord);
-              }
-            }
+    thread_for(idx, Nsite, {
+      std::array<ComplexD, kDim48> X_x, Y_x;
+      for (int a = 0; a < DtxqcdNf; ++a)
+        for (int alpha = 0; alpha < Ns; ++alpha)
+          for (int i = 0; i < Nc; ++i) {
+            int r = DtxqcdSiteIdx24(a, alpha, i);
+            X_x[r]          = ComplexD(Xu[a][idx]()(alpha)(i).real(),
+                                       Xu[a][idx]()(alpha)(i).imag());
+            X_x[kDim24 + r] = ComplexD(Xl[a][idx]()(alpha)(i).real(),
+                                       Xl[a][idx]()(alpha)(i).imag());
+            Y_x[r]          = ComplexD(Yu[a][idx]()(alpha)(i).real(),
+                                       Yu[a][idx]()(alpha)(i).imag());
+            Y_x[kDim24 + r] = ComplexD(Yl[a][idx]()(alpha)(i).real(),
+                                       Yl[a][idx]()(alpha)(i).imag());
           }
+      // Symmetrized Wirtinger bilinear (same argument as the EO sibling).
+      auto Bil = [&X_x, &Y_x](int R, int C) -> ComplexD {
+        return ComplexD(0.5, 0.0) *
+            (DtxqcdConj(Y_x[C]) * X_x[R] + DtxqcdConj(X_x[C]) * Y_x[R]);
+      };
+      SigSobj sig_force; PiSobj pi_force; DSobj d_force;
+      NSobj n_force; SSobj s_force; PSobj p_force;
+      DtxqcdSiteForceKernel::AuxForceAt(Bil, spin_, sig_force, pi_force,
+                                        d_force, n_force, s_force, p_force);
+      if (csw_ != 0.0) {
+        std::array<CMsobj, 6> cs_arr;
+        DtxqcdSiteForceKernel::CloverSigmaAt(Bil, spin_, csw_, cs_arr);
+        for (int k = 0; k < 6; ++k) fcs[k][idx] = cs_arr[k];
+      }
+      // Wirtinger -> physical: transpose (a<->b, i<->j) on the CF fields.
+      auto T = [](const auto &fv, auto &ft) {
+        for (int a = 0; a < DtxqcdNf; ++a)
+          for (int b = 0; b < DtxqcdNf; ++b)
+            for (int i = 0; i < Nc; ++i)
+              for (int j = 0; j < Nc; ++j)
+                ft()(a, b)(i, j) = fv()(b, a)(j, i);
+      };
+      T(sig_force, fsig[idx]);
+      T(pi_force,  fpi[idx]);
+      T(d_force,   fd[idx]);
+      T(n_force,   fn[idx]);
+      fss[idx] = s_force;
+      fpp[idx] = p_force;
+    });
+
+    AddLexToFull(fsig, dSdU.sigma, coef);
+    AddLexToFull(fpi,  dSdU.pi,    coef);
+    AddLexToFull(fd,   dSdU.d,     coef);
+    AddLexToFull(fn,   dSdU.n,     coef);
+    AddLexToFull(fss,  dSdU.s,     coef);
+    AddLexToFull(fpp,  dSdU.p,     coef);
+    if (csw_ != 0.0)
+      for (int k = 0; k < 6; ++k)
+        AddLexToFull(fcs[k], clover_sigma_full[k], coef);
   }
 
   GridCartesian         &grid_;

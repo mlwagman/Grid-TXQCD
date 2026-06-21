@@ -44,6 +44,16 @@ int main(int argc, char **argv) {
     if (std::string(argv[i]) == "--lat-2334") {
       latt = Coordinate(std::vector<int>{2, 2, 2, 4});
     }
+    // Honour --grid X.Y.Z.T so multi-rank FD runs can pick a geometry whose
+    // per-rank reduced time dim stays even (the 4^4 default fails RB at
+    // mpi 1.1.1.2: local T=2 -> RB T=1, odd).  e.g. --grid 4.4.4.8 --mpi 1.1.1.2.
+    if (std::string(argv[i]) == "--grid" && i + 1 < argc) {
+      std::vector<int> d;
+      std::stringstream ss(argv[i + 1]);
+      std::string tok;
+      while (std::getline(ss, tok, '.')) d.push_back(std::stoi(tok));
+      if (d.size() == (size_t)Nd) latt = Coordinate(d);
+    }
   }
   Coordinate simd = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi  = GridDefaultMpi();

@@ -297,6 +297,34 @@ inline void Extract(const DTXQCDFermionDoubled &X,
   }
 }
 
+// ----------------------------------------------------------------------
+// All-sites variant for the NON-EO full action
+// (DTXQCDWilsonCloverRationalFullAction::AccumulateSiteForcesAll).  Same
+// per-site body as Extract() above -- it is byte-for-byte the device
+// transcription of DtxqcdSiteForceKernel::{AuxForceAt,CloverSigmaAt} plus
+// the Wirtinger transpose -- but X, Y and the F_* outputs all live on the
+// FULL Cartesian grid (no checkerboard).  We delegate to Extract() with the
+// caller's full-grid lattices: Extract() reads oSites/grid from
+// X.upper.f[0].Grid() (which is the full grid here), iterates ALL local
+// sites, and the F_*.Checkerboard() tags it sets are inert on a full grid.
+// Keeping a single device-kernel source guarantees the all-sites path stays
+// bit-comparable to the CB path's body forever.
+inline void ExtractAll(const DTXQCDFermionDoubled &X,
+                       const DTXQCDFermionDoubled &Y,
+                       RealD csw,
+                       const DtxqcdSpinMatrices &spin,
+                       LatticeDtxqcdSigma &F_sig,
+                       LatticeDtxqcdPi    &F_pi,
+                       LatticeDtxqcdD     &F_d,
+                       LatticeDtxqcdN     &F_n,
+                       LatticeDtxqcdS     &F_s,
+                       LatticeDtxqcdP     &F_p,
+                       std::array<LatticeColourMatrix, 6> &F_cs) {
+  // cb is irrelevant on a full grid; pass Even (the Checkerboard() tag it
+  // sets on the full-grid outputs is never consulted).
+  Extract(X, Y, Even, csw, spin, F_sig, F_pi, F_d, F_n, F_s, F_p, F_cs);
+}
+
 }  // namespace DtxqcdRatForceGpu
 
 NAMESPACE_END(Grid);
