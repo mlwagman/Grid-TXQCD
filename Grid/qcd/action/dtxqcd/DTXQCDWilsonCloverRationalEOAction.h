@@ -52,6 +52,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDRationalForceGpuKernel.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDRemezAutoScale.h>
 #include <Grid/qcd/action/fermion/WilsonCloverHelpers.h>
 #include <Grid/qcd/action/fermion/WilsonImpl.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -70,18 +71,9 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
                                      GridRedBlackCartesian &rbgrid,
                                      RealD mass, Params &p, RealD csw = 0.0)
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
-        param_(p), Phi_(&rbgrid), spin_(grid) {
-    AlgRemez remez(param_.lo, param_.hi, param_.precision);
-    std::cout << GridLogMessage
-              << "[DTXQCDWilsonRationalEO] degree " << param_.degree
-              << " rational for x^(-1/4)" << std::endl;
-    remez.generateApprox(param_.degree, 1, 4);
-    PowerNegQuarter.Init(remez, param_.tolerance, true);
-    std::cout << GridLogMessage
-              << "[DTXQCDWilsonRationalEO] degree " << param_.degree
-              << " rational for x^(+1/8)" << std::endl;
-    remez.generateApprox(param_.degree, 1, 8);
-    PowerEighth.Init(remez, param_.tolerance, false);
+        param_(p), Phi_(&rbgrid), spin_(grid),
+        auto_(DtxqcdRemezAutoScaleParams::FromEnv(p.lo, p.hi)) {
+    BuildRemez(auto_.current_lo, auto_.current_hi);
   }
 
   std::string action_name() override {
@@ -90,7 +82,9 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   std::string LogParameters() override {
     std::stringstream os;
     os << GridLogMessage << "[" << action_name() << "] mass=" << mass_
-       << " csw=" << csw_ << " lo=" << param_.lo << " hi=" << param_.hi
+       << " csw=" << csw_ << " lo=" << auto_.current_lo
+       << " hi=" << auto_.current_hi
+       << (auto_.enabled ? " (auto-scale)" : "")
        << " degree=" << param_.degree << " tol=" << param_.tolerance
        << " MaxIter=" << param_.MaxIter << std::endl;
     return os.str();
@@ -103,6 +97,24 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   // ------------------------------------------------------------------
   void refresh(const DTXQCDField &U, GridSerialRNG &sRNG,
                GridParallelRNG &pRNG) override {
+    auto Dw = MakeEOp(U);
+    DTXQCDMpcOp Mop(Dw);
+
+    // ---- Auto-scale the Remez bounds from the doubled Mpc^dag Mpc spectrum.
+    // Lanczos runs on the SAME Schur operator the multishift CG inverts, on the
+    // RB grid with Odd checkerboard.  Gated entirely on RAT_AUTO_HI (default
+    // OFF -> no Lanczos, no rebuild, byte-identical to the pre-autoscale path).
+    {
+      RealD new_lo = auto_.current_lo, new_hi = auto_.current_hi;
+      if (DtxqcdRefreshAutoScale(auto_, Mop, &rbgrid_, pRNG, /*cb=*/Odd,
+                                 "DTXQCDWilsonRationalEO", new_lo, new_hi)) {
+        std::cout << GridLogMessage << "[" << action_name()
+                  << "] rebuilding Remez on [" << new_lo << ", " << new_hi
+                  << "]" << std::endl;
+        BuildRemez(new_lo, new_hi);
+      }
+    }
+
     DTXQCDFermionDoubled eta(&rbgrid_);
     const RealD scale = std::sqrt(0.5);
     for (int a = 0; a < DtxqcdNf; ++a) {
@@ -113,8 +125,6 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       eta.upper.f[a].Checkerboard() = Odd;
       eta.lower.f[a].Checkerboard() = Odd;
     }
-    auto Dw = MakeEOp(U);
-    DTXQCDMpcOp Mop(Dw);
     ApplyRational(Mop, PowerEighth, eta, Phi_);
   }
 
@@ -340,6 +350,17 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   DTXQCDFermionDoubled &PseudoFermion() { return Phi_; }
 
  protected:
+  // Build/rebuild the two Remez approximations (x^{-1/4}, x^{+1/8}) on [lo, hi]
+  // and record the active bounds.  Called once in the constructor and again by
+  // refresh() when the auto-scale widens the window.
+  void BuildRemez(RealD lo, RealD hi) {
+    auto_.current_lo = lo;
+    auto_.current_hi = hi;
+    DtxqcdRebuildRemez(lo, hi, param_.degree, param_.precision,
+                       param_.tolerance, "DTXQCDWilsonRationalEO",
+                       PowerNegQuarter, PowerEighth);
+  }
+
   DTXQCDWilsonCloverFermionEO MakeEOp(const DTXQCDField &U) {
     DTXQCDField &Unc = const_cast<DTXQCDField &>(U);
     return DTXQCDWilsonCloverFermionEO(Unc.U, grid_, rbgrid_, mass_, csw_,
@@ -659,6 +680,7 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   MultiShiftFunction     PowerEighth;       // x^{+1/8}: refresh()
   DTXQCDFermionDoubled   Phi_;
   DtxqcdSpinMatrices     spin_;
+  DtxqcdRemezAutoScaleParams auto_;         // RAT_AUTO_HI Remez bound auto-scale
 };
 
 NAMESPACE_END(Grid);
