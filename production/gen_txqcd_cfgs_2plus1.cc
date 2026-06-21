@@ -589,10 +589,18 @@ int main(int argc, char **argv) {
       typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
       NerscIO::readConfiguration<GaugeStats>(U.U, header, std::string(ic));
     } else {
+#ifdef HAVE_LIME
       IldgReader IR;
       IR.open(std::string(ic));
       IR.readConfiguration(U.U, header);
       IR.close();
+#else
+      std::cout << GridLogError << "IMPORT_CFG=" << ic
+                << " looks like an ILDG/LIME config but this Grid was built "
+                   "without LIME — rebuild with --with-lime, or supply a NERSC "
+                   "config." << std::endl;
+      assert(0 && "ILDG import requires a LIME-enabled Grid build");
+#endif
     }
     sRNG.SeedFixedIntegers({1 + seed_offset, 2 + seed_offset, 3 + seed_offset,
                             4 + seed_offset, 5 + seed_offset});
@@ -604,51 +612,25 @@ int main(int argc, char **argv) {
     // see AUX_INIT_ITERATIONS below) gets closer to true equilibrium.
     RealD Sigma = 0.0;
     if (const char *si = std::getenv("AUX_INIT"); si && *si) {
+      // Manual Σ override — fill aux directly, no auto-measure / Picard.
       Sigma = std::atof(si);
       std::cout << GridLogMessage << "[IMPORT_CFG+AUX_INIT] Σ=" << Sigma
                 << " (manual override)" << std::endl;
+      TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+      // If a kinetic action is active (any *_KINETIC_Z env > 0), apply the
+      // FFT filter so the initial aux distribution matches the Fierz-correct
+      // joint quadratic+kinetic equilibrium at the chosen (λ, Z) point.
+      TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     } else {
-      Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
-      SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv, Stout);
-      SmearMeas.set_Field(U.U);
-      LatticeGaugeField Usm = SmearMeas.get_SmearedU();
-      WilsonImplParams impl_p_meas;
-      impl_p_meas.boundary_phases.resize(Nd, 1.0);
-      impl_p_meas.boundary_phases[Nd - 1] = -1.0;
-      typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> MFO;
-      MFO Dw(Usm, Grid, RBGrid, mass_light, csw, csw,
-             WilsonAnisotropyCoefficients(), impl_p_meas);
-      MdagMLinearOperator<MFO, LatticeFermion> HermOp(Dw);
-      ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
-      RealD V = (RealD)Grid.gSites(); RealD acc = 0.0;
-      GridParallelRNG noisePRNG(&Grid);
-      noisePRNG.SeedFixedIntegers(
-          {seed_offset + 11, seed_offset + 12, seed_offset + 13,
-           seed_offset + 14, seed_offset + 15});
-      for (int h = 0; h < n_vev_noise; ++h) {
-        LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
-        gaussian(noisePRNG, eta); Dw.Mdag(eta, b); x = Zero();
-        CG(HermOp, b, x);
-        acc += innerProduct(eta, x).real() / (2.0 * V);
-      }
-      Sigma = (acc / n_vev_noise);  // Σ = vev_trminv (no /2 — see header)
-      std::cout << GridLogMessage << "[IMPORT_CFG+AUX_AUTO] Σ=" << Sigma
-                << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
-                << std::endl;
-    }
-    TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
-    // If a kinetic action is active (any *_KINETIC_Z env > 0), apply the
-    // FFT filter so the initial aux distribution matches the Fierz-correct
-    // joint quadratic+kinetic equilibrium at the chosen (λ, Z) point.  No
-    // extra thermalization needed.
-    TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
-
-    // Optional: self-consistent iteration with TXQCD operator on top of the
-    // initial Σ guess.  Each iteration refills aux from the previous Σ, then
-    // measures Σ again using the FULL TXQCD M⁻¹ (which feels the σ
-    // back-reaction).  Converges in 2-3 iterations on chroma cfg.
-    if (const char *ni = std::getenv("AUX_INIT_ITERATIONS"); ni && *ni) {
-      int n_iter = std::atoi(ni);
+      // AUX_INIT_AUTO (default) → auto-converging Picard self-consistent saddle
+      // on the FULL stout-smeared TXQCDWilsonCloverOp (Nf mass array, APBC).
+      // Each evaluation refills the aux at a trial Σ, measures
+      // Σ_TXQCD = Tr[M_TXQCD⁻¹]/(2·N_f·V), and Picard iterates
+      // Σ_{n+1} = Σ_TXQCD(Σ_n).  Seed Σ_0 is the bare stout-smeared Wilson
+      // condensate.  Accept on relative change < AUX_INIT_TOL; if a step is NOT
+      // contracting, stop and keep the best Σ so far.  No bisection (the TXQCD
+      // map contracts at production λ — converges in 2-3 iterations).  Mirrors
+      // gen_dtxqcd_cfgs.cc::InitFreshDtxqcdField (sans bisection).
       Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
       SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv, Stout);
       SmearMeas.set_Field(U.U);
@@ -661,13 +643,43 @@ int main(int argc, char **argv) {
       noisePRNG.SeedFixedIntegers(
           {seed_offset + 21, seed_offset + 22, seed_offset + 23,
            seed_offset + 24, seed_offset + 25});
-      for (int it = 0; it < n_iter; ++it) {
-        // Build TXQCD operator with current aux fields.
+
+      // Bare Σ_0 seed: Hutchinson Tr[M⁻¹] on the plain stout-smeared
+      // Wilson-clover (single flavor) — the mean-field condensate.
+      {
+        typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> MFO;
+        MFO Dw(Usm, Grid, RBGrid, mass_light, csw, csw,
+               WilsonAnisotropyCoefficients(), impl_p_meas);
+        MdagMLinearOperator<MFO, LatticeFermion> HermOp(Dw);
+        ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
+        RealD acc = 0.0;
+        GridParallelRNG seedPRNG(&Grid);
+        seedPRNG.SeedFixedIntegers(
+            {seed_offset + 11, seed_offset + 12, seed_offset + 13,
+             seed_offset + 14, seed_offset + 15});
+        for (int h = 0; h < n_vev_noise; ++h) {
+          LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
+          gaussian(seedPRNG, eta); Dw.Mdag(eta, b); x = Zero();
+          CG(HermOp, b, x);
+          acc += innerProduct(eta, x).real() / (2.0 * V);
+        }
+        Sigma = (acc / n_vev_noise);  // Σ = vev_trminv (no /2 — see header)
+        std::cout << GridLogMessage << "[AUX_ITER 0] Sigma_bare=" << Sigma
+                  << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
+                  << "  (mean-field)" << std::endl;
+      }
+
+      // Self-consistent Σ measurement on the full TXQCD op at a trial Σ.
+      auto measure_sigma_txqcd = [&](RealD Sigma_at) -> RealD {
+        pRNG.SeedFixedIntegers({6 + seed_offset, 7 + seed_offset,
+                                8 + seed_offset, 9 + seed_offset,
+                                10 + seed_offset});
+        TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma_at);
         std::array<RealD, TxqcdNf> mass_arr;
         for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass_light;
         TXQCDWilsonCloverOp Mop(Usm, Grid, RBGrid, mass_arr,
                                  U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p_meas);
-        // Stochastic Tr[M_TXQCD⁻¹] / (4 N_f V) = per-flavor Σ for degenerate flavors.
+        // Stochastic Tr[M_TXQCD⁻¹] / (2 N_f V) = per-flavor Σ for degenerate flavors.
         RealD acc = 0.0;
         for (int h = 0; h < n_vev_noise; ++h) {
           TXQCDFermionNf eta(&Grid), b(&Grid), x(&Grid);
@@ -694,14 +706,48 @@ int main(int argc, char **argv) {
           }
           acc += innerProduct(eta, x).real() / (2.0 * (RealD)TxqcdNf * V);
         }
-        Sigma = (acc / n_vev_noise);  // Σ = vev_trminv (no /2 — see header)
-        std::cout << GridLogMessage << "[AUX_ITER " << (it+1) << "/" << n_iter
-                  << "] Σ=" << Sigma
-                  << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
+        return acc / n_vev_noise;  // Σ = vev_trminv (no /2 — see header)
+      };
+
+      RealD aux_iter_tol = 0.1;  // 10% is plenty for an HMC init.
+      if (const char *t = std::getenv("AUX_INIT_TOL"); t && *t)
+        aux_iter_tol = std::atof(t);
+      int picard_max =
+          TXQCDProduction::detail::env_int("AUX_INIT_PICARD_MAX", 6);
+      // AUX_INIT_ITERATIONS=N (legacy fixed-N knob) acts as the cap, but the
+      // loop still early-breaks at AUX_INIT_TOL.
+      if (const char *ni = std::getenv("AUX_INIT_ITERATIONS"); ni && *ni)
+        picard_max = std::atoi(ni);
+
+      RealD Scur = Sigma;          // start from the bare mean-field seed
+      RealD prev_delta = 1e300;
+      for (int it = 1; it <= picard_max; ++it) {
+        RealD Snew  = measure_sigma_txqcd(Scur);
+        RealD delta = std::abs(Snew - Scur);
+        RealD rel   = delta / std::max(std::abs(Snew), 1e-30);
+        std::cout << GridLogMessage << "[AUX_ITER " << it << "] Sigma=" << Snew
+                  << "  rel=" << rel
+                  << "  → <σ_aa>=" << Snew / (lambda_runtime * lambda_runtime)
                   << std::endl;
-        TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
+        Sigma = Snew;  // keep best so far
+        if (rel < aux_iter_tol) break;
+        if (delta >= prev_delta) {  // not contracting — keep best Σ, stop
+          std::cout << GridLogMessage
+                    << "[AUX_ITER] not contracting — stopping at Sigma="
+                    << Sigma << std::endl;
+          break;
+        }
+        prev_delta = delta;
+        Scur = Snew;
       }
-      // Re-apply kinetic filter on the final iteration's aux draw.
+      std::cout << GridLogMessage << "[IMPORT_CFG+AUX_AUTO converged] Σ=" << Sigma
+                << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
+                << std::endl;
+      // Final fill at the converged Σ (deterministic main-pRNG draw).
+      pRNG.SeedFixedIntegers({6 + seed_offset, 7 + seed_offset,
+                              8 + seed_offset, 9 + seed_offset,
+                              10 + seed_offset});
+      TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
       TXQCDKineticFilter::ApplyFromEnv(U, lambda_runtime, Sigma);
     }
   } else {
@@ -755,9 +801,16 @@ int main(int argc, char **argv) {
     } else {
       // Step 1: weak-field gauge.
       TXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, wf_scale);
-      // Step 2: optionally auto-measure Σ on the just-generated gauge with
-      // production stout-smearing and antiperiodic time BC, matching the
-      // M_ee operator that the TXQCD HMC will use.
+      // Step 2: AUX_INIT_AUTO → auto-converging Picard self-consistent saddle.
+      // Each evaluation refills the aux at a trial Σ, builds the FULL
+      // stout-smeared TXQCDWilsonCloverOp (Nf mass array, antiperiodic time BC
+      // matching the M_ee operator the HMC uses), and measures the Hutchinson
+      // estimate Σ_TXQCD = Tr[M_TXQCD⁻¹]/(2·N_f·V).  Picard iterates
+      // Σ_{n+1} = Σ_TXQCD(Σ_n) from the bare mean-field seed Σ_0, accepting when
+      // the relative change falls below AUX_INIT_TOL; the TXQCD map contracts at
+      // production λ (converges in 2-3 iterations) so no bisection is needed —
+      // if a step is NOT contracting we stop and keep the best Σ so far.
+      // Mirrors gen_dtxqcd_cfgs.cc::InitFreshDtxqcdField (sans bisection).
       if (auto_measure) {
         Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
         SmearedConfiguration<PeriodicGimplR> SmearMeas(&Grid, stout_nsmear_inv,
@@ -767,14 +820,7 @@ int main(int argc, char **argv) {
         WilsonImplParams impl_p;
         impl_p.boundary_phases.resize(Nd, 1.0);
         impl_p.boundary_phases[Nd - 1] = -1.0;
-        typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>>
-            MeasFermOp;
-        MeasFermOp Dw(Usm, Grid, RBGrid, mass_light, csw, csw,
-                      WilsonAnisotropyCoefficients(), impl_p);
-        MdagMLinearOperator<MeasFermOp, LatticeFermion> HermOp(Dw);
-        ConjugateGradient<LatticeFermion> CG(1e-8, cg_max);
         RealD V = (RealD)Grid.gSites();
-        RealD acc = 0.0;
         // Use a SEPARATE pRNG for the noise vectors so the main pRNG state
         // (which feeds aux-field generation in step 3) remains the same as
         // it would be in a non-AUX_INIT_AUTO run with the same seed.
@@ -782,26 +828,94 @@ int main(int argc, char **argv) {
         noisePRNG.SeedFixedIntegers(
             {seed_offset + 11, seed_offset + 12, seed_offset + 13,
              seed_offset + 14, seed_offset + 15});
-        for (int h = 0; h < n_vev_noise; ++h) {
-          LatticeFermion eta(&Grid), b(&Grid), x(&Grid);
-          gaussian(noisePRNG, eta);
-          Dw.Mdag(eta, b);
-          x = Zero();
-          CG(HermOp, b, x);
-          acc += innerProduct(eta, x).real() / (2.0 * V);
+
+        // Self-consistent Σ measurement on the full TXQCD op at a trial Σ.
+        auto measure_sigma_txqcd = [&](RealD Sigma_at) -> RealD {
+          pRNG.SeedFixedIntegers({6 + seed_offset, 7 + seed_offset,
+                                  8 + seed_offset, 9 + seed_offset,
+                                  10 + seed_offset});
+          TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma_at);
+          std::array<RealD, TxqcdNf> mass_arr;
+          for (int a = 0; a < TxqcdNf; ++a) mass_arr[a] = mass_light;
+          TXQCDWilsonCloverOp Mop(Usm, Grid, RBGrid, mass_arr,
+                                  U.sigma, U.pi, U.s, U.p, U.t, csw, impl_p);
+          RealD acc = 0.0;
+          for (int h = 0; h < n_vev_noise; ++h) {
+            TXQCDFermionNf eta(&Grid), b(&Grid), x(&Grid);
+            for (int a = 0; a < TxqcdNf; ++a) gaussian(noisePRNG, eta.f[a]);
+            Mop.Mdag(eta, b);
+            x = Zero();
+            // Inline single-shift CG on M_TXQCD†M_TXQCD.
+            TXQCDFermionNf r(&Grid), p(&Grid), Mp(&Grid), MdMp(&Grid);
+            r = b; p = r;
+            RealD rsq = norm2(r);
+            RealD bsq = std::max(norm2(b), 1e-30);
+            RealD tol2 = 1e-16 * bsq;
+            for (int cg_it = 0; cg_it < cg_max; ++cg_it) {
+              Mop.M(p, Mp); Mop.Mdag(Mp, MdMp);
+              ComplexD pAp = innerProduct(p, MdMp);
+              ComplexD alpha = ComplexD(rsq, 0.0) / pAp;
+              for (int a = 0; a < TxqcdNf; ++a) x.f[a] = x.f[a] + alpha * p.f[a];
+              for (int a = 0; a < TxqcdNf; ++a) r.f[a] = r.f[a] - alpha * MdMp.f[a];
+              RealD rsq_new = norm2(r);
+              if (rsq_new < tol2) break;
+              RealD beta_cg = rsq_new / rsq;
+              for (int a = 0; a < TxqcdNf; ++a) p.f[a] = r.f[a] + beta_cg * p.f[a];
+              rsq = rsq_new;
+            }
+            acc += innerProduct(eta, x).real() / (2.0 * (RealD)TxqcdNf * V);
+          }
+          return acc / n_vev_noise;  // Σ = vev_trminv (TXQCD-op self-consist)
+        };
+
+        RealD aux_iter_tol = 0.1;  // 10% is plenty for an HMC init.
+        if (const char *t = std::getenv("AUX_INIT_TOL"); t && *t)
+          aux_iter_tol = std::atof(t);
+        int picard_max =
+            TXQCDProduction::detail::env_int("AUX_INIT_PICARD_MAX", 6);
+        // AUX_INIT_ITERATIONS=N (legacy fixed-N knob) acts as the cap, but the
+        // loop still early-breaks at AUX_INIT_TOL.
+        if (const char *ni = std::getenv("AUX_INIT_ITERATIONS"); ni && *ni)
+          picard_max = std::atoi(ni);
+
+        RealD Scur = measure_sigma_txqcd(0.0);  // mean-field condensate (aux=0)
+        std::cout << GridLogMessage << "[AUX_ITER 0] Sigma_TXQCD(0)=" << Scur
+                  << "  (mean-field)" << std::endl;
+        Sigma = Scur;  // best Σ so far
+        RealD prev_delta = 1e300;
+        for (int it = 1; it <= picard_max; ++it) {
+          RealD Snew  = measure_sigma_txqcd(Scur);
+          RealD delta = std::abs(Snew - Scur);
+          RealD rel   = delta / std::max(std::abs(Snew), 1e-30);
+          std::cout << GridLogMessage << "[AUX_ITER " << it << "] Sigma=" << Snew
+                    << "  rel=" << rel
+                    << "  → <σ_aa>=" << Snew / (lambda_runtime * lambda_runtime)
+                    << std::endl;
+          Sigma = Snew;  // keep best so far
+          if (rel < aux_iter_tol) break;
+          if (delta >= prev_delta) {  // not contracting — keep best Σ, stop
+            std::cout << GridLogMessage
+                      << "[AUX_ITER] not contracting — stopping at Sigma="
+                      << Sigma << std::endl;
+            break;
+          }
+          prev_delta = delta;
+          Scur = Snew;
         }
-        RealD vev_trminv = acc / n_vev_noise;
-        Sigma = vev_trminv;  // Σ = vev_trminv (corrected 2026-05-17, no /2)
         std::cout << GridLogMessage
-                  << "[AUX_INIT_AUTO] vev_trminv=" << vev_trminv
-                  << "  Σ=" << Sigma
+                  << "[AUX_INIT_AUTO converged] Σ=" << Sigma
                   << "  → <σ_aa>=" << Sigma / (lambda_runtime * lambda_runtime)
                   << "  <s_ii>="
                   << (TxqcdNf * Sigma) /
                          (std::sqrt(2.0) * Nc * lambda_runtime * lambda_runtime)
                   << std::endl;
+        // Restore the main pRNG state so step 3 below produces the same aux
+        // draw it would in a non-AUX_INIT_AUTO run with the same seed.
+        pRNG.SeedFixedIntegers({6 + seed_offset, 7 + seed_offset,
+                                8 + seed_offset, 9 + seed_offset,
+                                10 + seed_offset});
       }
-      // Step 3: fill aux fields (σ, π, s, p, t) using the measured Σ.
+      // Step 3: fill aux fields (σ, π, s, p, t) using the converged Σ.
       TXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda_runtime, Sigma);
       // Apply kinetic FFT filter so weak-field start lands at the
       // Fierz-correct (λ, Z) equilibrium distribution from the get-go.
