@@ -32,6 +32,7 @@
 #endif
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDSmearedConfiguration.h>
 #include <Grid/qcd/action/gauge/WilsonGaugeAction.h>
 #include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
 
@@ -247,6 +248,27 @@ static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
   }
 }
 
+// Build the chosen integrator + HMC and evolve.  Templated on the integrator
+// (ForceGradient | MinimumNorm2) and the smearing policy (NoSmearing |
+// DTXQCDSmearedConfiguration) so the 2x2 runtime selection in main() shares one
+// body.
+template <template <class, class, class> class IntegratorT, class SmearPolicy>
+static void RunDtxqcdHMC(
+    Grid::GridCartesian &Grid_, Grid::IntegratorParameters &MD,
+    Grid::ActionSet<Grid::DTXQCDField,
+                    Grid::Representations<Grid::EmptyRep<Grid::DTXQCDField>>> &Aset,
+    SmearPolicy &Smear, Grid::HMCparameters &HMCp, Grid::GridSerialRNG &sRNG,
+    Grid::GridParallelRNG &pRNG,
+    std::vector<Grid::HmcObservable<Grid::DTXQCDField> *> &Obs,
+    Grid::DTXQCDField &U) {
+  using namespace Grid;
+  typedef IntegratorT<DTXQCDCompositeImpl, SmearPolicy,
+                      Representations<EmptyRep<DTXQCDField>>> IntT;
+  IntT MDyn(&Grid_, MD, Aset, Smear);
+  HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
+  HMC.evolve();
+}
+
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
   std::cout << GridLogMessage << "Grid threads: "
@@ -402,11 +424,6 @@ int main(int argc, char **argv) {
   CPp.format        = "IEEE64BIG";
   DTXQCDCheckpointer ckpt(CPp);
 
-  // ---- run.  v1: gauge-only smearer (no stout); add DTXQCD smearer later
-  //      once stout-chained DTXQCDSmearedConfiguration is ported.
-  NoSmearing<DTXQCDCompositeImpl> Smear;
-  Smear.set_Field(U);
-
   // ---- signed-Pfaffian + aux diagnostics observer (the sign-reweighting
   //      observable: per-traj gamma5.M48 low eigenvalues -> n_neg -> signPf,
   //      plus aux VEVs / Tr M^-1 / per-action Fdt / aux correlators).  Writes
@@ -417,21 +434,33 @@ int main(int argc, char **argv) {
                          Grid, RBGrid, pRNG, mass, csw_, lam, n_vev_noise);
   std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt, &diag};
 
-  // Runtime integrator selection (INTEGRATOR env): both template
-  // instantiations are compiled; MD.name picks one.  ForceGradient is the
-  // small-lattice Fierz-test default; MinimumNorm2 is canonical for production.
-  if (MD.name == "ForceGradient") {
-    typedef ForceGradient<DTXQCDCompositeImpl,
-                          NoSmearing<DTXQCDCompositeImpl>, Reps> IntT;
-    IntT MDyn(&Grid, MD, Aset, Smear);
-    HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
-    HMC.evolve();
+  // ---- smearing + integrator dispatch (2x2 runtime selection).
+  //   STOUT_NSMEAR>0 (params.h default 1): stout-chained
+  //   DTXQCDSmearedConfiguration -- gauge through stout, aux pass-through, with
+  //   is_smeared on the gauge/fermion/LogDet actions (required for the
+  //   chroma-matched csw=1.249 point).  STOUT_NSMEAR=0: unsmeared (csw=0 scout).
+  //   INTEGRATOR picks ForceGradient vs MinimumNorm2 (both compiled).
+  const int n_stout = stout_nsmear_inv;
+  std::cout << GridLogMessage << "Smearing: STOUT_NSMEAR=" << n_stout
+            << "  STOUT_RHO=" << stout_rho_inv << std::endl;
+  if (n_stout > 0) {
+    Smear_Stout<PeriodicGimplR> Stout(stout_rho_inv);
+    DTXQCDSmearedConfiguration Smear(&Grid, (unsigned int)n_stout, Stout);
+    Smear.set_Field(U);
+    PFAction.is_smeared    = true;
+    LogDet.is_smeared      = true;
+    GaugeAction.is_smeared = true;
+    if (MD.name == "ForceGradient")
+      RunDtxqcdHMC<ForceGradient>(Grid, MD, Aset, Smear, HMCp, sRNG, pRNG, Obs, U);
+    else
+      RunDtxqcdHMC<MinimumNorm2>(Grid, MD, Aset, Smear, HMCp, sRNG, pRNG, Obs, U);
   } else {
-    typedef MinimumNorm2<DTXQCDCompositeImpl,
-                         NoSmearing<DTXQCDCompositeImpl>, Reps> IntT;
-    IntT MDyn(&Grid, MD, Aset, Smear);
-    HybridMonteCarlo<IntT> HMC(HMCp, MDyn, sRNG, pRNG, Obs, U);
-    HMC.evolve();
+    NoSmearing<DTXQCDCompositeImpl> Smear;
+    Smear.set_Field(U);
+    if (MD.name == "ForceGradient")
+      RunDtxqcdHMC<ForceGradient>(Grid, MD, Aset, Smear, HMCp, sRNG, pRNG, Obs, U);
+    else
+      RunDtxqcdHMC<MinimumNorm2>(Grid, MD, Aset, Smear, HMCp, sRNG, pRNG, Obs, U);
   }
 
   std::cout << GridLogMessage
