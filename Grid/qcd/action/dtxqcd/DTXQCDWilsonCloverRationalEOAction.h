@@ -73,7 +73,18 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       : grid_(grid), rbgrid_(rbgrid), mass_(mass), csw_(csw),
         param_(p), Phi_(&rbgrid), spin_(grid),
         auto_(DtxqcdRemezAutoScaleParams::FromEnv(p.lo, p.hi)) {
-    BuildRemez(auto_.current_lo, auto_.current_hi);
+    // Defer the Remez build to the first refresh() when auto-scale is active:
+    // it rebuilds on the Lanczos-derived bounds anyway, so building here on the
+    // (possibly doomed) fixed [lo,hi] is wasted -- and at a tiny fixed lo the
+    // AlgRemez compute is very slow.  refresh() is the first method the HMC
+    // integrator calls (before S()/deriv()), so deferral is safe.
+    if (!auto_.enabled) {
+      BuildRemez(auto_.current_lo, auto_.current_hi);
+    } else {
+      std::cout << GridLogMessage
+                << "[DTXQCDWilsonRationalEO] Remez build deferred to refresh() "
+                   "(auto-scale active)" << std::endl;
+    }
   }
 
   std::string action_name() override {
@@ -106,10 +117,13 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     // OFF -> no Lanczos, no rebuild, byte-identical to the pre-autoscale path).
     {
       RealD new_lo = auto_.current_lo, new_hi = auto_.current_hi;
-      if (DtxqcdRefreshAutoScale(auto_, Mop, &rbgrid_, pRNG, /*cb=*/Odd,
-                                 "DTXQCDWilsonRationalEO", new_lo, new_hi)) {
+      bool auto_rebuild = DtxqcdRefreshAutoScale(auto_, Mop, &rbgrid_, pRNG,
+                              /*cb=*/Odd, "DTXQCDWilsonRationalEO", new_lo, new_hi);
+      // First refresh after a deferred ctor build: the Remez is empty, so build
+      // it now (on the auto-scaled bounds) even if the bounds didn't widen.
+      if (auto_rebuild || PowerNegQuarter.poles.size() == 0) {
         std::cout << GridLogMessage << "[" << action_name()
-                  << "] rebuilding Remez on [" << new_lo << ", " << new_hi
+                  << "] building Remez on [" << new_lo << ", " << new_hi
                   << "]" << std::endl;
         BuildRemez(new_lo, new_hi);
       }

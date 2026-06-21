@@ -64,7 +64,7 @@ LAMBDA=0.5000 ./run_all_txqcd_measurements.sh --grid ... --mpi ...
 ```
 
 - On a laptop/CPU build, `mpirun -np N ./gen_… ` is fine (no srun there).
-- `--mpi 1.1.1.4` (time-direction split) is the sweet spot at 16³×48 on one 4-GPU node. **Multi-GPU split at 16³×48 is a net loss** (MPI sync dwarfs the tiny per-rank compute) — run 4 independent λ streams on one node instead. Watch for the per-rank-volume QUDA cliff (~256k→524k sites/rank) when scaling up.
+- **`--mpi 1.1.1.4` (one 4-GPU job per node) is the production config at 16³×48 — one λ stream per node.** A single 1.1.1.4 runs ~1.7× the per-trajectory throughput of an *uncontended* 1.1.1.1 (~42% parallel efficiency — MPI sync dwarfs the tiny per-rank compute). The tempting alternative, 4 independent 1.1.1.1 jobs on one node, does **not** deliver 4× aggregate: the four single-GPU jobs contend on shared host bandwidth / NVLink / PCIe and slow each other enough to end up *worse* than one 1.1.1.4 (confirmed empirically in TXQCD; the DTXQCD per-deriv profile is hopping+CG-dominated and contends the same way). So run **one 1.1.1.4 per node**, not 4×1.1.1.1. (Clean-node single-GPU numbers — measured with idle neighbours — overstate 1.1.1.1 throughput for exactly this reason.) Watch for the per-rank-volume QUDA cliff (~256k→524k sites/rank) when scaling up.
 - `params.h` also governs measurement trajectory range via `n_therm`, `n_prod`, `meas_skip`.
 - `N_TRAJ` in slurm scripts is a **target, not an increment**: if the latest checkpoint is `.150` and `N_TRAJ=100`, the driver exits immediately.
 
