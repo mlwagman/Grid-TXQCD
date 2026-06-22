@@ -84,6 +84,7 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       TRAJ="$TRAJ" N_SKIP="$N_SKIP" CG_TOL="$CG_TOL" \
       ${DTXQCD_SUFFIX:+DTXQCD_SUFFIX="$DTXQCD_SUFFIX"} \
       ${IMPORT_CFG:+IMPORT_CFG="$IMPORT_CFG"} \
+      ${USE_FULL_PF:+USE_FULL_PF="$USE_FULL_PF"} \
       $NO_METROP_ARG \
   ./srun_gpu_wrapper.sh ./gen_dtxqcd_cfgs --grid "$LATT" --mpi "$MPI" \
       --shm "$SHM" --shm-mpi 1 --device-mem "$DEVICE_MEM"
