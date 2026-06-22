@@ -29,6 +29,11 @@ MASS_LIGHT_DTXQCD="${MASS_LIGHT_DTXQCD:--0.245}"
 CSW="${CSW:-1.24930970916466}"
 STOUT_NSMEAR="${STOUT_NSMEAR:-1}"
 STOUT_RHO="${STOUT_RHO:-0.125}"
+# Nf=2+1: ADD_STRANGE=1 adds a plain-QCD Nf=1 spectator strange (mass
+# MASS_STRANGE) so plaq/VEV match the Nf=2+1 chroma reference (DTXQCD itself is
+# the Nf=2 light sector).  Default OFF (pure Nf=2).
+ADD_STRANGE="${ADD_STRANGE:-0}"
+MASS_STRANGE="${MASS_STRANGE:--0.245}"
 
 # ---- integrator (canonical: MN2 MDS=10 trajL=sqrt2/4; multi-rate from the
 #      driver defaults -- L1 fermion x1 coarsest, L2 gauge x2, L3 aux x4) ----
@@ -78,6 +83,7 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       LATT="$LATT" \
       LAMBDA_DTXQCD="$LAMBDA_DTXQCD" MASS_LIGHT_DTXQCD="$MASS_LIGHT_DTXQCD" CSW="$CSW" \
       STOUT_NSMEAR="$STOUT_NSMEAR" STOUT_RHO="$STOUT_RHO" \
+      ADD_STRANGE="$ADD_STRANGE" MASS_STRANGE="$MASS_STRANGE" \
       AUX_INIT_AUTO="$AUX_INIT_AUTO" RAT_AUTO_HI="$RAT_AUTO_HI" \
       DTXQCD_PRECOMPUTE_GPU="$DTXQCD_PRECOMPUTE_GPU" DTXQCD_LOGDET_S_GPU="$DTXQCD_LOGDET_S_GPU" \
       DTXQCD_LOGDET_GPU="$DTXQCD_LOGDET_GPU" DTXQCD_MOOEEINV_CUBLAS="$DTXQCD_MOOEEINV_CUBLAS" \

@@ -37,6 +37,13 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSmearedConfiguration.h>
 #include <Grid/qcd/action/gauge/WilsonGaugeAction.h>
+// Strange quark (Nf=1, ADD_STRANGE=1): plain Wilson-clover QCD action wrapped
+// into the composite field via DTXQCDQCDActionAdapter, exactly as TXQCD's
+// Nf=2+1 generator.  The chroma reference plaq is Nf=2+1, so a fair plaq/VEV
+// comparison REQUIRES the spectator strange.
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
+#include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
 
 using namespace TXQCDProduction;
@@ -433,6 +440,52 @@ int main(int argc, char **argv) {
   }
   Action<DTXQCDField> &PFAction = *PFActionPtr;
 
+  // ---- optional spectator strange quark (Nf=2+1), gated by ADD_STRANGE=1 ----
+  // DTXQCD's doubled operator is the Nf=2 LIGHT sector; the chroma reference
+  // plaquette/VEV is Nf=2+1, so a fair comparison REQUIRES a plain-QCD Nf=1
+  // strange — exactly as gen_txqcd_cfgs_2plus1.cc.  EO factorization:
+  // det(M)=det(Mee)·det(Mpc); QCDLogDetCloverEOAction(nf=1) handles det(Mee),
+  // OneFlavourSchurCloverRationalAction handles det(Mpc†Mpc)^{1/2}.  Both run on
+  // a Wilson-clover op at mass_strange/csw with APBC time, wrapped into the
+  // composite field via DTXQCDQCDActionAdapter (aux force slots zeroed -- the
+  // QCD strange has no σ,π,d,n,s,p dependence) and smeared with the gauge.
+  // Double precision: TXQCD's MP/QUDA strange variants are perf-only (identical
+  // physics); start simple and bit-safe for the comparison.
+  const bool add_strange =
+      TXQCDProduction::detail::env_int("ADD_STRANGE", 0) != 0;
+  typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCFstrange;
+  WilsonImplParams strange_impl_p;
+  strange_impl_p.boundary_phases.resize(Nd, 1.0);
+  strange_impl_p.boundary_phases[Nd - 1] = -1.0;   // APBC time (chroma)
+  OneFlavourRationalParams strange_rat(1.0e-4, 100.0, cgmax, tol, 20, 64,
+                                       100, 1e-6, 1e-4);
+  std::unique_ptr<WCFstrange>                                       StrangeFermOp;
+  std::unique_ptr<QCDLogDetCloverEOAction<WilsonImplR>>             StrangeLogDet;
+  std::unique_ptr<OneFlavourSchurCloverRationalAction<WilsonImplR>> StrangeSchur;
+  std::unique_ptr<DTXQCDQCDActionAdapter>                           StrangeLogDetAd;
+  std::unique_ptr<DTXQCDQCDActionAdapter>                           StrangeSchurAd;
+  if (add_strange) {
+    StrangeFermOp = std::make_unique<WCFstrange>(
+        U.U, Grid, RBGrid, mass_strange, csw_, csw_,
+        WilsonAnisotropyCoefficients(), strange_impl_p);
+    StrangeLogDet = std::make_unique<QCDLogDetCloverEOAction<WilsonImplR>>(
+        *StrangeFermOp, /*nf=*/1);
+    StrangeSchur =
+        std::make_unique<OneFlavourSchurCloverRationalAction<WilsonImplR>>(
+            *StrangeFermOp, strange_rat);
+    StrangeLogDetAd = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeLogDet);
+    StrangeSchurAd  = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeSchur);
+    std::cout << GridLogMessage
+              << "[DTXQCD] Nf=2+1: spectator strange ADDED (mass_strange="
+              << mass_strange << " csw=" << csw_ << " rat[" << strange_rat.lo
+              << "," << strange_rat.hi << "] deg=" << strange_rat.degree << ")"
+              << std::endl;
+  } else {
+    std::cout << GridLogMessage
+              << "[DTXQCD] Nf=2 (no strange; set ADD_STRANGE=1 for Nf=2+1 to "
+                 "match the chroma reference)" << std::endl;
+  }
+
   // ---- action levels.  Level 1 (innermost) bundles the fermion-bilinear
   //      monomial(s) that need the finest dt; gauge gets a 2x multiplier and
   //      aux a 4x multiplier mirroring the TXQCD production hierarchy.  In the
@@ -441,6 +494,10 @@ int main(int argc, char **argv) {
   ActionLevel<DTXQCDField, Reps> L1(1);
   L1.push_back(&PFAction);
   if (!use_full_pf) L1.push_back(&LogDet);
+  if (add_strange) {
+    L1.push_back(StrangeLogDetAd.get());   // QCD det(Mee) -- no aux dependence
+    L1.push_back(StrangeSchurAd.get());    // QCD det(Mpc) -- no aux dependence
+  }
   ActionLevel<DTXQCDField, Reps> L2(TXQCDProduction::detail::env_int("GAUGE_MULT", 2));
   L2.push_back(&GaugeAction);
   ActionLevel<DTXQCDField, Reps> L3(TXQCDProduction::detail::env_int("AUX_MULT",  4));
@@ -519,6 +576,10 @@ int main(int argc, char **argv) {
     PFAction.is_smeared    = true;
     if (!use_full_pf) LogDet.is_smeared = true;  // LogDet inactive in FULL branch
     GaugeAction.is_smeared = true;
+    if (add_strange) {                            // strange acts on smeared gauge
+      StrangeLogDetAd->is_smeared = true;
+      StrangeSchurAd->is_smeared  = true;
+    }
     if (MD.name == "ForceGradient")
       RunDtxqcdHMC<ForceGradient>(Grid, MD, Aset, Smear, HMCp, sRNG, pRNG, Obs, U);
     else
