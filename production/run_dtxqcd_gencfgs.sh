@@ -61,6 +61,16 @@ IMPORT_CFG="${IMPORT_CFG:-}"
 NO_METROP_ARG=""
 if [ -n "${NO_METROP:-}" ]; then NO_METROP_ARG="NO_METROP=$NO_METROP"; fi
 
+# Binary selection.  Normally ./gen_dtxqcd_cfgs.  TEMPORARY BRIDGE (2026-06-21):
+# while a long-running job holds the canonical binary's inode it cannot be
+# relinked in place, so the multi-rank-HDF5 diag fix was built as the snapshot
+# ./gen_dtxqcd_cfgs_v2 and is preferred here if present.  Once no job holds
+# gen_dtxqcd_cfgs, rebuild it from source and delete gen_dtxqcd_cfgs_v2 to revert
+# to the canonical name.  Override explicitly with BIN=...
+if [ -z "${BIN:-}" ]; then
+  if [ -x "$SELF_DIR/gen_dtxqcd_cfgs_v2" ]; then BIN=./gen_dtxqcd_cfgs_v2; else BIN=./gen_dtxqcd_cfgs; fi
+fi
+
 NTASKS=$(echo "$MPI" | awk -F. '{print $1*$2*$3*$4}')
 
 echo "=== run_dtxqcd_gencfgs  $(date) ==="
@@ -86,6 +96,6 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       ${IMPORT_CFG:+IMPORT_CFG="$IMPORT_CFG"} \
       ${USE_FULL_PF:+USE_FULL_PF="$USE_FULL_PF"} \
       $NO_METROP_ARG \
-  ./srun_gpu_wrapper.sh ./gen_dtxqcd_cfgs --grid "$LATT" --mpi "$MPI" \
+  ./srun_gpu_wrapper.sh "$BIN" --grid "$LATT" --mpi "$MPI" \
       --shm "$SHM" --shm-mpi 1 --device-mem "$DEVICE_MEM"
 echo "=== run_dtxqcd_gencfgs done rc=$? $(date) ==="
