@@ -23,6 +23,8 @@
 //   N_THERM, N_PROD overrides via params.h constexprs (recompile to change)
 
 #include "params.h"
+#include <cstdio>   // IMPORT_CFG file-magic sniff
+#include <cstring>  // memcmp
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
@@ -54,7 +56,8 @@ static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
                                  Grid::GridSerialRNG &sRNG,
                                  Grid::GridParallelRNG &pRNG,
                                  Grid::RealD mass, Grid::RealD csw,
-                                 Grid::RealD lambda, int cg_max) {
+                                 Grid::RealD lambda, int cg_max,
+                                 bool gauge_preloaded = false) {
   using namespace Grid;
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
@@ -73,8 +76,15 @@ static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
     sigma_auto = true;
   }
 
-  // Step 1: weak-field gauge (so Σ can be measured on it).
-  DTXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, /*wf=*/0.1);
+  // Step 1: gauge.  Fresh start draws a weak-field gauge; an imported start
+  // (IMPORT_CFG) already has U.U loaded -> skip and measure Sigma on it.
+  if (!gauge_preloaded) {
+    DTXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, /*wf=*/0.1);
+  } else {
+    std::cout << GridLogMessage
+              << "[InitFreshDtxqcdField] using preloaded (imported) gauge"
+              << std::endl;
+  }
 
   if (sigma_auto) {
     // Bare-Σ seed: Hutchinson Tr M^{-1} on plain Wilson (csw=0, periodic) —
@@ -337,6 +347,35 @@ int main(int argc, char **argv) {
                                    cfg_dir + "/ckpoint_lat",
                                    cfg_dir + "/ckpoint_rng", latest);
     start_traj = latest;
+  } else if (const char *ic = std::getenv("IMPORT_CFG"); ic && *ic) {
+    // Fork from an external thermalized gauge config (chroma LIME or NERSC):
+    // load U.U, then run the aux saddle init (AUX_INIT_AUTO) on the imported
+    // gauge instead of a weak field.  ILDG (.lime) needs HAVE_LIME at build.
+    std::cout << GridLogMessage << "IMPORT_CFG=" << ic
+              << " (fork from external gauge)" << std::endl;
+    std::FILE *fp = std::fopen(ic, "rb");
+    char magic[16] = {0};
+    if (fp) { (void)std::fread(magic, 1, sizeof(magic), fp); std::fclose(fp); }
+    FieldMetaData header;
+    if (std::memcmp(magic, "BEGIN_HEADER", 12) == 0) {
+      typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
+      NerscIO::readConfiguration<GaugeStats>(U.U, header, std::string(ic));
+    } else {
+#ifdef HAVE_LIME
+      IldgReader IR;
+      IR.open(std::string(ic));
+      IR.readConfiguration(U.U, header);
+      IR.close();
+#else
+      std::cerr << "IMPORT_CFG=" << ic << ": non-NERSC (ILDG/.lime) gauge "
+                   "requires a LIME-enabled build (--with-lime)." << std::endl;
+      std::abort();
+#endif
+    }
+    std::cout << GridLogMessage << "Imported gauge plaquette = "
+              << WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U) << std::endl;
+    InitFreshDtxqcdField(Grid, RBGrid, U, sRNG, pRNG, mass, csw_, lam, cgmax,
+                         /*gauge_preloaded=*/true);
   } else {
     std::cout << GridLogMessage
               << "Fresh DTXQCD start (weak-field gauge + aux saddle init)"
