@@ -35,13 +35,18 @@ STOUT_RHO="${STOUT_RHO:-0.125}"
 ADD_STRANGE="${ADD_STRANGE:-0}"
 MASS_STRANGE="${MASS_STRANGE:--0.245}"
 
-# ---- integrator (canonical: MN2 MDS=10 trajL=sqrt2/4; multi-rate from the
-#      driver defaults -- L1 fermion x1 coarsest, L2 gauge x2, L3 aux x4) ----
+# ---- integrator (canonical: MN2 MDS=10 trajL=sqrt2/4; multi-rate) ----
+#   L1 fermion x1 (coarsest), L2 gauge x8, L3 aux x1 (innermost).
+#   Gauge x8 matches TXQCD's effective gauge substeps (4 x INNER 2) -> smooth
+#   weak-field thermalization (gauge x2 overshot the large plaq~1 start force).
+#   aux x1 with gauge x8 keeps the aux step size identical to the old
+#   gauge x2 / aux x4 (trajL/(10*8*1) = trajL/(10*2*4) = trajL/80), so aux
+#   stability and overhead are unchanged; only the gauge is 4x finer.
 INTEGRATOR="${INTEGRATOR:-MinimumNorm2}"
 MDSTEPS="${MDSTEPS:-10}"
 TRAJL="${TRAJL:-0.353553390593274}"     # sqrt(2)/4
-GAUGE_MULT="${GAUGE_MULT:-2}"
-AUX_MULT="${AUX_MULT:-4}"
+GAUGE_MULT="${GAUGE_MULT:-8}"
+AUX_MULT="${AUX_MULT:-1}"
 
 # ---- saddle init + rational autoscale (the "fancy init") -----------------
 AUX_INIT_AUTO="${AUX_INIT_AUTO:-1}"
