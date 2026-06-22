@@ -43,6 +43,7 @@
 // comparison REQUIRES the spectator strange.
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
 
@@ -449,37 +450,62 @@ int main(int argc, char **argv) {
   // a Wilson-clover op at mass_strange/csw with APBC time, wrapped into the
   // composite field via DTXQCDQCDActionAdapter (aux force slots zeroed -- the
   // QCD strange has no σ,π,d,n,s,p dependence) and smeared with the gauge.
-  // Double precision: TXQCD's MP/QUDA strange variants are perf-only (identical
-  // physics); start simple and bit-safe for the comparison.
+  // Mixed precision: full-DP action + single-precision sibling op for the MD
+  // force multishift solve (~2x faster than full-DP on the strange force eval,
+  // which is the dominant per-traj cost after the light deriv); refresh and S
+  // stay full-DP.  Mirrors gen_txqcd_cfgs_2plus1.cc; identical physics to DP.
   const bool add_strange =
       TXQCDProduction::detail::env_int("ADD_STRANGE", 0) != 0;
   typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCFstrange;
+  typedef WilsonCloverFermion<WilsonImplF, CloverHelpers<WilsonImplF>> WCFstrangeF;
   WilsonImplParams strange_impl_p;
   strange_impl_p.boundary_phases.resize(Nd, 1.0);
   strange_impl_p.boundary_phases[Nd - 1] = -1.0;   // APBC time (chroma)
   OneFlavourRationalParams strange_rat(1.0e-4, 100.0, cgmax, tol, 20, 64,
                                        100, 1e-6, 1e-4);
-  std::unique_ptr<WCFstrange>                                       StrangeFermOp;
+  std::unique_ptr<GridCartesian>          StrangeGridF;
+  std::unique_ptr<GridRedBlackCartesian>  StrangeRBGridF;
+  std::unique_ptr<LatticeGaugeFieldF>     StrangeUmuF;
+  std::unique_ptr<WCFstrange>             StrangeFermOp;
+  std::unique_ptr<WCFstrangeF>            StrangeFermOpF;
   std::unique_ptr<QCDLogDetCloverEOAction<WilsonImplR>>             StrangeLogDet;
-  std::unique_ptr<OneFlavourSchurCloverRationalAction<WilsonImplR>> StrangeSchur;
+  std::unique_ptr<OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>
+      StrangeSchur;
   std::unique_ptr<DTXQCDQCDActionAdapter>                           StrangeLogDetAd;
   std::unique_ptr<DTXQCDQCDActionAdapter>                           StrangeSchurAd;
   if (add_strange) {
-    StrangeFermOp = std::make_unique<WCFstrange>(
+    // single-precision sibling grids + gauge (the MP action re-imports the
+    // smeared gauge to BOTH precisions each deriv, so this initial fill is just
+    // for construction).
+    StrangeGridF   = std::make_unique<GridCartesian>(
+        latt, GridDefaultSimd(Nd, vComplexF::Nsimd()), mpi);
+    StrangeRBGridF = std::make_unique<GridRedBlackCartesian>(StrangeGridF.get());
+    StrangeUmuF    = std::make_unique<LatticeGaugeFieldF>(StrangeGridF.get());
+    { LatticeColourMatrix  U_d(&Grid);
+      LatticeColourMatrixF U_f(StrangeGridF.get());
+      for (int mu = 0; mu < Nd; ++mu) {
+        U_d = PeekIndex<LorentzIndex>(U.U, mu);
+        precisionChange(U_f, U_d);
+        PokeIndex<LorentzIndex>(*StrangeUmuF, U_f, mu);
+      } }
+    StrangeFermOp  = std::make_unique<WCFstrange>(
         U.U, Grid, RBGrid, mass_strange, csw_, csw_,
         WilsonAnisotropyCoefficients(), strange_impl_p);
-    StrangeLogDet = std::make_unique<QCDLogDetCloverEOAction<WilsonImplR>>(
+    StrangeFermOpF = std::make_unique<WCFstrangeF>(
+        *StrangeUmuF, *StrangeGridF, *StrangeRBGridF, mass_strange, csw_, csw_,
+        WilsonAnisotropyCoefficients(), strange_impl_p);
+    StrangeLogDet  = std::make_unique<QCDLogDetCloverEOAction<WilsonImplR>>(
         *StrangeFermOp, /*nf=*/1);
-    StrangeSchur =
-        std::make_unique<OneFlavourSchurCloverRationalAction<WilsonImplR>>(
-            *StrangeFermOp, strange_rat);
+    StrangeSchur   = std::make_unique<
+        OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>(
+        *StrangeFermOp, *StrangeFermOpF, StrangeRBGridF.get(), strange_rat, 50);
     StrangeLogDetAd = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeLogDet);
     StrangeSchurAd  = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeSchur);
     std::cout << GridLogMessage
-              << "[DTXQCD] Nf=2+1: spectator strange ADDED (mass_strange="
-              << mass_strange << " csw=" << csw_ << " rat[" << strange_rat.lo
-              << "," << strange_rat.hi << "] deg=" << strange_rat.degree << ")"
-              << std::endl;
+              << "[DTXQCD] Nf=2+1: spectator strange ADDED (MP double+single, "
+                 "mass_strange=" << mass_strange << " csw=" << csw_ << " rat["
+              << strange_rat.lo << "," << strange_rat.hi << "] deg="
+              << strange_rat.degree << ")" << std::endl;
   } else {
     std::cout << GridLogMessage
               << "[DTXQCD] Nf=2 (no strange; set ADD_STRANGE=1 for Nf=2+1 to "
