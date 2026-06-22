@@ -78,6 +78,10 @@ struct DtxqcdRemezAutoScaleParams {
   RealD lo_safety   = 0.5;    // RAT_LO_SAFETY (Lanczos: lo = safety * lambda_min)
   RealD kappa_cap   = 500.0;  // RAT_KAPPA_CAP (Heuristic: lo = lambda_max / kappa)
   int   lanczos_nm  = 30;     // RAT_LANCZOS_NM (Lanczos Krylov dim)
+  RealD rebuild_hyst = 2.0;   // RAT_REBUILD_HYST: don't rebuild merely to tighten
+                              // a bound unless it is > this factor wasteful
+                              // (covers the few-% Lanczos noise; coverage
+                              // failures always rebuild regardless).
   // ---- tracked across rebuilds ----------------------------------------
   RealD current_hi  = 0.0;
   RealD current_lo  = 0.0;
@@ -99,6 +103,7 @@ struct DtxqcdRemezAutoScaleParams {
     if (const char *e = std::getenv("RAT_LO_SAFETY");  e && *e) p.lo_safety   = std::atof(e);
     if (const char *e = std::getenv("RAT_KAPPA_CAP");  e && *e) p.kappa_cap   = std::atof(e);
     if (const char *e = std::getenv("RAT_LANCZOS_NM"); e && *e) p.lanczos_nm  = std::atoi(e);
+    if (const char *e = std::getenv("RAT_REBUILD_HYST"); e && *e) p.rebuild_hyst = std::atof(e);
     return p;
   }
 };
@@ -216,10 +221,23 @@ inline void DtxqcdLanczosMinMax(Op &Mop, GridBase *grid,
 // Shared refresh-time auto-scale step used by both DTXQCD rational actions.
 //
 // If params.enabled (RAT_AUTO_HI): run DtxqcdLanczosMinMax on the action's own
-// multishift operator, then widen [current_lo, current_hi] if the safety-scaled
-// spectral bounds exceed them.  Returns true (and writes new_lo/new_hi) iff a
-// rebuild is needed.  With params.enabled == false this returns false without
-// touching the operator or the RNG -- byte-identical to the pre-autoscale path.
+// multishift operator, then move [current_lo, current_hi] so the Remez interval
+// COVERS the safety-scaled spectrum [lo_safety*lambda_min, hi_safety*lambda_max],
+// raising OR lowering each bound as needed.  Coverage failures (lo > lambda_min
+// or hi < lambda_max) always trigger a rebuild; a bound that merely became
+// wastefully wide is only retightened when it is > rebuild_hyst off, so the
+// few-% Lanczos noise doesn't cause a rebuild every refresh.  Returns true (and
+// writes new_lo/new_hi) iff a rebuild is needed.  With params.enabled == false
+// this returns false without touching the operator or RNG -- byte-identical to
+// the pre-autoscale path.
+//
+// NOTE (2026-06-22 fix): the original code only ever RAISED lo (never lowered
+// it), so when lambda_min fell below the initial lo (light quark mass -> small
+// lambda_min, e.g. lambda_min=0.077 < lo=0.1 at the 16^3x48 production point)
+// the rational x^{-1/4} was evaluated outside its valid range on the lowest
+// eigenmodes, under-valuing the pseudofermion weight there and over-weighting
+// rough/low-plaquette configs -> a biased gauge ensemble (plaq ~0.43 vs the
+// QCD 0.513).  The cover-both-ways logic below closes that edge case.
 template <class Op>
 inline bool DtxqcdRefreshAutoScale(DtxqcdRemezAutoScaleParams &params,
                                    Op &Mop, GridBase *grid,
@@ -239,35 +257,48 @@ inline bool DtxqcdRefreshAutoScale(DtxqcdRemezAutoScaleParams &params,
             << "]" << std::endl;
 
   bool need_rebuild = false;
+  const RealD hyst = params.rebuild_hyst;
 
-  // hi side: widen up to safety * lambda_max.
-  RealD needed_hi = params.hi_safety * lmax;
-  if (needed_hi > new_hi) {
+  // ---- hi side: cover lambda_max with margin hi_safety (>1).  Coverage
+  //      requires new_hi >= lambda_max; the target sits at hi_safety*lambda_max.
+  //      Rebuild on a coverage failure (hi < lambda_max) OR when hi is more than
+  //      `hyst` wastefully high, raising OR lowering to the target. ----
+  RealD target_hi = params.hi_safety * lmax;
+  if (new_hi < lmax || new_hi > target_hi * hyst) {
     std::cout << GridLogMessage << "[" << label
-              << "] auto-scale rat.hi: was " << new_hi
-              << " < safety*lambda_max=" << needed_hi << std::endl;
-    new_hi = needed_hi;
+              << "] auto-scale rat.hi: " << new_hi << " -> " << target_hi
+              << "  (lambda_max=" << lmax << ", safety=" << params.hi_safety
+              << (new_hi < lmax ? ", COVERAGE FAIL" : ", retighten") << ")"
+              << std::endl;
+    new_hi = target_hi;
     need_rebuild = true;
   }
 
-  // lo side.
+  // ---- lo side: cover lambda_min with margin lo_safety (<1).  Coverage
+  //      requires new_lo <= lambda_min; the target sits at lo_safety*lambda_min.
+  //      Rebuild on a coverage failure (lo > lambda_min -- the edge case the
+  //      old raise-only code missed) OR when lo is more than `hyst` wastefully
+  //      low, raising OR lowering to the target. ----
   if (params.auto_lo_mode == DtxqcdAutoLoMode::Lanczos) {
-    RealD needed_lo = std::max(new_lo, params.lo_safety * lmin);
-    if (needed_lo > new_lo) {
+    RealD target_lo = params.lo_safety * lmin;
+    if (new_lo > lmin || new_lo < target_lo / hyst) {
       std::cout << GridLogMessage << "[" << label
-                << "] auto-scale rat.lo (lanczos): was " << new_lo
-                << " < safety*lambda_min=" << (params.lo_safety * lmin)
+                << "] auto-scale rat.lo (lanczos): " << new_lo << " -> " << target_lo
+                << "  (lambda_min=" << lmin << ", safety=" << params.lo_safety
+                << (new_lo > lmin ? ", COVERAGE FAIL" : ", retighten") << ")"
                 << std::endl;
-      new_lo = needed_lo;
+      new_lo = target_lo;
       need_rebuild = true;
     }
   } else if (params.auto_lo_mode == DtxqcdAutoLoMode::Heuristic && new_hi > 0.0) {
-    RealD needed_lo = std::max(new_lo, new_hi / params.kappa_cap);
-    if (needed_lo > new_lo) {
+    // Heuristic: bound the condition number, lo = hi/kappa_cap; track it both
+    // ways with hysteresis (no measured lambda_min to compare against).
+    RealD target_lo = new_hi / params.kappa_cap;
+    if (new_lo < target_lo / hyst || new_lo > target_lo * hyst) {
       std::cout << GridLogMessage << "[" << label
-                << "] auto-scale rat.lo (heur): hi/kappa_cap="
-                << (new_hi / params.kappa_cap) << std::endl;
-      new_lo = needed_lo;
+                << "] auto-scale rat.lo (heur): " << new_lo << " -> " << target_lo
+                << "  (hi/kappa_cap)" << std::endl;
+      new_lo = target_lo;
       need_rebuild = true;
     }
   }
