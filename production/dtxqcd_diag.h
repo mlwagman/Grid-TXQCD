@@ -330,6 +330,14 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
   void flush(int traj) {
     if (traj_.empty()) return;
     std::string fname = prefix_ + "." + std::to_string(traj) + ".h5";
+    // Only the boss rank writes the HDF5 file.  Every rank already holds the
+    // collectively-reduced per-traj data in these member vectors; letting all
+    // ranks open the same file races on HDF5 file locking and aborts ranks
+    // 1..N with H5::FileIException (observed at the 2nd diagnostics flush on a
+    // 4-rank run -- the 1st flush wins the lock, later flushes collide).  The
+    // .clear() calls below stay OUTSIDE this guard so every rank resets its
+    // accumulators for the next interval.
+    if (grid_.IsBoss()) {
     Hdf5Writer wr(fname);
     write(wr, "traj", traj_);
     write(wr, "plaq", plaq_);
@@ -368,6 +376,9 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     std::vector<std::string> names;
     for (auto *a : actions_) names.push_back(a->action_name());
     write(wr, "action_names", names);
+    std::cout << GridLogMessage << "HMC diagnostics written to " << fname
+              << std::endl;
+    }  // end if (grid_.IsBoss())
 
     traj_.clear(); plaq_.clear();
     force_avg_.clear(); force_max_.clear();
@@ -386,9 +397,6 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     aux_wall_s_.clear();      aux_wall_p_.clear();
     aux_wall_trsig_.clear();  aux_wall_trpi_.clear();
     g5M_evals_.clear();
-
-    std::cout << GridLogMessage << "HMC diagnostics written to " << fname
-              << std::endl;
   }
 
  private:
