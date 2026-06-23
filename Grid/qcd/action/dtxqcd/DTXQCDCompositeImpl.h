@@ -257,6 +257,13 @@ class DTXQCDCompositeImpl {
       }
       // d, n already complex-symm from generation; no re-projection needed.
     }
+    // DTXQCD_FREEZE_AUX: hold every aux field fixed during HMC by killing its
+    // conjugate momentum.  Combined with ZERO_ALL_AUX=1 (aux==0 at init) this
+    // freezes aux==0 throughout -> M48 = doubled D_WC -> the HMC is pure Nf=2
+    // QCD expressed through the doubled operator (isolates the doubled-operator
+    // structure/force from all aux dynamics).  Default off => byte-identical.
+    static const bool freeze_aux = [](){ const char*e=std::getenv("DTXQCD_FREEZE_AUX"); return e&&std::atoi(e)!=0; }();
+    if (freeze_aux) { P.sigma=Zero(); P.pi=Zero(); P.d=Zero(); P.n=Zero(); P.s=Zero(); P.p=Zero(); }
   }
 
   static inline Field projectForce(Field &Fforce) {
@@ -290,6 +297,11 @@ class DTXQCDCompositeImpl {
       DtxqcdComplexSymmetricCFInPlace(out.d);
       DtxqcdComplexSymmetricCFInPlace(out.n);
     }
+    // DTXQCD_FREEZE_AUX: zero the aux force components so update_P never kicks
+    // the (zeroed) aux momenta -> aux stays frozen at its init value (see
+    // generate_momenta).  Default off => byte-identical to the dynamic-aux path.
+    static const bool freeze_aux = [](){ const char*e=std::getenv("DTXQCD_FREEZE_AUX"); return e&&std::atoi(e)!=0; }();
+    if (freeze_aux) { out.sigma=Zero(); out.pi=Zero(); out.d=Zero(); out.n=Zero(); out.s=Zero(); out.p=Zero(); }
     return out;
   }
 
