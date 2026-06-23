@@ -476,6 +476,8 @@ class DTXQCDWilsonCloverFermionEO {
       acceleratorCopyToDevice((void *)h_id.data(), (void *)&inv_dev[0],
                               (size_t)Nsite * Nb2 * sizeof(ComplexD));
       inv_dev_n = Nsite;
+      // PR 1: bump gen so any cached pointer arrays in ApplyInverseLex rebuild.
+      if (cb == Even) ++inv_dev_gen_e_; else ++inv_dev_gen_o_;
     }
 #endif
 
@@ -656,6 +658,133 @@ class DTXQCDWilsonCloverFermionEO {
     const uint64_t Nsite = in_up_lex[0][0].size();
     GRID_ASSERT(Nsite == inv_lex.size());
 
+    // ----- PR 1: DTXQCD_MOOEEINV_CUBLAS=1 path -----------------------------
+    // gemmBatched(48, NRHS, 48) over Nsite sites, sourcing A from the
+    // already-on-device inv_dev_e_/o_ populated by BuildInverseCacheCB.
+    // Falls through to the existing thread_for/Eigen path when the env var
+    // is unset (default OFF for safety).
+    static int use_cublas = []() {
+#ifndef GRID_CUDA
+      return 0;
+#else
+      const char *e = std::getenv("DTXQCD_MOOEEINV_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+#endif
+    }();
+
+#ifdef GRID_CUDA
+    if (use_cublas) {
+      const int N = kDim48;
+      const int Nmat = N * N;
+      const int N_x_NRHS = N * NRHS;
+      const size_t flat_n = (size_t)Nsite * N_x_NRHS;
+
+      deviceVector<ComplexD>  &inv_dev   = (cb == Even) ? inv_dev_e_   : inv_dev_o_;
+      uint64_t                &inv_dev_n = (cb == Even) ? inv_dev_n_e_ : inv_dev_n_o_;
+      uint64_t                inv_gen    = (cb == Even) ? inv_dev_gen_e_ : inv_dev_gen_o_;
+      deviceVector<ComplexD>  &fin_dev   = (cb == Even) ? ferm_in_dev_e_  : ferm_in_dev_o_;
+      deviceVector<ComplexD>  &fout_dev  = (cb == Even) ? ferm_out_dev_e_ : ferm_out_dev_o_;
+      deviceVector<ComplexD*> &Amk       = (cb == Even) ? Amk_e_ : Amk_o_;
+      deviceVector<ComplexD*> &Bkn       = (cb == Even) ? Bkn_e_ : Bkn_o_;
+      deviceVector<ComplexD*> &Cmn       = (cb == Even) ? Cmn_e_ : Cmn_o_;
+      uint64_t &ptrs_gen   = (cb == Even) ? cublas_ptrs_gen_e_   : cublas_ptrs_gen_o_;
+      int      &ptrs_NRHS  = (cb == Even) ? cublas_ptrs_NRHS_e_  : cublas_ptrs_NRHS_o_;
+      uint64_t &ptrs_Nsite = (cb == Even) ? cublas_ptrs_Nsite_e_ : cublas_ptrs_Nsite_o_;
+
+      GRID_ASSERT(inv_dev_n == Nsite &&
+                  "DTXQCD_MOOEEINV_CUBLAS requires DTXQCD_PRECOMPUTE_GPU=1 / "
+                  "ImportFields to have populated inv_dev for this CB");
+
+      // (1) Pack flat host buffer [Nsite × 48 × NRHS] column-major.
+      //     Per site s, RHS k: rows 0..23 = upper(a,alpha,i), rows 24..47 = lower.
+      std::vector<ComplexD> h_B(flat_n);
+      thread_for(s, Nsite, {
+        for (int k = 0; k < NRHS; ++k) {
+          size_t off = ((size_t)s * NRHS + (size_t)k) * (size_t)N;  // column k of site s
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            for (int alpha = 0; alpha < Ns; ++alpha) {
+              for (int i = 0; i < Nc; ++i) {
+                int r24 = a * Ns * Nc + alpha * Nc + i;
+                h_B[off + r24]          = ComplexD(in_up_lex[k][a][s]()(alpha)(i));
+                h_B[off + kDim24 + r24] = ComplexD(in_lo_lex[k][a][s]()(alpha)(i));
+              }
+            }
+          }
+        }
+      });
+
+      // (2) Ensure device scratch + pointer arrays match shape.
+      if (fin_dev.size() < flat_n) {
+        fin_dev.resize(flat_n);
+        fout_dev.resize(flat_n);
+        ptrs_gen = 0;  // pointers stale
+      }
+      acceleratorCopyToDevice((void*)h_B.data(), (void*)&fin_dev[0],
+                              flat_n * sizeof(ComplexD));
+
+      bool need_rebuild = (ptrs_gen != inv_gen)
+                       || (ptrs_NRHS != NRHS)
+                       || (ptrs_Nsite != Nsite)
+                       || (Amk.size() != Nsite);
+      if (need_rebuild) {
+        Amk.resize(Nsite);
+        Bkn.resize(Nsite);
+        Cmn.resize(Nsite);
+        ComplexD *A_ptr = &inv_dev[0];
+        ComplexD *B_ptr = &fin_dev[0];
+        ComplexD *C_ptr = &fout_dev[0];
+        // Host shadow + bulk D2D-by-H copy.  Rare (per resize / generation
+        // bump), so cheaper than wrapping the build in a public helper just
+        // to satisfy the "no extended __device__ lambda in private function"
+        // CUDA constraint.
+        std::vector<ComplexD*> Amk_host(Nsite), Bkn_host(Nsite), Cmn_host(Nsite);
+        thread_for(s, Nsite, {
+          Amk_host[s] = &A_ptr[(size_t)s * Nmat];
+          Bkn_host[s] = &B_ptr[(size_t)s * N_x_NRHS];
+          Cmn_host[s] = &C_ptr[(size_t)s * N_x_NRHS];
+        });
+        acceleratorCopyToDevice((void*)Amk_host.data(), (void*)&Amk[0],
+                                Nsite * sizeof(ComplexD*));
+        acceleratorCopyToDevice((void*)Bkn_host.data(), (void*)&Bkn[0],
+                                Nsite * sizeof(ComplexD*));
+        acceleratorCopyToDevice((void*)Cmn_host.data(), (void*)&Cmn[0],
+                                Nsite * sizeof(ComplexD*));
+        ptrs_gen   = inv_gen;
+        ptrs_NRHS  = NRHS;
+        ptrs_Nsite = Nsite;
+      }
+
+      // (3) Batched gemv/gemm: A[48,48] · B[48,NRHS] = C[48,NRHS] per site.
+      //     Column-major matches the inv_dev layout and our flat fermion layout.
+      GridBLAS blas;
+      blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
+                       N, NRHS, N,
+                       ComplexD(1.0, 0.0),
+                       Amk, Bkn,
+                       ComplexD(0.0, 0.0),
+                       Cmn);
+
+      // (4) D2H + unpack into out_{up,lo}_lex (which then go through the
+      //     existing vectorizeFromLexOrdArray below).
+      std::vector<ComplexD> h_C(flat_n);
+      acceleratorCopyFromDevice((void*)&fout_dev[0], (void*)h_C.data(),
+                                flat_n * sizeof(ComplexD));
+      thread_for(s, Nsite, {
+        for (int k = 0; k < NRHS; ++k) {
+          size_t off = ((size_t)s * NRHS + (size_t)k) * (size_t)N;
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            for (int alpha = 0; alpha < Ns; ++alpha) {
+              for (int i = 0; i < Nc; ++i) {
+                int r24 = a * Ns * Nc + alpha * Nc + i;
+                out_up_lex[k][a][s]()(alpha)(i) = h_C[off + r24];
+                out_lo_lex[k][a][s]()(alpha)(i) = h_C[off + kDim24 + r24];
+              }
+            }
+          }
+        }
+      });
+    } else
+#endif
     thread_for(s, Nsite, {
       Eigen::MatrixXcd B(kDim48, NRHS);
       for (int k = 0; k < NRHS; ++k) {
@@ -745,6 +874,20 @@ class DTXQCDWilsonCloverFermionEO {
   // Same local lex order as inv_lex_e_/o_.
   inline static deviceVector<ComplexD> inv_dev_e_, inv_dev_o_;
   inline static uint64_t inv_dev_n_e_{0}, inv_dev_n_o_{0};
+  // PR 1 (DTXQCD_MOOEEINV_CUBLAS=1): cuBLAS gemmBatched scratch for
+  // ApplyInverseLex.  Flat column-major fermion buffers (lSites * 48 * NRHS)
+  // and per-site pointer arrays Amk -> inv_dev[s*48*48], Bkn -> fin_flat[s*48*NRHS],
+  // Cmn -> fout_flat[s*48*NRHS].  Rebuilt when scratch resizes or inv_dev
+  // is repopulated (gen counter bump in BuildInverseCacheCB).
+  inline static deviceVector<ComplexD>  ferm_in_dev_e_,  ferm_in_dev_o_;
+  inline static deviceVector<ComplexD>  ferm_out_dev_e_, ferm_out_dev_o_;
+  inline static deviceVector<ComplexD*> Amk_e_, Amk_o_;
+  inline static deviceVector<ComplexD*> Bkn_e_, Bkn_o_;
+  inline static deviceVector<ComplexD*> Cmn_e_, Cmn_o_;
+  inline static uint64_t inv_dev_gen_e_{0}, inv_dev_gen_o_{0};      // bumped each rebuild
+  inline static uint64_t cublas_ptrs_gen_e_{0}, cublas_ptrs_gen_o_{0};
+  inline static int      cublas_ptrs_NRHS_e_{0}, cublas_ptrs_NRHS_o_{0};
+  inline static uint64_t cublas_ptrs_Nsite_e_{0}, cublas_ptrs_Nsite_o_{0};
 #endif
 
   DtxqcdSpinMatrices spin_;
