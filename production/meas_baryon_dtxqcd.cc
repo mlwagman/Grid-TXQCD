@@ -68,22 +68,25 @@ DtxqcdIsoSingletDiquark(const LatticeDtxqcdD &dF) {
 // where ε^{i'j'k'} is the standard 3x3 Levi-Civita symbol.
 
 // Helper: build ε^{ijk} (d_iso^{ij})*(x) colour vector and restrict to t_src.
-// For the BARYON SOURCE side we use the Hermitian conjugate of the diquark
-// (i.e. of the operator that appears in B̄ = ε d† q̄), so the source wall is
-// built from d_iso* = adj(d_iso).  For anti-Hermitian d_iso (which is what
-// the flavor-antisymmetric ε^{ab} d^{ij}_{ab} projection gives) adj(d_iso) =
-// −d_iso, so structurally this is a sign flip on the source.  We keep the
-// two cases separate for clarity / future-proofing for non-anti-Hermitian d.
+// For the BARYON SOURCE side we use the complex conjugate of the diquark:
+// in the doubled DTXQCD M48, the anti-quark coupling sits in the LL block as
+// c·conj(d), so B̄ = ε^{ijk} conj(d)^{ij} q̄^k brings down conj(d_iso) at
+// the source.  d_iso is color-antisymmetric (color-antisym in both Hermitian
+// and complex-symm conventions); adj(d_iso) = −conj(d_iso) on antisymmetric
+// matrices, so previously using adj here flipped the overall correlator
+// sign.  Switched to conjugate() so the central value matches the physical
+// convention (the extracted baryon mass is unchanged by this sign flip).
 //
 // `conj_field` controls the conjugation:
 //   false: ε^{ijk} d_iso^{ij}(x)    -- use at sink (Eq 36)
-//   true : ε^{ijk} (d_iso^{ij})*(x) -- use at source (corresponds to d† in B̄)
+//   true : ε^{ijk} (d_iso^{ij})*(x) -- use at source (corresponds to conj(d) in B̄)
 inline LatticeColourVector
 DiquarkEpsilonWall(const LatticeColourMatrix &d_iso, int t_src,
                    bool conj_field = false) {
   GridBase *g = d_iso.Grid();
-  LatticeColourMatrix d_use = conj_field ? LatticeColourMatrix(adj(d_iso))
-                                          : d_iso;
+  LatticeColourMatrix d_use = conj_field
+                                  ? LatticeColourMatrix(conjugate(d_iso))
+                                  : d_iso;
   LatticeColourVector wall(g);
   wall = Zero();
   autoView(dv, d_use, CpuRead);
