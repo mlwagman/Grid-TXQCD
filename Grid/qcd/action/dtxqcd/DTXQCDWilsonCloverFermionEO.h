@@ -266,6 +266,22 @@ class DTXQCDWilsonCloverFermionEO {
     ApplyInverseLex(ins, outs, /*dag=*/true);
   }
 
+  // PR 2: forward multi-RHS Mooee with cuBLAS branch gated by
+  // DTXQCD_MOOEE_CUBLAS=1.  Mirrors MooeeInvN: reads the persistent forward
+  // 48x48 device matrix populated alongside inv_dev in BuildInverseCacheCB,
+  // gemmBatched (M=48, N=NRHS, K=48) per site, default-OFF env var.  Without
+  // the env var, falls through to a per-RHS loop calling the existing single-
+  // RHS SIMD Mooee, which is bit-equivalent to the single-RHS path.
+  void MooeeN(const std::vector<const Field *> &ins,
+              const std::vector<Field *> &outs) {
+    ApplyFwdLex(ins, outs, /*dag=*/false);
+  }
+
+  void MooeeDagN(const std::vector<const Field *> &ins,
+                 const std::vector<Field *> &outs) {
+    ApplyFwdLex(ins, outs, /*dag=*/true);
+  }
+
   // -------- Accessors / introspection (mainly for tests) --------
 
   RealD Mass() const { return mass_; }
@@ -478,6 +494,31 @@ class DTXQCDWilsonCloverFermionEO {
       inv_dev_n = Nsite;
       // PR 1: bump gen so any cached pointer arrays in ApplyInverseLex rebuild.
       if (cb == Even) ++inv_dev_gen_e_; else ++inv_dev_gen_o_;
+    }
+
+    // PR 2: persistent per-CB device FORWARD M48 (batched column-major) for the
+    // cuBLAS MooeeN path in ApplyFwdLex.  Same local lex order as inv_dev_e_/o_.
+    // Built by re-running build_M48 over Nsite, which is the same work the
+    // GPU-precompute path already did (paid above into h_fwd) — but that buffer
+    // lives in a different scope.  Cheapest: do another threaded build_M48
+    // pass into a local host buffer, then copy to device.  This is a one-time
+    // cost per ImportFields call (NOT per HMC trajectory inner loop).
+    {
+      const int Nb = kDim48, Nb2 = Nb * Nb;
+      deviceVector<ComplexD> &fwd_dev = (cb == Even) ? fwd_dev_e_ : fwd_dev_o_;
+      uint64_t &fwd_dev_n = (cb == Even) ? fwd_dev_n_e_ : fwd_dev_n_o_;
+      if (fwd_dev.size() < (size_t)Nsite * Nb2) fwd_dev.resize((size_t)Nsite * Nb2);
+      std::vector<ComplexD> h_fwd2((size_t)Nsite * Nb2);
+      thread_for(idx, Nsite, {
+        Eigen::MatrixXcd M48;
+        build_M48(idx, M48);  // Eigen storage is column-major
+        std::memcpy(&h_fwd2[(size_t)idx * Nb2], M48.data(),
+                    (size_t)Nb2 * sizeof(ComplexD));
+      });
+      acceleratorCopyToDevice((void *)h_fwd2.data(), (void *)&fwd_dev[0],
+                              (size_t)Nsite * Nb2 * sizeof(ComplexD));
+      fwd_dev_n = Nsite;
+      if (cb == Even) ++fwd_dev_gen_e_; else ++fwd_dev_gen_o_;
     }
 #endif
 
@@ -822,6 +863,207 @@ class DTXQCDWilsonCloverFermionEO {
     }
   }
 
+  // PR 2: forward multi-RHS Mooee.  Mirror of ApplyInverseLex but using the
+  // forward 48x48 site matrix (fwd_dev_e_/o_).  Default path: loop over RHS and
+  // call the existing single-RHS SIMD Mooee (correct, bit-identical to the
+  // single-RHS reference).  DTXQCD_MOOEE_CUBLAS=1 swaps to a single gemmBatched
+  // call sourcing fwd_dev with the same pack/unpack pattern as the inverse path.
+  void ApplyFwdLex(const std::vector<const Field *> &ins,
+                    const std::vector<Field *> &outs,
+                    bool dag) {
+    const int NRHS = static_cast<int>(ins.size());
+    GRID_ASSERT(NRHS > 0);
+    GRID_ASSERT(static_cast<int>(outs.size()) == NRHS);
+
+    const int cb = ins[0]->upper.f[0].Checkerboard();
+    GRID_ASSERT(ins[0]->upper.f[0].Grid() == &rbgrid_);
+
+    if (dag) {
+      // gamma_5 wrap + recurse with dag=false (same trick as ApplyInverseLex /
+      // MooeeDag).
+      Gamma g5(Gamma::Algebra::Gamma5);
+      std::vector<Field> g5_in;       g5_in.reserve(NRHS);
+      std::vector<Field> tmp;         tmp.reserve(NRHS);
+      std::vector<const Field *> g5_in_p(NRHS);
+      std::vector<Field *>       tmp_p(NRHS);
+      for (int k = 0; k < NRHS; ++k) {
+        g5_in.emplace_back(&rbgrid_);
+        tmp.emplace_back(&rbgrid_);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          g5_in[k].upper.f[a] = g5 * ins[k]->upper.f[a];
+          g5_in[k].lower.f[a] = g5 * ins[k]->lower.f[a];
+          g5_in[k].upper.f[a].Checkerboard() = cb;
+          g5_in[k].lower.f[a].Checkerboard() = cb;
+        }
+        g5_in_p[k] = &g5_in[k];
+        tmp_p[k]   = &tmp[k];
+      }
+      ApplyFwdLex(g5_in_p, tmp_p, /*dag=*/false);
+      for (int k = 0; k < NRHS; ++k) {
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          outs[k]->upper.f[a] = g5 * tmp[k].upper.f[a];
+          outs[k]->lower.f[a] = g5 * tmp[k].lower.f[a];
+          outs[k]->upper.f[a].Checkerboard() = cb;
+          outs[k]->lower.f[a].Checkerboard() = cb;
+        }
+      }
+      return;
+    }
+
+    static int use_cublas = []() {
+#ifndef GRID_CUDA
+      return 0;
+#else
+      const char *e = std::getenv("DTXQCD_MOOEE_CUBLAS");
+      return (e && *e && std::atoi(e)) ? 1 : 0;
+#endif
+    }();
+
+#ifdef GRID_CUDA
+    if (use_cublas) {
+      const int N = kDim48;
+      const int Nmat = N * N;
+      const int N_x_NRHS = N * NRHS;
+
+      // Unvectorize each RHS into per-(rhs, flavor, block) lex arrays so the
+      // pack matches fwd_dev's local lex ordering.  Same pattern as
+      // ApplyInverseLex.
+      typedef typename LatticeFermion::vector_object::scalar_object SiteFerm;
+      std::vector<std::vector<std::vector<SiteFerm>>> in_up_lex(NRHS,
+          std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+      std::vector<std::vector<std::vector<SiteFerm>>> in_lo_lex(NRHS,
+          std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+      std::vector<std::vector<std::vector<SiteFerm>>> out_up_lex(NRHS,
+          std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+      std::vector<std::vector<std::vector<SiteFerm>>> out_lo_lex(NRHS,
+          std::vector<std::vector<SiteFerm>>(DtxqcdNf));
+      for (int k = 0; k < NRHS; ++k) {
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          unvectorizeToLexOrdArray(in_up_lex[k][a], ins[k]->upper.f[a]);
+          unvectorizeToLexOrdArray(in_lo_lex[k][a], ins[k]->lower.f[a]);
+          out_up_lex[k][a].resize(in_up_lex[k][a].size());
+          out_lo_lex[k][a].resize(in_lo_lex[k][a].size());
+        }
+      }
+      const uint64_t Nsite = in_up_lex[0][0].size();
+      const size_t flat_n = (size_t)Nsite * N_x_NRHS;
+
+      deviceVector<ComplexD>  &fwd_dev   = (cb == Even) ? fwd_dev_e_   : fwd_dev_o_;
+      uint64_t                &fwd_dev_n = (cb == Even) ? fwd_dev_n_e_ : fwd_dev_n_o_;
+      uint64_t                fwd_gen    = (cb == Even) ? fwd_dev_gen_e_ : fwd_dev_gen_o_;
+      deviceVector<ComplexD>  &fin_dev   = (cb == Even) ? ferm_fwd_in_dev_e_  : ferm_fwd_in_dev_o_;
+      deviceVector<ComplexD>  &fout_dev  = (cb == Even) ? ferm_fwd_out_dev_e_ : ferm_fwd_out_dev_o_;
+      deviceVector<ComplexD*> &Amk       = (cb == Even) ? Amk_fwd_e_ : Amk_fwd_o_;
+      deviceVector<ComplexD*> &Bkn       = (cb == Even) ? Bkn_fwd_e_ : Bkn_fwd_o_;
+      deviceVector<ComplexD*> &Cmn       = (cb == Even) ? Cmn_fwd_e_ : Cmn_fwd_o_;
+      uint64_t &ptrs_gen   = (cb == Even) ? cublas_fwd_ptrs_gen_e_   : cublas_fwd_ptrs_gen_o_;
+      int      &ptrs_NRHS  = (cb == Even) ? cublas_fwd_ptrs_NRHS_e_  : cublas_fwd_ptrs_NRHS_o_;
+      uint64_t &ptrs_Nsite = (cb == Even) ? cublas_fwd_ptrs_Nsite_e_ : cublas_fwd_ptrs_Nsite_o_;
+
+      GRID_ASSERT(fwd_dev_n == Nsite &&
+                  "DTXQCD_MOOEE_CUBLAS requires DTXQCD_PRECOMPUTE_GPU=1 / "
+                  "ImportFields to have populated fwd_dev for this CB");
+
+      // (1) Pack flat host buffer [Nsite × 48 × NRHS] column-major.
+      std::vector<ComplexD> h_B(flat_n);
+      thread_for(s, Nsite, {
+        for (int k = 0; k < NRHS; ++k) {
+          size_t off = ((size_t)s * NRHS + (size_t)k) * (size_t)N;
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            for (int alpha = 0; alpha < Ns; ++alpha) {
+              for (int i = 0; i < Nc; ++i) {
+                int r24 = a * Ns * Nc + alpha * Nc + i;
+                h_B[off + r24]          = ComplexD(in_up_lex[k][a][s]()(alpha)(i));
+                h_B[off + kDim24 + r24] = ComplexD(in_lo_lex[k][a][s]()(alpha)(i));
+              }
+            }
+          }
+        }
+      });
+
+      // (2) Ensure device scratch + pointer arrays match shape.
+      if (fin_dev.size() < flat_n) {
+        fin_dev.resize(flat_n);
+        fout_dev.resize(flat_n);
+        ptrs_gen = 0;
+      }
+      acceleratorCopyToDevice((void*)h_B.data(), (void*)&fin_dev[0],
+                              flat_n * sizeof(ComplexD));
+
+      bool need_rebuild = (ptrs_gen != fwd_gen)
+                       || (ptrs_NRHS != NRHS)
+                       || (ptrs_Nsite != Nsite)
+                       || (Amk.size() != Nsite);
+      if (need_rebuild) {
+        Amk.resize(Nsite);
+        Bkn.resize(Nsite);
+        Cmn.resize(Nsite);
+        ComplexD *A_ptr = &fwd_dev[0];
+        ComplexD *B_ptr = &fin_dev[0];
+        ComplexD *C_ptr = &fout_dev[0];
+        std::vector<ComplexD*> Amk_host(Nsite), Bkn_host(Nsite), Cmn_host(Nsite);
+        thread_for(s, Nsite, {
+          Amk_host[s] = &A_ptr[(size_t)s * Nmat];
+          Bkn_host[s] = &B_ptr[(size_t)s * N_x_NRHS];
+          Cmn_host[s] = &C_ptr[(size_t)s * N_x_NRHS];
+        });
+        acceleratorCopyToDevice((void*)Amk_host.data(), (void*)&Amk[0],
+                                Nsite * sizeof(ComplexD*));
+        acceleratorCopyToDevice((void*)Bkn_host.data(), (void*)&Bkn[0],
+                                Nsite * sizeof(ComplexD*));
+        acceleratorCopyToDevice((void*)Cmn_host.data(), (void*)&Cmn[0],
+                                Nsite * sizeof(ComplexD*));
+        ptrs_gen   = fwd_gen;
+        ptrs_NRHS  = NRHS;
+        ptrs_Nsite = Nsite;
+      }
+
+      // (3) Batched gemm.
+      GridBLAS blas;
+      blas.gemmBatched(GridBLAS_OP_N, GridBLAS_OP_N,
+                       N, NRHS, N,
+                       ComplexD(1.0, 0.0),
+                       Amk, Bkn,
+                       ComplexD(0.0, 0.0),
+                       Cmn);
+
+      // (4) D2H + unpack.
+      std::vector<ComplexD> h_C(flat_n);
+      acceleratorCopyFromDevice((void*)&fout_dev[0], (void*)h_C.data(),
+                                flat_n * sizeof(ComplexD));
+      thread_for(s, Nsite, {
+        for (int k = 0; k < NRHS; ++k) {
+          size_t off = ((size_t)s * NRHS + (size_t)k) * (size_t)N;
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            for (int alpha = 0; alpha < Ns; ++alpha) {
+              for (int i = 0; i < Nc; ++i) {
+                int r24 = a * Ns * Nc + alpha * Nc + i;
+                out_up_lex[k][a][s]()(alpha)(i) = h_C[off + r24];
+                out_lo_lex[k][a][s]()(alpha)(i) = h_C[off + kDim24 + r24];
+              }
+            }
+          }
+        }
+      });
+
+      for (int k = 0; k < NRHS; ++k) {
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          vectorizeFromLexOrdArray(out_up_lex[k][a], outs[k]->upper.f[a]);
+          vectorizeFromLexOrdArray(out_lo_lex[k][a], outs[k]->lower.f[a]);
+          outs[k]->upper.f[a].Checkerboard() = cb;
+          outs[k]->lower.f[a].Checkerboard() = cb;
+        }
+      }
+      return;
+    }
+#endif
+
+    // Default fallback: per-RHS single-RHS SIMD Mooee.  Correct + bit-identical
+    // to the single-RHS reference path.  No multi-RHS benefit, but provides the
+    // batched API for callers and is the safe default when the env var is unset.
+    for (int k = 0; k < NRHS; ++k) Mooee(*ins[k], *outs[k]);
+  }
+
   // std::array-of-LatticeView helpers (LatticeView has no default ctor; the
   // index_sequence trick aggregate-initialises the array).  Mirror of
   // TXQCD's MakeFermViewsRead/Write.
@@ -888,6 +1130,21 @@ class DTXQCDWilsonCloverFermionEO {
   inline static uint64_t cublas_ptrs_gen_e_{0}, cublas_ptrs_gen_o_{0};
   inline static int      cublas_ptrs_NRHS_e_{0}, cublas_ptrs_NRHS_o_{0};
   inline static uint64_t cublas_ptrs_Nsite_e_{0}, cublas_ptrs_Nsite_o_{0};
+  // PR 2 (DTXQCD_MOOEE_CUBLAS=1): persistent per-CB forward 48x48 device matrix
+  // + cuBLAS scratch + per-site pointer arrays for ApplyFwdLex.  Same shape /
+  // lex order as the inverse-side scratch, kept separate so forward and inverse
+  // don't fight over the same flat fermion buffer.
+  inline static deviceVector<ComplexD>  fwd_dev_e_, fwd_dev_o_;
+  inline static uint64_t fwd_dev_n_e_{0}, fwd_dev_n_o_{0};
+  inline static uint64_t fwd_dev_gen_e_{0}, fwd_dev_gen_o_{0};
+  inline static deviceVector<ComplexD>  ferm_fwd_in_dev_e_,  ferm_fwd_in_dev_o_;
+  inline static deviceVector<ComplexD>  ferm_fwd_out_dev_e_, ferm_fwd_out_dev_o_;
+  inline static deviceVector<ComplexD*> Amk_fwd_e_, Amk_fwd_o_;
+  inline static deviceVector<ComplexD*> Bkn_fwd_e_, Bkn_fwd_o_;
+  inline static deviceVector<ComplexD*> Cmn_fwd_e_, Cmn_fwd_o_;
+  inline static uint64_t cublas_fwd_ptrs_gen_e_{0}, cublas_fwd_ptrs_gen_o_{0};
+  inline static int      cublas_fwd_ptrs_NRHS_e_{0}, cublas_fwd_ptrs_NRHS_o_{0};
+  inline static uint64_t cublas_fwd_ptrs_Nsite_e_{0}, cublas_fwd_ptrs_Nsite_o_{0};
 #endif
 
   DtxqcdSpinMatrices spin_;
