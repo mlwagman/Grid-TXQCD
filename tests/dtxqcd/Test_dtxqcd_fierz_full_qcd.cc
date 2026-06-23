@@ -29,6 +29,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
+#include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/action/gauge/WilsonGaugeAction.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 
@@ -161,6 +162,18 @@ int main(int argc, char **argv) {
   RealD pass_tol = 0.02;
   if (const char *v = std::getenv("PASS_TOL"); v && *v) pass_tol = std::atof(v);
 
+  // SOLVER=HMC (default) uses standard Nf=2 TwoFlavourPseudoFermionAction
+  // (single regular CG on M^†M).  SOLVER=RHMC uses 2× OneFlavourRational
+  // (multishift CG + Remez per PF).  Same Boltzmann weight, but RHMC ~10×
+  // slower with clover; spotting any small numerical residue is the use case.
+  std::string qcd_solver = "HMC";
+  if (const char *v = std::getenv("SOLVER"); v && *v) qcd_solver = v;
+  bool qcd_use_hmc = (qcd_solver == "HMC" || qcd_solver == "hmc");
+  std::cout << GridLogMessage << "QCD-phase solver: "
+            << (qcd_use_hmc ? "HMC (TwoFlavour, regular CG)"
+                            : "RHMC (2× OneFlavourRational, multishift CG)")
+            << std::endl;
+
   // ============================================================
   // Phase 1 : pure QCD reference HMC (faster — runs first so we get
   //          the reference plaq before the slower DTXQCD chain finishes).
@@ -178,24 +191,46 @@ int main(int argc, char **argv) {
     SU<Nc>::ColdConfiguration(U);
 
     WilsonGaugeActionR GaugeAction(beta_run);
-    WilsonFermion<WilsonImplR> Dw(U, Grid, RBGrid, mass_run, ip);
+    // Honor csw — Wilson-Clover when csw>0 to match the DTXQCD phase.
+    typedef WilsonCloverFermion<WilsonImplR, CloverHelpers<WilsonImplR>> WCF;
+    std::unique_ptr<WilsonFermion<WilsonImplR>>  Dw_plain;
+    std::unique_ptr<WCF>                         Dw_clover;
+    FermionOperator<WilsonImplR>                *Dw = nullptr;
+    if (csw_run == 0.0) {
+      Dw_plain.reset(new WilsonFermion<WilsonImplR>(U, Grid, RBGrid, mass_run, ip));
+      Dw = Dw_plain.get();
+    } else {
+      Dw_clover.reset(new WCF(U, Grid, RBGrid, mass_run, csw_run, csw_run,
+                              WilsonAnisotropyCoefficients(), ip));
+      Dw = Dw_clover.get();
+    }
 
-    RealD rat_lo = 0.05, rat_hi = 200.0;
-    int   rat_degree = 12;
-    if (const char *v = std::getenv("RAT_LO");     v && *v) rat_lo     = std::atof(v);
-    if (const char *v = std::getenv("RAT_HI");     v && *v) rat_hi     = std::atof(v);
-    if (const char *v = std::getenv("RAT_DEGREE"); v && *v) rat_degree = std::atoi(v);
-    OneFlavourRationalParams rp(rat_lo, rat_hi, /*MaxIter=*/10000, /*tol=*/1e-8,
-                                rat_degree, 64, /*BCFreq=*/100, /*mdtol=*/1e-6);
-
-    // Two single-flavour rational PFs → Nf=2 |det Dw|².
-    OneFlavourRationalPseudoFermionAction<WilsonImplR> PF1(Dw, rp);
-    OneFlavourRationalPseudoFermionAction<WilsonImplR> PF2(Dw, rp);
+    // Two PF variants — SOLVER=HMC (default) and SOLVER=RHMC.
+    ConjugateGradient<LatticeFermion> CG_action(1e-8, 10000);
+    ConjugateGradient<LatticeFermion> CG_deriv (1e-6, 10000);
+    std::unique_ptr<TwoFlavourPseudoFermionAction<WilsonImplR>> PF_hmc;
+    std::unique_ptr<OneFlavourRationalPseudoFermionAction<WilsonImplR>> PF_rhmc1, PF_rhmc2;
+    OneFlavourRationalParams rp(/*lo=*/0.05, /*hi=*/200.0, /*MaxIter=*/10000,
+                                /*tol=*/1e-8, /*degree=*/12, /*precision=*/64,
+                                /*BCFreq=*/100, /*mdtol=*/1e-6);
+    if (const char *v = std::getenv("RAT_LO"); v && *v) rp.lo = std::atof(v);
+    if (const char *v = std::getenv("RAT_HI"); v && *v) rp.hi = std::atof(v);
+    if (qcd_use_hmc) {
+      PF_hmc.reset(new TwoFlavourPseudoFermionAction<WilsonImplR>(
+                       *Dw, CG_deriv, CG_action));
+    } else {
+      PF_rhmc1.reset(new OneFlavourRationalPseudoFermionAction<WilsonImplR>(*Dw, rp));
+      PF_rhmc2.reset(new OneFlavourRationalPseudoFermionAction<WilsonImplR>(*Dw, rp));
+    }
 
     typedef Representations<EmptyRep<LatticeGaugeField>> Reps;
     ActionLevel<LatticeGaugeField, Reps> L1(1);
-    L1.push_back(&PF1);
-    L1.push_back(&PF2);
+    if (qcd_use_hmc) {
+      L1.push_back(PF_hmc.get());
+    } else {
+      L1.push_back(PF_rhmc1.get());
+      L1.push_back(PF_rhmc2.get());
+    }
     ActionLevel<LatticeGaugeField, Reps> L2(2);
     L2.push_back(&GaugeAction);
     ActionSet<LatticeGaugeField, Reps> Aset;
