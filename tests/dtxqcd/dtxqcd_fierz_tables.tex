@@ -1,0 +1,55 @@
+% Auto-generated Fierz comparison tables, 4^4 lattice, lambda=10
+% Errors are bin=20 block-averaged for plaq, bin=4 for FierzAvg samples
+
+\begin{table}
+\caption{Plaquette comparison.  Bin=20 block averaging absorbs the per-traj autocorrelation in the gauge action.  $\Delta_\mathrm{plaq}=\langle P\rangle_\mathrm{DTXQCD}-\langle P\rangle_\mathrm{QCD}$; consistency with zero is the exact DTXQCD-QCD Fierz requirement.}
+\begin{tabular}{lrcccc}
+\hline
+variant & $N_\mathrm{prod}$ & $\langle P\rangle_\mathrm{QCD}$ & $\langle P\rangle_\mathrm{DTXQCD}$ & $\Delta_\mathrm{plaq}$ & $\sigma$ \\
+\hline
+csw=0 HMC short & 401 & $0.60030(71)$ & $0.59958(84)$ & $-0.00072(110)$ & $0.66$ \\
+csw=0 HMC long & 2112 & $0.60150(29)$ & $0.60121(37)$ & $-0.00029(46)$ & $0.62$ \\
+csw=1 HMC & 401 & $0.60664(67)$ & $0.60428(98)$ & $-0.00236(119)$ & $1.98$ \\
+csw=1 RHMC & 401 & $0.60562(93)$ & $0.60611(71)$ & $0.00049(117)$ & $0.41$ \\
+prod HMC non-EO & 401 & $0.48466(236)$ & $0.48191(236)$ & $-0.00276(334)$ & $0.83$ \\
+prod HMC EO & 401 & $0.48466(236)$ & $0.47782(206)$ & $-0.00684(314)$ & $2.18$ \\
+prod RHMC non-EO & 401 & $0.48379(227)$ & $0.48314(219)$ & $-0.00065(316)$ & $0.21$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}
+\caption{Quark condensate $\Sigma = \langle\bar q q\rangle$ comparison (FierzAvg observer with $N_\mathrm{noise}=16$ per measurement, stride 5 trajs).  $\Sigma_\mathrm{DTX}$ is the in-line DTXQCD stochastic estimate; $\Sigma_W$ is plain Wilson on the same gauge configuration.  By Fierz they must agree to stochastic precision.  Bin=4 block averaging over the strided samples.}
+\begin{tabular}{lrcccc}
+\hline
+variant & $N_\mathrm{meas}$ & $\Sigma_\mathrm{DTX}$ & $\Sigma_W$ & ratio $-1$ & $\sigma$ \\
+\hline
+csw=0 RHMC (orig) & 98 & $2.73653(86)$ & $2.73729(87)$ & $-0.00027(41)$ & $0.67$ \\
+csw=0 HMC short & 81 & $2.74225(90)$ & $2.74329(89)$ & $-0.00037(39)$ & $0.95$ \\
+csw=0 HMC long & 423 & $2.73806(45)$ & $2.73800(37)$ & $0.00003(17)$ & $0.17$ \\
+csw=1 HMC & 81 & $2.76062(146)$ & $2.76142(92)$ & $-0.00029(39)$ & $0.73$ \\
+csw=1 RHMC & 81 & $2.75815(93)$ & $2.75913(91)$ & $-0.00035(44)$ & $0.78$ \\
+prod HMC non-EO & 81 & $3.20623(263)$ & $3.20729(217)$ & $-0.00032(41)$ & $0.80$ \\
+prod HMC EO & 81 & $3.21270(218)$ & $3.21186(181)$ & $0.00027(49)$ & $0.55$ \\
+prod RHMC non-EO & 81 & $3.20489(247)$ & $3.20529(215)$ & $-0.00012(41)$ & $0.29$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}
+\caption{Scalar auxiliary VEVs $\langle\mathrm{Tr}\,s\rangle$ and $\langle\mathrm{Tr}\,\sigma\rangle$ compared to the saddle prediction $N_f\Sigma_W/\lambda^2$ ($N_f=2$, $\lambda=10$, so saddle $\approx 0.02\,\Sigma_W$).  Deviations from saddle are stochastic-noise-dominated at large $\lambda$.}
+\begin{tabular}{lrcccc}
+\hline
+variant & $N_\mathrm{meas}$ & $\langle\mathrm{Tr}\,s\rangle$ & $\langle\mathrm{Tr}\,\sigma\rangle$ & $N_f\Sigma_W/\lambda^2$ & ${\rm dev}_s$, ${\rm dev}_\sigma$ \\
+\hline
+csw=0 RHMC (orig) & 98 & $0.0543( 7)$ & $0.0547(15)$ & $0.05475$ & $s:-0.0005$,\,$\sigma:-0.0001$ \\
+csw=0 HMC short & 81 & $0.0545( 7)$ & $0.0572(17)$ & $0.05487$ & $s:-0.0003$,\,$\sigma:+0.0023$ \\
+csw=0 HMC long & 423 & $0.0547( 3)$ & $0.0551( 7)$ & $0.05476$ & $s:-0.0001$,\,$\sigma:+0.0004$ \\
+csw=1 HMC & 81 & $0.0549( 7)$ & $0.0575(17)$ & $0.05523$ & $s:-0.0004$,\,$\sigma:+0.0023$ \\
+csw=1 RHMC & 81 & $0.0549( 7)$ & $0.0576(17)$ & $0.05518$ & $s:-0.0003$,\,$\sigma:+0.0024$ \\
+prod HMC non-EO & 81 & $0.0628( 6)$ & $0.0631(17)$ & $0.06415$ & $s:-0.0014$,\,$\sigma:-0.0010$ \\
+prod HMC EO & 81 & $0.0631( 6)$ & $0.0633(18)$ & $0.06424$ & $s:-0.0011$,\,$\sigma:-0.0010$ \\
+prod RHMC non-EO & 81 & $0.0629( 6)$ & $0.0636(19)$ & $0.06411$ & $s:-0.0012$,\,$\sigma:-0.0005$ \\
+\hline
+\end{tabular}
+\end{table}
