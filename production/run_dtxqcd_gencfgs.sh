@@ -79,6 +79,13 @@ DTXQCD_MP_CG="${DTXQCD_MP_CG:-1}"
 # both.  MPS is auto-enabled here when any QUDA force path is on; override with
 # QUDA_ENABLE_MPS=0 to force off.
 QUDA_FORCE="${QUDA_FORCE:-1}"
+# QUDA_FORCE_KERNEL=1 selects Path B (fused QUDA force kernel) inside
+# OneFlavourSchurCloverQudaForceRationalActionMP.  Without it, production
+# was hitting Path A (Grid-side per-pole loop) where strange's deriv()
+# was ~17 s/call due to 80x MeeDeriv/MooDeriv calls at 156 ms each.
+# TXQCD already sets this; matching here brings strange [0][3] from
+# ~17 s -> ~2 s (measured 2026-06-23).
+QUDA_FORCE_KERNEL="${QUDA_FORCE_KERNEL:-1}"
 DTXQCD_QUDA_HYBRID="${DTXQCD_QUDA_HYBRID:-1}"
 DTXQCD_QUDA_FULL="${DTXQCD_QUDA_FULL:-}"
 _QUDA_ON=0
@@ -135,6 +142,7 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       ${IMPORT_CFG:+IMPORT_CFG="$IMPORT_CFG"} \
       ${USE_FULL_PF:+USE_FULL_PF="$USE_FULL_PF"} \
       ${QUDA_FORCE:+QUDA_FORCE="$QUDA_FORCE"} \
+      ${QUDA_FORCE_KERNEL:+QUDA_FORCE_KERNEL="$QUDA_FORCE_KERNEL"} \
       ${DTXQCD_QUDA_HYBRID:+DTXQCD_QUDA_HYBRID="$DTXQCD_QUDA_HYBRID"} \
       ${DTXQCD_QUDA_FULL:+DTXQCD_QUDA_FULL="$DTXQCD_QUDA_FULL"} \
       ${QUDA_ENABLE_MPS:+QUDA_ENABLE_MPS="$QUDA_ENABLE_MPS"} \
