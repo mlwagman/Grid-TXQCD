@@ -544,17 +544,18 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
 
   // DTXQCD_RATFORCE_GPU: route AccumulateSiteForces through the GPU kernel
   // (DTXQCDRationalForceGpuKernel.h).  DEFAULT OFF everywhere (CPU thread_for
-  // is the bit-comparable reference) until FD-verified; off-CUDA always CPU.
+  // is the bit-comparable reference); off-CUDA always CPU.
+  //
+  // Reads the env on every call so tests can flip it within one process via
+  // setenv("DTXQCD_RATFORCE_GPU", "0|1", 1).  This is called per-pole-per-CB
+  // (not per-site), so the getenv cost is negligible vs the force eval cost.
   static int RatForceGpuEnabled() {
-    static int v = []() {
 #ifndef GRID_CUDA
-      return 0;
+    return 0;
 #else
-      const char *e = std::getenv("DTXQCD_RATFORCE_GPU");
-      return (e && *e) ? std::atoi(e) : 0;
+    const char *e = std::getenv("DTXQCD_RATFORCE_GPU");
+    return (e && *e) ? std::atoi(e) : 0;
 #endif
-    }();
-    return v;
   }
 
   // Per-pole per-CB site loop: accumulate aux + clover-sigma contributions
