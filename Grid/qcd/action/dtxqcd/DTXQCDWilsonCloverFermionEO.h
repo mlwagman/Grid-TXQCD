@@ -47,8 +47,9 @@
 
 NAMESPACE_BEGIN(Grid);
 
-// Cached 48x48 per-site matrix type (Mooee^{-1}).  SIMD-vectorized over
-// outer sites; one such matrix per CB site stored as an iMatrix tensor.
+// Cached 48x48 per-site matrix type (Mooee^{-1} or forward Mooee).  SIMD-
+// vectorized over outer sites; one such matrix per CB site stored as an
+// iMatrix tensor.
 template <class vtype>
 using DtxqcdSiteInvMat = iScalar<iScalar<iMatrix<vtype, kDtxqcdSiteDim48>>>;
 
@@ -60,6 +61,13 @@ class DTXQCDWilsonCloverFermionEO {
   typedef typename LatticeFermion::vector_object::vector_type FermVtype;
   typedef DtxqcdSiteInvMat<FermVtype> SiteInvMat;
   typedef Lattice<SiteInvMat> InvField;
+
+  // Single-precision per-site 48x48 SIMD matrix type (consumed by
+  // DTXQCDMpcOpF, which owns the SP grids and downcasts the DP caches below
+  // into SP lattices on those grids -- precisionChange across grids).
+  typedef typename LatticeFermionF::vector_object::vector_type FermVtypeF;
+  typedef DtxqcdSiteInvMat<FermVtypeF> SiteInvMatF;
+  typedef Lattice<SiteInvMatF> InvFieldF;
 
   static constexpr int kDim24 = kDtxqcdSiteDim24;
   static constexpr int kDim48 = kDtxqcdSiteDim48;
@@ -131,11 +139,30 @@ class DTXQCDWilsonCloverFermionEO {
     // F_{mu,nu} from U (full grid) + per-CB copies (csw != 0 only).
     BuildFieldStrength();
 
-    // Mooee^{-1} caches per CB (also populates the FORWARD M_ee SIMD cache
-    // for the DTXQCD_MOOEE_FWDCACHE single-RHS path).
-    BuildInverseCacheCB(Even, inv_e_, inv_lex_e_, fwd_e_);
-    BuildInverseCacheCB(Odd,  inv_o_, inv_lex_o_, fwd_o_);
+    // Mooee^{-1} caches per CB.
+    BuildInverseCacheCB(Even, inv_e_, inv_lex_e_);
+    BuildInverseCacheCB(Odd,  inv_o_, inv_lex_o_);
+
+    // Forward Mooee SIMD caches per CB -- built when MP has requested them
+    // (sp_enabled_) OR when PR 5's DTXQCD_MOOEE_FWDCACHE=1 dispatch is on
+    // (also needs the cache).  The default DP path pays nothing if neither
+    // is set.
+    if (sp_enabled_ || UseMooeeFwdCache()) {
+      sp_enabled_ = true;
+      BuildForwardSimdCB(Even, fwd_e_);
+      BuildForwardSimdCB(Odd,  fwd_o_);
+    }
   }
+
+  // Opt-in: request the double-precision forward 48x48 SIMD caches that
+  // DTXQCDMpcOpF downcasts into its single-precision caches.  Idempotent;
+  // builds them now and on every subsequent ImportFields.
+  void EnableSinglePrec() {
+    sp_enabled_ = true;
+    BuildForwardSimdCB(Even, fwd_e_);
+    BuildForwardSimdCB(Odd,  fwd_o_);
+  }
+  bool SinglePrecEnabled() const { return sp_enabled_; }
 
   // -------- Full-volume apply --------
 
@@ -173,7 +200,9 @@ class DTXQCDWilsonCloverFermionEO {
   // (delta/cross/clover upper+lower) into one iMatrix*spinor accelerator_for --
   // same pattern as MooeeInv, expected ~3x faster on production (22ms -> ~8ms).
   // Default OFF (preserves bit-exact legacy path).  MooeeDag inherits because
-  // it is a g5-wrap around single-RHS Mooee.
+  // it is a g5-wrap around single-RHS Mooee.  When set, the constructor also
+  // calls EnableSinglePrec() so the fwd cache is built (it shares the same
+  // build path that MP uses for SP downcast).
   static int UseMooeeFwdCache() {
     static int v = []() {
       const char *e = std::getenv("DTXQCD_MOOEE_FWDCACHE");
@@ -187,7 +216,7 @@ class DTXQCDWilsonCloverFermionEO {
   // aux / FS copies (cached at ImportFields time).  Full-grid input keeps
   // the full-grid path.
   void Mooee(const Field &in, Field &out) {
-    if (UseMooeeFwdCache() && in.upper.f[0].Grid() == &rbgrid_) {
+    if (UseMooeeFwdCache() && in.upper.f[0].Grid() == &rbgrid_ && sp_enabled_) {
       ApplyForwardSimd(in, out, in.upper.f[0].Checkerboard());
       return;
     }
@@ -309,6 +338,22 @@ class DTXQCDWilsonCloverFermionEO {
   RealD Csw()  const { return csw_; }
   const std::vector<LatticeColourMatrix> &FieldStrength() const { return FS_; }
   DTXQCDMeooeDoubled &MeooeEngine() { return meooe_; }
+  GridCartesian         &Grid()    { return grid_; }
+  GridRedBlackCartesian &RbGrid()   { return rbgrid_; }
+  GaugeField            &Gauge()    { return Umu_; }
+  const LatticeGaugeField &ConjugatedGauge() const {
+    return meooe_.ConjugatedGauge();
+  }
+
+  // DP per-CB 48x48 SIMD caches that DTXQCDMpcOpF downcasts into SP.
+  //  - inverse: always built (BuildInverseCacheCB) for the DP MooeeInv path.
+  //  - forward: built only when EnableSinglePrec() has been called.
+  const InvField &InvCache(int cb) const {
+    return (cb == Even) ? inv_e_ : inv_o_;
+  }
+  const InvField &FwdCache(int cb) const {
+    return (cb == Even) ? fwd_e_ : fwd_o_;
+  }
 
  private:
   // Build F_{mu,nu} for the 6 (mu<nu) pairs from U via WilsonLoops, plus
@@ -370,13 +415,10 @@ class DTXQCDWilsonCloverFermionEO {
   // SIMD-vectorized lattice slot.  thread_for-parallel over sites; the
   // SIMD repack is hidden inside Grid's pokeSite.
   void BuildInverseCacheCB(int cb, InvField &inv,
-                            std::vector<Eigen::MatrixXcd> &inv_lex,
-                            InvField &fwd) {
+                            std::vector<Eigen::MatrixXcd> &inv_lex) {
     typedef typename InvField::vector_object::scalar_object SmatSobj;
     inv = Zero();
     inv.Checkerboard() = cb;
-    fwd = Zero();
-    fwd.Checkerboard() = cb;
 
     // LOCAL, per-rank build.  Unvectorize the per-CB aux (+FS) copies ONCE into
     // lex-ordered host arrays for THIS rank's sublattice, then build/invert M48
@@ -559,23 +601,76 @@ class DTXQCDWilsonCloverFermionEO {
           M(r, c) = ComplexD(sobjs[s]()()(r, c));
       inv_lex[s] = std::move(M);
     });
+  }
 
-    // PR 5': pack the FORWARD M_ee into the SIMD cache fwd.  Rebuild the
-    // per-site M48 (cheap host work, same as the build_M48 lambda invoked by
-    // the inverse pass) and pack into SmatSobj with row-major (r,c) layout,
-    // matching what ApplyForwardSimd's Mlane()()(r,c) read order expects.
-    std::vector<SmatSobj> sobjs_fwd(Nsite);
+  // Assemble the forward 48x48 Mooee at each CB site into a DP SIMD lattice
+  // (fwd_e_/o_).  Mirrors BuildInverseCacheCB's unvectorize/assemble/vectorize
+  // structure exactly (same lex order), but stores M48 instead of M48^{-1}.
+  // DTXQCDMpcOpF downcasts this (and inv_e_/o_) into its SP caches.
+  void BuildForwardSimdCB(int cb, InvField &fwd) {
+    typedef typename InvField::vector_object::scalar_object SmatSobj;
+    const auto &sig_L = (cb == Even) ? sigma_e_ : sigma_o_;
+    const auto &pi_L  = (cb == Even) ? pi_e_    : pi_o_;
+    const auto &d_L   = (cb == Even) ? d_e_     : d_o_;
+    const auto &n_L   = (cb == Even) ? n_e_     : n_o_;
+    const auto &s_L   = (cb == Even) ? s_e_     : s_o_;
+    const auto &p_L   = (cb == Even) ? p_e_     : p_o_;
+
+    typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSob;
+    typedef typename LatticeDtxqcdPi::vector_object::scalar_object    PiSob;
+    typedef typename LatticeDtxqcdD::vector_object::scalar_object     DSob;
+    typedef typename LatticeDtxqcdN::vector_object::scalar_object     NSob;
+    typedef typename LatticeDtxqcdS::vector_object::scalar_object     SSob;
+    typedef typename LatticeDtxqcdP::vector_object::scalar_object     PSob;
+    typedef typename LatticeColourMatrix::vector_object::scalar_object CMSob;
+
+    std::vector<SigSob> sig_a; std::vector<PiSob> pi_a;
+    std::vector<DSob>   d_a;   std::vector<NSob>  n_a;
+    std::vector<SSob>   s_a;   std::vector<PSob>  p_a;
+    unvectorizeToLexOrdArray(sig_a, sig_L);
+    unvectorizeToLexOrdArray(pi_a,  pi_L);
+    unvectorizeToLexOrdArray(d_a,   d_L);
+    unvectorizeToLexOrdArray(n_a,   n_L);
+    unvectorizeToLexOrdArray(s_a,   s_L);
+    unvectorizeToLexOrdArray(p_a,   p_L);
+    const uint64_t Nsite = sig_a.size();
+
+    std::vector<std::array<CMSob, 6>> fs_a;
+    if (csw_ != 0.0) {
+      const auto &FS_L = (cb == Even) ? FS_e_ : FS_o_;
+      std::array<std::vector<CMSob>, 6> fk;
+      for (int k = 0; k < 6; ++k) unvectorizeToLexOrdArray(fk[k], FS_L[k]);
+      fs_a.resize(Nsite);
+      for (uint64_t x = 0; x < Nsite; ++x)
+        for (int k = 0; k < 6; ++k) fs_a[x][k] = fk[k][x];
+    }
+
+    fwd = Zero();
+    fwd.Checkerboard() = cb;
+    std::vector<SmatSobj> sobjs(Nsite);
     thread_for(idx, Nsite, {
-      Eigen::MatrixXcd M48;
-      build_M48(idx, M48);
+      DtxqcdSiteAux aux = DtxqcdSiteAux::FromSobjs(
+          sig_a[idx], pi_a[idx], d_a[idx], n_a[idx], s_a[idx], p_a[idx]);
+      Eigen::MatrixXcd M_upper, M_lower, M_off, M48;
+      if (csw_ != 0.0) {
+        DtxqcdSiteClover clover = DtxqcdSiteClover::FromSobjs(fs_a[idx]);
+        DtxqcdBuildUpperBlock24(mass_, aux, spin_, M_upper, csw_, &clover);
+        DtxqcdBuildLowerBlock24(mass_, aux, spin_, M_lower, csw_, &clover);
+      } else {
+        DtxqcdBuildUpperBlock24(mass_, aux, spin_, M_upper);
+        DtxqcdBuildLowerBlock24(mass_, aux, spin_, M_lower);
+      }
+      DtxqcdBuildOffDiagBlock24(aux, spin_, M_off);
+      DtxqcdAssembleDoubled48(M_upper, M_lower, M_off, M48);
       SmatSobj sobj;
       sobj = Zero();
       for (int r = 0; r < kDim48; ++r)
         for (int c = 0; c < kDim48; ++c)
           sobj()()(r, c) = M48(r, c);
-      sobjs_fwd[idx] = sobj;
+      sobjs[idx] = sobj;
     });
-    vectorizeFromLexOrdArray(sobjs_fwd, fwd);
+    vectorizeFromLexOrdArray(sobjs, fwd);
+    fwd.Checkerboard() = cb;
   }
 
   // SIMD per-oSite gemv applying the cached 48x48 inverse to a doubled
@@ -587,15 +682,18 @@ class DTXQCDWilsonCloverFermionEO {
   // Public because nvcc (--expt-extended-lambda) forbids an extended
   // __host__ __device__ lambda (the accelerator_for below) inside a private
   // or protected member function.
-  void ApplyInverseSimd(const Field &in, Field &out, int cb) {
-    InvField &inv = (cb == Even) ? inv_e_ : inv_o_;
+  // PR 5': forward Mooee via per-site SIMD against pre-built fwd_e_/o_ cache.
+  // Byte-for-byte mirror of ApplyInverseSimd but reads fwd instead of inv.
+  // Requires sp_enabled_ (fwd cache must be built; caller gates this).
+  void ApplyForwardSimd(const Field &in, Field &out, int cb) {
+    InvField &fwd = (cb == Even) ? fwd_e_ : fwd_o_;
     GridBase *fg = in.upper.f[0].Grid();
     for (int a = 0; a < DtxqcdNf; ++a) {
       out.upper.f[a].Checkerboard() = cb;
       out.lower.f[a].Checkerboard() = cb;
     }
 
-    autoView(inv_v, inv, AcceleratorRead);
+    autoView(fwd_v, fwd, AcceleratorRead);
     auto in_up_v  = MakeFermViewsRead<DtxqcdNf>(in.upper,  std::make_index_sequence<DtxqcdNf>{});
     auto in_lo_v  = MakeFermViewsRead<DtxqcdNf>(in.lower,  std::make_index_sequence<DtxqcdNf>{});
     auto out_up_v = MakeFermViewsWrite<DtxqcdNf>(out.upper, std::make_index_sequence<DtxqcdNf>{});
@@ -605,7 +703,7 @@ class DTXQCDWilsonCloverFermionEO {
     const int Nsimd = LatticeFermion::vector_object::Nsimd();
 
     accelerator_for(s, fg->oSites(), Nsimd, {
-      auto Mlane = inv_v(s);
+      auto Mlane = fwd_v(s);
       FermSitePerLane in_up[DtxqcdNf], in_lo[DtxqcdNf];
       for (int a = 0; a < DtxqcdNf; ++a) {
         in_up[a] = in_up_v[a](s);
@@ -658,20 +756,15 @@ class DTXQCDWilsonCloverFermionEO {
     }
   }
 
-  // PR 5': SIMD per-oSite gemv applying the cached forward 48x48 M_ee to a
-  // doubled fermion.  Byte-identical body to ApplyInverseSimd, except it reads
-  // fwd_e_/fwd_o_ (forward) instead of inv_e_/inv_o_ (inverse).  Replaces the
-  // 6 separate accelerator_for kernels in DtxqcdApplyMooeeDoubled (the per-CB
-  // path used by single-RHS Mooee) with one iMatrix*spinor accelerator_for.
-  void ApplyForwardSimd(const Field &in, Field &out, int cb) {
-    InvField &fwd = (cb == Even) ? fwd_e_ : fwd_o_;
+  void ApplyInverseSimd(const Field &in, Field &out, int cb) {
+    InvField &inv = (cb == Even) ? inv_e_ : inv_o_;
     GridBase *fg = in.upper.f[0].Grid();
     for (int a = 0; a < DtxqcdNf; ++a) {
       out.upper.f[a].Checkerboard() = cb;
       out.lower.f[a].Checkerboard() = cb;
     }
 
-    autoView(fwd_v, fwd, AcceleratorRead);
+    autoView(inv_v, inv, AcceleratorRead);
     auto in_up_v  = MakeFermViewsRead<DtxqcdNf>(in.upper,  std::make_index_sequence<DtxqcdNf>{});
     auto in_lo_v  = MakeFermViewsRead<DtxqcdNf>(in.lower,  std::make_index_sequence<DtxqcdNf>{});
     auto out_up_v = MakeFermViewsWrite<DtxqcdNf>(out.upper, std::make_index_sequence<DtxqcdNf>{});
@@ -681,7 +774,7 @@ class DTXQCDWilsonCloverFermionEO {
     const int Nsimd = LatticeFermion::vector_object::Nsimd();
 
     accelerator_for(s, fg->oSites(), Nsimd, {
-      auto Mlane = fwd_v(s);
+      auto Mlane = inv_v(s);
       FermSitePerLane in_up[DtxqcdNf], in_lo[DtxqcdNf];
       for (int a = 0; a < DtxqcdNf; ++a) {
         in_up[a] = in_up_v[a](s);
@@ -1183,7 +1276,9 @@ class DTXQCDWilsonCloverFermionEO {
 
   // std::array-of-LatticeView helpers (LatticeView has no default ctor; the
   // index_sequence trick aggregate-initialises the array).  Mirror of
-  // TXQCD's MakeFermViewsRead/Write.
+  // TXQCD's MakeFermViewsRead/Write.  PUBLIC: reused by the single-precision
+  // Schur operator DTXQCDMpcOpF (same per-oSite gemv pattern on the SP field).
+ public:
   template <std::size_t N, class FieldT, std::size_t... Is>
   static auto MakeFermViewsRead(const FieldT &fld, std::index_sequence<Is...>)
       -> std::array<decltype(fld.f[0].View(AcceleratorRead)), N> {
@@ -1195,6 +1290,7 @@ class DTXQCDWilsonCloverFermionEO {
     return {{ fld.f[Is].View(AcceleratorWrite)... }};
   }
 
+ private:
   RealD mass_;
   RealD csw_;
   const LatticeDtxqcdSigma &sigma_;
@@ -1220,16 +1316,11 @@ class DTXQCDWilsonCloverFermionEO {
 
   InvField inv_e_, inv_o_;
 
-  // PR 5': per-CB SIMD-vectorized 48x48 FORWARD M_ee cache.  Mirrors inv_e_/o_:
-  // populated alongside the inverse in BuildInverseCacheCB (re-running the
-  // same per-site build_M48 + vectorize-from-lex pack used for the inverse),
-  // then consumed by ApplyForwardSimd to apply M_ee · v as a single per-site
-  // iMatrix * spinor accelerator_for.  Replaces the 6 separate accelerator_for
-  // kernels that AddDiagAndCrossAndClover dispatches (delta diag upper/lower,
-  // dn cross upper/lower, clover upper/lower) -- those are kernel-launch
-  // overhead dominated at the small per-site work granularity.  Gated by
-  // DTXQCD_MOOEE_FWDCACHE=1.
-  InvField fwd_e_, fwd_o_;
+  // DP forward 48x48 SIMD caches for the mixed-precision path (DTXQCDMpcOpF
+  // downcasts them).  Built lazily (sp_enabled_) so the default DP path,
+  // which uses the aux-apply Mooee(), pays nothing.
+  bool       sp_enabled_{false};
+  InvField   fwd_e_, fwd_o_;
 
   // Multi-RHS scratch: per-CB lex-ordered Eigen 48x48 inverses.  Built by
   // unvectorizing the SIMD InvField so the lex index matches what

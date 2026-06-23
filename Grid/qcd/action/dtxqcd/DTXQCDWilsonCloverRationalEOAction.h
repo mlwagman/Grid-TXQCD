@@ -48,7 +48,9 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDField.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpF.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCG.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGMixedPrec.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDRationalForceGpuKernel.h>
@@ -139,7 +141,7 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       eta.upper.f[a].Checkerboard() = Odd;
       eta.lower.f[a].Checkerboard() = Odd;
     }
-    ApplyRational(Mop, PowerEighth, eta, Phi_);
+    ApplyRational(Dw, Mop, PowerEighth, eta, Phi_);
   }
 
   // ------------------------------------------------------------------
@@ -155,7 +157,7 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     auto Dw = MakeEOp(U);
     DTXQCDMpcOp Mop(Dw);
     DTXQCDFermionDoubled Y(&rbgrid_);
-    ApplyRational(Mop, PowerNegQuarter, Phi_, Y);  // Y = (M^dag M)^{-1/4} Phi
+    ApplyRational(Dw, Mop, PowerNegQuarter, Phi_, Y);  // Y = (M^dag M)^{-1/4} Phi
     // S = Re(Phi^dag Y).  Im part is zero up to CG noise (operator Hermitian).
     ComplexD ip = innerProduct(Phi_, Y);
     RealD action = ip.real();
@@ -190,8 +192,7 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     std::vector<RealD> md_tol(Npole, param_.mdtolerance);
     GridStopWatch t_cg, t_force;  // perf instrumentation: CG vs force-assembly
     t_cg.Start();
-    DTXQCDMultiShiftCG(Mop, PowerNegQuarter.poles, md_tol, Phi_, Xk,
-                       param_.MaxIter);
+    RunMultiShiftCG(Dw, Mop, PowerNegQuarter.poles, md_tol, Phi_, Xk);
     t_cg.Stop();
     t_force.Start();
     // Finer force-assembly sub-timers (usecond-based accumulators, cheap).
@@ -384,15 +385,28 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
 
   // Multishift-CG + linear combination: out = norm * in + sum_k residues[k] * xk[k]
   // where xk[k] = (M^dag M + poles[k])^{-1} in (multi-shift solve).
-  void ApplyRational(DTXQCDMpcOp &Mop, const MultiShiftFunction &rat,
+  //
+  // The solve is DOUBLE precision by default.  DTXQCD_MP_CG>=2 also routes the
+  // S()/refresh() rationals through the mixed-precision solver; the default
+  // DTXQCD_MP_CG=1 keeps S()/refresh() in DP so they remain the high-accuracy
+  // reference that deriv()'s (now-MP) force is validated against.
+  void ApplyRational(DTXQCDWilsonCloverFermionEO &Dw, DTXQCDMpcOp &Mop,
+                     const MultiShiftFunction &rat,
                      const DTXQCDFermionDoubled &in,
                      DTXQCDFermionDoubled &out) {
     const int nshift = static_cast<int>(rat.poles.size());
     std::vector<DTXQCDFermionDoubled> xk;
     xk.reserve(nshift);
     for (int k = 0; k < nshift; ++k) xk.emplace_back(&rbgrid_);
-    DTXQCDMultiShiftCG(Mop, rat.poles, rat.tolerances, in, xk,
-                       param_.MaxIter);
+    if (MpCgEnabled() >= 2) {
+      if (!Dw.SinglePrecEnabled()) Dw.EnableSinglePrec();
+      DTXQCDMpcOpF Mop_f(Dw);
+      DTXQCDMultiShiftCGMixedPrec(Mop, Mop_f, rat.poles, rat.tolerances, in, xk,
+                                  param_.MaxIter, MpCgReliableFreq());
+    } else {
+      DTXQCDMultiShiftCG(Mop, rat.poles, rat.tolerances, in, xk,
+                         param_.MaxIter);
+    }
 
     for (int a = 0; a < DtxqcdNf; ++a) {
       out.upper.f[a] = rat.norm * in.upper.f[a];
@@ -556,6 +570,39 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     const char *e = std::getenv("DTXQCD_RATFORCE_GPU");
     return (e && *e) ? std::atoi(e) : 0;
 #endif
+  }
+
+  // DTXQCD_MP_CG: route the multishift CG in deriv() (and, when
+  // DTXQCD_MP_CG>=2, also S()/refresh()) through the reliable-update
+  // mixed-precision solver.  DEFAULT OFF -- the all-double DTXQCDMultiShiftCG
+  // is the production default and the numerical reference.  Read per call so
+  // tests can flip it within one process via setenv.
+  static int MpCgEnabled() {
+    const char *e = std::getenv("DTXQCD_MP_CG");
+    return (e && *e) ? std::atoi(e) : 0;
+  }
+  static int MpCgReliableFreq() {
+    const char *e = std::getenv("DTXQCD_MP_CG_RELIABLE_FREQ");
+    return (e && *e) ? std::max(1, std::atoi(e)) : 50;
+  }
+
+  // Dispatch the (M^dag M + poles)^{-1} multishift solve: double-precision by
+  // default, mixed-precision (SP matvec + DP reliable update) when
+  // DTXQCD_MP_CG is set.  Mop is the DP Schur operator over Dw; the SP twin is
+  // built from Dw's downcast caches (Dw.EnableSinglePrec() built them).
+  void RunMultiShiftCG(DTXQCDWilsonCloverFermionEO &Dw, DTXQCDMpcOp &Mop,
+                       const std::vector<RealD> &poles,
+                       const std::vector<RealD> &tol,
+                       const DTXQCDFermionDoubled &src,
+                       std::vector<DTXQCDFermionDoubled> &xk) {
+    if (MpCgEnabled()) {
+      if (!Dw.SinglePrecEnabled()) Dw.EnableSinglePrec();
+      DTXQCDMpcOpF Mop_f(Dw);
+      DTXQCDMultiShiftCGMixedPrec(Mop, Mop_f, poles, tol, src, xk,
+                                  param_.MaxIter, MpCgReliableFreq());
+    } else {
+      DTXQCDMultiShiftCG(Mop, poles, tol, src, xk, param_.MaxIter);
+    }
   }
 
   // Per-pole per-CB site loop: accumulate aux + clover-sigma contributions
