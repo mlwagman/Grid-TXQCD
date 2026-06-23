@@ -11,6 +11,10 @@
 #ifdef GRID_HAVE_QUDA
 #  include <quda.h>
 #  include <qmp.h>
+#  ifdef GRID_CUDA
+#    include <cuda_runtime_api.h>  // cudaSetDevice/cudaGetDevice/cudaGetDeviceCount
+#  endif
+#  include <cstdlib>
 #endif
 
 NAMESPACE_BEGIN(Grid);
@@ -52,6 +56,48 @@ inline void initialize(int device = -1, const int *mpi_dims = nullptr) {
   QMP_declare_logical_topology_map(dims_mut, 4, map, 4);
 
   initCommsGridQuda(4, dims, /*rank_from_coords=*/nullptr, /*fdata=*/nullptr);
+
+  // --- Device binding (multi-rank crux) -----------------------------------
+  // Grid (configured --enable-setdevice=no, GRID_DEFAULT_GPU) calls
+  // cudaSetDevice(0) on every rank, so Grid's streams + cuBLAS handles + all
+  // lattice data live on whatever device is "device 0" for that rank.  QUDA's
+  // initQuda(-1) then does its OWN default allocation (comm_gpuid = rank%ngpu),
+  // so when all GPUs are visible (the QUDA strange/HMC launch, which needs all
+  // GPUs visible for initCommsGridQuda) rank>0 binds QUDA to a DIFFERENT device
+  // than Grid is on.  Control returns to Grid with the current device changed,
+  // and Grid's next stream op faults: "Cuda error invalid resource handle".
+  //
+  // Fix: bind QUDA to the device GRID IS ALREADY ON (cudaGetDevice()), not
+  // QUDA's rank%ngpu guess.  Then Grid and QUDA always agree, regardless of the
+  // --enable-setdevice build flag.  Per-GPU work distribution is the LAUNCH
+  // WRAPPER's job (srun_gpu_wrapper.sh sets CUDA_VISIBLE_DEVICES=$LOCAL_RANK, so
+  // each rank's "device 0" is a distinct physical GPU — Grid AND QUDA both land
+  // on it).  This is exactly TXQCD's --enable-setdevice=yes behaviour (rank N on
+  // device N) reproduced for the setdevice=no DTXQCD build via the wrapper, with
+  // QUDA no longer fighting Grid for the device.  Explicit override: QUDA_DEVICE.
+  //   * 1 GPU/rank visible (srun_gpu_wrapper.sh): cudaGetDevice()==0 == the
+  //     rank's only/physical GPU; QUDA binds there too. Correct multi-GPU.
+  //   * all GPUs visible, no wrapper: every rank's cudaGetDevice()==0; QUDA also
+  //     binds device 0 — consistent (no fault), though all ranks share GPU 0.
+#ifdef GRID_CUDA
+  if (device < 0) {
+    if (const char *e = std::getenv("QUDA_DEVICE"); e && *e) {
+      device = std::atoi(e);
+      cudaSetDevice(device);
+    } else {
+      // Adopt Grid's current device so QUDA and Grid never disagree.
+      cudaGetDevice(&device);
+    }
+    int cur = -1;
+    cudaGetDevice(&cur);
+    std::cout << GridLogMessage << "[Grid::Quda] binding rank "
+              << GlobalSharedMemory::WorldRank << " (shmRank "
+              << GlobalSharedMemory::WorldShmRank << ") to CUDA device "
+              << device << " (== Grid's current device " << cur << ")"
+              << std::endl;
+  }
+#endif
+
   initQuda(device);
   initialized = true;
   std::cout << GridLogMessage << "[Grid::Quda] initialized (device=" << device

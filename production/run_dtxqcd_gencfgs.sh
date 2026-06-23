@@ -59,6 +59,33 @@ DTXQCD_LOGDET_GPU="${DTXQCD_LOGDET_GPU:-1}"
 DTXQCD_MOOEEINV_CUBLAS="${DTXQCD_MOOEEINV_CUBLAS:-1}"
 DTXQCD_RATFORCE_GPU="${DTXQCD_RATFORCE_GPU:-1}"
 
+# ---- QUDA fermion-force acceleration (default ON; validated multi-rank) ----
+# Set QUDA_FORCE=0 / DTXQCD_QUDA_HYBRID=0 to fall back to the cuBLAS force path
+# (bit-comparable; used for parity checks).  Validated at 1.1.1.4 16^3x48-class:
+# parity machine-precision vs cuBLAS, gates green, ~8.7x on the Wilson-hop force.
+# QUDA_FORCE=1          : strange Nf=1 force via QUDA (Nf=2+1 runs).
+# DTXQCD_QUDA_HYBRID=1  : light Nf=2 Wilson-hopping force via QUDA (EO).
+# DTXQCD_QUDA_FULL=1    : (reserved) additionally route the clover-sigma force.
+# Multi-rank QUDA needs QUDA_ENABLE_MPS=1 so QUDA's per-host gpuid (= local
+# rank) maps onto the one GPU the wrapper exposes (gpuid % device_count(1) = 0
+# = the rank's physical GPU); without it QUDA aborts "Too few GPUs".  Grid and
+# QUDA agree on that device because QudaInit now binds QUDA to Grid's current
+# device (cudaGetDevice()), so the wrapper's one-GPU-per-rank binding holds for
+# both.  MPS is auto-enabled here when any QUDA force path is on; override with
+# QUDA_ENABLE_MPS=0 to force off.
+QUDA_FORCE="${QUDA_FORCE:-1}"
+DTXQCD_QUDA_HYBRID="${DTXQCD_QUDA_HYBRID:-1}"
+DTXQCD_QUDA_FULL="${DTXQCD_QUDA_FULL:-}"
+_QUDA_ON=0
+[ "${QUDA_FORCE:-0}" != "0" ] && [ -n "${QUDA_FORCE}" ] && _QUDA_ON=1
+[ "${DTXQCD_QUDA_HYBRID:-0}" != "0" ] && [ -n "${DTXQCD_QUDA_HYBRID}" ] && _QUDA_ON=1
+[ "${DTXQCD_QUDA_FULL:-0}" != "0" ] && [ -n "${DTXQCD_QUDA_FULL}" ] && _QUDA_ON=1
+if [ "$_QUDA_ON" = 1 ]; then
+  QUDA_ENABLE_MPS="${QUDA_ENABLE_MPS:-1}"
+  QUDA_ENABLE_DEVICE_MEMORY_POOL="${QUDA_ENABLE_DEVICE_MEMORY_POOL:-0}"
+  QUDA_ENABLE_MANAGED_MEMORY="${QUDA_ENABLE_MANAGED_MEMORY:-1}"
+fi
+
 # ---- run control ---------------------------------------------------------
 TRAJ="${TRAJ:-2000}"                 # TARGET total (not an increment)
 N_SKIP="${N_SKIP:-10}"               # checkpoint save interval
@@ -100,6 +127,11 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       ${IMPORT_CFG:+IMPORT_CFG="$IMPORT_CFG"} \
       ${USE_FULL_PF:+USE_FULL_PF="$USE_FULL_PF"} \
       ${QUDA_FORCE:+QUDA_FORCE="$QUDA_FORCE"} \
+      ${DTXQCD_QUDA_HYBRID:+DTXQCD_QUDA_HYBRID="$DTXQCD_QUDA_HYBRID"} \
+      ${DTXQCD_QUDA_FULL:+DTXQCD_QUDA_FULL="$DTXQCD_QUDA_FULL"} \
+      ${QUDA_ENABLE_MPS:+QUDA_ENABLE_MPS="$QUDA_ENABLE_MPS"} \
+      ${QUDA_ENABLE_DEVICE_MEMORY_POOL:+QUDA_ENABLE_DEVICE_MEMORY_POOL="$QUDA_ENABLE_DEVICE_MEMORY_POOL"} \
+      ${QUDA_ENABLE_MANAGED_MEMORY:+QUDA_ENABLE_MANAGED_MEMORY="$QUDA_ENABLE_MANAGED_MEMORY"} \
       $NO_METROP_ARG \
   ./srun_gpu_wrapper.sh "$BIN" --grid "$LATT" --mpi "$MPI" \
       --shm "$SHM" --shm-mpi 1 --device-mem "$DEVICE_MEM"
