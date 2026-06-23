@@ -51,10 +51,16 @@ inline void read_gauge_any(const std::string &path, LatticeGaugeField &U) {
     typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
     NerscIO::readConfiguration<GaugeStats>(U, header, path);
   } else {
+#ifdef HAVE_LIME
     IldgReader IR;
     IR.open(path);
     IR.readConfiguration(U, header);
     IR.close();
+#else
+    std::cerr << "read_gauge_any: non-NERSC file " << path
+              << " requires LIME (not built with HAVE_LIME)" << std::endl;
+    std::abort();
+#endif
   }
 }
 
