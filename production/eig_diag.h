@@ -23,6 +23,9 @@
 #include <Grid/qcd/action/txqcd/TXQCDWilsonCloverOp.h>
 #include <Grid/Grid_Eigen_Dense.h>
 #include <Grid/Eigen/Eigenvalues>
+#include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDFermionDoubled.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
 
 namespace TXQCDProduction {
 
@@ -317,6 +320,192 @@ inline void RunEigDiagTxqcd(TXQCDWilsonCloverOp &Mop, GridBase *grid,
   EigChebFilter<TXQCDFermionNf> Filter(MdagM, p.cheby_lo, p.cheby_hi, p.cheby_ord);
   EigLanczos<TXQCDFermionNf>(Filter, MdagM, G5M, grid, pRNG, p.Nm,
                               evals_M2, evals_g5M, p.Nev);
+}
+
+// ===========================================================================
+// DTXQCD doubled-operator eigenvalue diagnostic (consumed by dtxqcd_diag.h).
+//
+// Converges the smallest few M48^dag M48 (= (gamma5.M48)^2) modes of the FULL
+// doubled operator via Chebyshev-filtered Lanczos, recovering both the M^dag M
+// eigenvalues (eig_M2 -- the RELIABLE sign-problem order parameter, since a det
+// sign flip needs lambda_min(M^dag M) -> 0) and the signed gamma5.M48
+// eigenvalues by a real Rayleigh sweep on the converged Ritz vectors.  Uses
+// ComplexD::real() (not Grid::real()) throughout so it is thrust::complex-safe
+// under GRID_CUDA -- see the nvcc-compat note in dtxqcd_diag.h.  This is the
+// converged analogue of dtxqcd_diag.h::compute_g5M_evals (plain unfiltered
+// Lanczos, which does not resolve the small modes on thermalized configs).
+// ===========================================================================
+
+template <> inline void eig_axpy_ip(DTXQCDFermionDoubled &y, const ComplexD &a,
+                                    const DTXQCDFermionDoubled &x) {
+  for (int aa = 0; aa < DtxqcdNf; ++aa) {
+    y.upper.f[aa] = y.upper.f[aa] + a * x.upper.f[aa];
+    y.lower.f[aa] = y.lower.f[aa] + a * x.lower.f[aa];
+  }
+}
+template <> inline void eig_scale_ip(DTXQCDFermionDoubled &y, const RealD &a) {
+  for (int aa = 0; aa < DtxqcdNf; ++aa) {
+    y.upper.f[aa] = a * y.upper.f[aa];
+    y.lower.f[aa] = a * y.lower.f[aa];
+  }
+}
+template <> inline void eig_copy_field(DTXQCDFermionDoubled &dst,
+                                       const DTXQCDFermionDoubled &src) {
+  dst = src;
+}
+template <> inline void eig_random_field(GridParallelRNG &rng,
+                                         DTXQCDFermionDoubled &f) {
+  for (int aa = 0; aa < DtxqcdNf; ++aa) {
+    gaussian(rng, f.upper.f[aa]);
+    gaussian(rng, f.lower.f[aa]);
+  }
+}
+template <> inline void eig_axpby_field(DTXQCDFermionDoubled &out, const RealD &a,
+                                        const RealD &b,
+                                        const DTXQCDFermionDoubled &x,
+                                        const DTXQCDFermionDoubled &y) {
+  for (int aa = 0; aa < DtxqcdNf; ++aa) {
+    out.upper.f[aa] = a * x.upper.f[aa] + b * y.upper.f[aa];
+    out.lower.f[aa] = a * x.lower.f[aa] + b * y.lower.f[aa];
+  }
+}
+
+class EigDtxqcdMdagM : public LinearFunction<DTXQCDFermionDoubled> {
+public:
+  DTXQCDWilsonCloverFermionEO &Dw_;
+  EigDtxqcdMdagM(DTXQCDWilsonCloverFermionEO &Dw) : Dw_(Dw) {}
+  void operator()(const DTXQCDFermionDoubled &in,
+                  DTXQCDFermionDoubled &out) override {
+    DTXQCDFermionDoubled tmp(in.Grid());
+    Dw_.M(const_cast<DTXQCDFermionDoubled &>(in), tmp);
+    Dw_.Mdag(tmp, out);
+  }
+};
+
+class EigDtxqcdG5M : public LinearFunction<DTXQCDFermionDoubled> {
+public:
+  DTXQCDWilsonCloverFermionEO &Dw_;
+  EigDtxqcdG5M(DTXQCDWilsonCloverFermionEO &Dw) : Dw_(Dw) {}
+  void operator()(const DTXQCDFermionDoubled &in,
+                  DTXQCDFermionDoubled &out) override {
+    DTXQCDFermionDoubled tmp(in.Grid());
+    Dw_.M(const_cast<DTXQCDFermionDoubled &>(in), tmp);
+    Gamma g5(Gamma::Algebra::Gamma5);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      out.upper.f[a] = g5 * tmp.upper.f[a];
+      out.lower.f[a] = g5 * tmp.lower.f[a];
+    }
+  }
+};
+
+// Power iteration for lambda_max(M^dag M) -- auto-scales the Chebyshev hi bound
+// (lambda_max can exceed the fixed default at small lambda, where the filter
+// would otherwise fail to suppress the top of the spectrum).
+template <class Field>
+static RealD EigPowerIterMaxEval(LinearFunction<Field> &Op,
+                                 GridParallelRNG &pRNG, GridBase *grid,
+                                 int n_iter) {
+  Field v(grid), w(grid);
+  eig_random_field(pRNG, v);
+  RealD nv = std::sqrt(norm2(v));
+  if (nv == 0.0) return 0.0;
+  eig_scale_ip(v, 1.0 / nv);
+  RealD ev = 0.0;
+  for (int it = 0; it < n_iter; ++it) {
+    Op(v, w);
+    ev = std::sqrt(norm2(w));
+    if (ev == 0.0) break;
+    eig_copy_field(v, w);
+    eig_scale_ip(v, 1.0 / ev);
+  }
+  return ev;
+}
+
+// Chebyshev-filtered Lanczos + real Rayleigh sweep.  Mirrors EigLanczos above
+// but uses ComplexD::real() (nvcc/thrust-safe) instead of Grid::real().
+template <class Field>
+static void EigDtxqcdLanczos(LinearFunction<Field> &FilterOp,
+                             LinearFunction<Field> &MdagM,
+                             LinearFunction<Field> &G5M,
+                             GridBase *grid, GridParallelRNG &rng, int Nm,
+                             std::vector<RealD> &mdagm_evals,
+                             std::vector<RealD> &g5m_evals, int Nev) {
+  std::vector<Field> V; V.reserve(Nm);
+  for (int i = 0; i < Nm; ++i) V.emplace_back(grid);
+  std::vector<RealD> alpha(Nm, 0.0), beta(Nm, 0.0);
+  Field w(grid), tmp(grid);
+  eig_random_field(rng, V[0]);
+  RealD n0 = std::sqrt(norm2(V[0]));
+  eig_scale_ip(V[0], 1.0 / n0);
+  int k_done = 0;
+  for (int k = 0; k < Nm; ++k) {
+    FilterOp(V[k], w);
+    if (k > 0) eig_axpy_ip(w, ComplexD(-beta[k - 1], 0), V[k - 1]);
+    alpha[k] = innerProduct(V[k], w).real();
+    eig_axpy_ip(w, ComplexD(-alpha[k], 0), V[k]);
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int j = 0; j <= k; ++j) {
+        ComplexD c = innerProduct(V[j], w);
+        eig_axpy_ip(w, -c, V[j]);
+      }
+    }
+    beta[k] = std::sqrt(norm2(w));
+    k_done = k + 1;
+    if (beta[k] < 1e-12) break;
+    if (k + 1 < Nm) {
+      eig_copy_field(V[k + 1], w);
+      eig_scale_ip(V[k + 1], 1.0 / beta[k]);
+    }
+  }
+  Eigen::MatrixXd T = Eigen::MatrixXd::Zero(k_done, k_done);
+  for (int i = 0; i < k_done; ++i) {
+    T(i, i) = alpha[i];
+    if (i + 1 < k_done) { T(i + 1, i) = beta[i]; T(i, i + 1) = beta[i]; }
+  }
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
+  auto evecs = es.eigenvectors();
+  int top = std::min(Nev, k_done);
+  mdagm_evals.clear(); g5m_evals.clear();
+  std::vector<std::pair<RealD, RealD>> pairs; pairs.reserve(top);
+  for (int rank = 0; rank < top; ++rank) {
+    int idx = k_done - 1 - rank;  // largest FilterOp eval = smallest M^dag M
+    Field u(grid); u = Zero();
+    for (int j = 0; j < k_done; ++j)
+      eig_axpy_ip(u, ComplexD(evecs(j, idx), 0), V[j]);
+    RealD nu = norm2(u);
+    if (nu < 1e-30) continue;
+    MdagM(u, tmp);
+    RealD ray_m2 = innerProduct(u, tmp).real() / nu;
+    G5M(u, tmp);
+    RealD ray_g5 = innerProduct(u, tmp).real() / nu;
+    pairs.emplace_back(ray_m2, ray_g5);
+  }
+  std::sort(pairs.begin(), pairs.end(),
+            [](const std::pair<RealD, RealD> &a,
+               const std::pair<RealD, RealD> &b) { return a.first < b.first; });
+  for (const auto &pr : pairs) {
+    mdagm_evals.push_back(pr.first);
+    g5m_evals.push_back(pr.second);
+  }
+}
+
+// Public entrypoint: converged smallest M48^dag M48 + signed gamma5.M48 evals
+// for the doubled DTXQCD operator (Chebyshev-Lanczos, auto-scaled hi bound).
+inline void RunEigDiagDtxqcd(DTXQCDWilsonCloverFermionEO &Dw, GridBase *grid,
+                             GridParallelRNG &pRNG, const EigDiagParams &p,
+                             std::vector<RealD> &evals_M2,
+                             std::vector<RealD> &evals_g5M) {
+  EigDtxqcdMdagM MdagM(Dw);
+  EigDtxqcdG5M   G5M(Dw);
+  RealD lmax = EigPowerIterMaxEval<DTXQCDFermionDoubled>(MdagM, pRNG, grid, 30);
+  RealD hi = std::max(p.cheby_hi, 1.2 * lmax);
+  std::cout << GridLogMessage
+            << "[eig_diag DTXQCD] lambda_max(M^dag M)_est=" << lmax
+            << "  cheby=[" << p.cheby_lo << "," << hi << "] ord=" << p.cheby_ord
+            << " Nm=" << p.Nm << std::endl;
+  EigChebFilter<DTXQCDFermionDoubled> Filter(MdagM, p.cheby_lo, hi, p.cheby_ord);
+  EigDtxqcdLanczos<DTXQCDFermionDoubled>(Filter, MdagM, G5M, grid, pRNG, p.Nm,
+                                         evals_M2, evals_g5M, p.Nev);
 }
 
 }  // namespace TXQCDProduction

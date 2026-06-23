@@ -40,6 +40,7 @@
 #include <Grid/qcd/utils/WilsonLoops.h>
 #include <Grid/serialisation/Hdf5IO.h>
 #include <Grid/Eigen/Eigenvalues>
+#include "eig_diag.h"
 
 #include <algorithm>
 #include <cmath>
@@ -304,6 +305,28 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
                 << std::noshowpos << std::endl;
     }
 
+    // Converged Chebyshev-Lanczos eig_diag (EIG_DIAG=1): the RELIABLE
+    // sign-problem order parameter min|gamma5.M48| = sqrt(min M48^dag M48), plus
+    // the converged signed gamma5.M48 spectrum.  Expensive (~Nm*ord M^dag M
+    // applies/traj), so opt-in; the cheap g5M_evals above stays always-on.
+    if (eig_diag_enabled()) {
+      EigDiagParams ep = eig_diag_params_from_env();
+      DTXQCDWilsonCloverFermionEO Dw(U.U, grid_, rbgrid_, mass_, csw_,
+                                     U.sigma, U.pi, U.d, U.n, U.s, U.p);
+      std::vector<RealD> em2, eg5;
+      RunEigDiagDtxqcd(Dw, &grid_, prng_, ep, em2, eg5);
+      eig_M2_.push_back(em2);
+      eig_g5M_.push_back(eg5);
+      RealD min_abs; int n_near;
+      eig_order_params(em2, ep.zero_eps, min_abs, n_near);
+      eig_min_abs_.push_back(min_abs);
+      eig_n_near_.push_back(n_near);
+      std::cout << GridLogMessage
+                << "[eig_diag DTXQCD] |lambda|_min(M^dag M)=" << min_abs
+                << "  n_near_zero=" << n_near
+                << "  M2[0]=" << (em2.empty() ? 0.0 : em2[0]) << std::endl;
+    }
+
     // Per-traj aux VEV summary to stdout.
     auto avg = [](const std::vector<ComplexD> &v) {
       RealD acc = 0.0;
@@ -373,6 +396,12 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     write(wr, "aux_wall_trsig",  aux_wall_trsig_);
     write(wr, "aux_wall_trpi",   aux_wall_trpi_);
     write(wr, "g5M_evals",       g5M_evals_);
+    if (!eig_M2_.empty()) {
+      write(wr, "eig_M2",          eig_M2_);
+      write(wr, "eig_g5M",         eig_g5M_);
+      write(wr, "eig_min_abs_g5M", eig_min_abs_);
+      write(wr, "eig_n_near_zero", eig_n_near_);
+    }
     std::vector<std::string> names;
     for (auto *a : actions_) names.push_back(a->action_name());
     write(wr, "action_names", names);
@@ -397,6 +426,8 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     aux_wall_s_.clear();      aux_wall_p_.clear();
     aux_wall_trsig_.clear();  aux_wall_trpi_.clear();
     g5M_evals_.clear();
+    eig_M2_.clear(); eig_g5M_.clear();
+    eig_min_abs_.clear(); eig_n_near_.clear();
   }
 
  private:
@@ -426,6 +457,12 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
       aux_wall_d_ab_,   aux_wall_n_ab_,
       aux_wall_s_, aux_wall_p_, aux_wall_trsig_, aux_wall_trpi_;
   std::vector<std::vector<RealD>> g5M_evals_;
+  // Converged Chebyshev-Lanczos eig_diag (gated by EIG_DIAG): smallest signed
+  // gamma5.M48 (eig_g5M_) and M48^dag M48 (eig_M2_) modes + the M^dag M-derived
+  // sign-problem order parameters (min|lambda|, near-zero count).
+  std::vector<std::vector<RealD>> eig_M2_, eig_g5M_;
+  std::vector<RealD> eig_min_abs_;
+  std::vector<int>   eig_n_near_;
 };
 
 }  // namespace TXQCDProduction

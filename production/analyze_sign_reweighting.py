@@ -49,6 +49,23 @@ def per_traj_sign(evals_row):
     return 1 if (n_neg & 1) == 0 else -1, n_neg, float(np.min(np.abs(arr)))
 
 
+def _get(h, name):
+    """Read `name` whether Grid stored it as an HDF5 dataset or an attribute.
+
+    Grid's Hdf5Writer writes any vector with <= HDF5_DEF_DATASET_THRES (=6)
+    elements as a *group attribute*, larger ones as a dataset.  So the per-traj
+    scalar series (`traj`, `plaq`, the aux norms, `vev_trminv`) land in
+    `h.attrs` whenever the diagnostics flush interval is <= 6, while the 2-D
+    series (`g5M_evals`, `force_*`, `aux_*`) always exceed the threshold and
+    are datasets.  This reads either form so the analysis works regardless of
+    the flush interval.  Returns None if the key is absent in both."""
+    if name in h:
+        return h[name][...]
+    if name in h.attrs:
+        return np.asarray(h.attrs[name])
+    return None
+
+
 def load_diagnostics(ensemble_dir):
     """Concatenate all hmc_diagnostics.*.h5 in `ensemble_dir` in traj
     order. Returns dict of arrays keyed by traj."""
@@ -61,12 +78,15 @@ def load_diagnostics(ensemble_dir):
     rows = []
     for f in files:
         with h5py.File(f, "r") as h:
-            if "g5M_evals" not in h:
-                print(f"  {os.path.basename(f)}: no g5M_evals key, skipping")
+            evals = _get(h, "g5M_evals")  # (Ntraj, K)
+            if evals is None:
+                print(f"  {os.path.basename(f)}: no g5M_evals, skipping")
                 continue
-            trajs = h["traj"][...]
-            evals = h["g5M_evals"][...]  # (Ntraj, K)
-            plaq = h["plaq"][...]
+            trajs = _get(h, "traj")
+            plaq = _get(h, "plaq")
+            if trajs is None or plaq is None:
+                print(f"  {os.path.basename(f)}: missing traj/plaq, skipping")
+                continue
             for i, t in enumerate(trajs):
                 rows.append((int(t), evals[i], float(plaq[i])))
     rows.sort(key=lambda r: r[0])
