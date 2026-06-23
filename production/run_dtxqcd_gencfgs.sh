@@ -58,7 +58,11 @@ DTXQCD_LOGDET_S_GPU="${DTXQCD_LOGDET_S_GPU:-1}"
 DTXQCD_LOGDET_GPU="${DTXQCD_LOGDET_GPU:-1}"
 DTXQCD_MOOEEINV_CUBLAS="${DTXQCD_MOOEEINV_CUBLAS:-1}"
 DTXQCD_MOOEE_CUBLAS="${DTXQCD_MOOEE_CUBLAS:-1}"
+DTXQCD_MOOEE_FWDCACHE="${DTXQCD_MOOEE_FWDCACHE:-1}"
 DTXQCD_RATFORCE_GPU="${DTXQCD_RATFORCE_GPU:-1}"
+# Mixed-precision multishift CG for the light rational PF (validated 2026-06-23,
+# dH bit-equivalent at cfg.10000 lam=10; per-traj ~17% faster on top of fwdcache).
+DTXQCD_MP_CG="${DTXQCD_MP_CG:-1}"
 
 # ---- QUDA fermion-force acceleration (default ON; validated multi-rank) ----
 # Set QUDA_FORCE=0 / DTXQCD_QUDA_HYBRID=0 to fall back to the cuBLAS force path
@@ -108,7 +112,7 @@ echo "=== run_dtxqcd_gencfgs  $(date) ==="
 echo "  lattice=$LATT  mpi=$MPI ($NTASKS ranks)  lambda=$LAMBDA_DTXQCD  m=$MASS_LIGHT_DTXQCD  csw=$CSW"
 echo "  integrator=$INTEGRATOR MDS=$MDSTEPS trajL=$TRAJL  (gauge x$GAUGE_MULT, aux x$AUX_MULT)"
 echo "  stout=$STOUT_NSMEAR(rho $STOUT_RHO)  AUX_INIT_AUTO=$AUX_INIT_AUTO  RAT_AUTO_HI=$RAT_AUTO_HI"
-echo "  GPU: precompute=$DTXQCD_PRECOMPUTE_GPU logdetS=$DTXQCD_LOGDET_S_GPU logdet=$DTXQCD_LOGDET_GPU mooeeinv=$DTXQCD_MOOEEINV_CUBLAS mooee=$DTXQCD_MOOEE_CUBLAS ratforce=$DTXQCD_RATFORCE_GPU"
+echo "  GPU: precompute=$DTXQCD_PRECOMPUTE_GPU logdetS=$DTXQCD_LOGDET_S_GPU logdet=$DTXQCD_LOGDET_GPU mooeeinv=$DTXQCD_MOOEEINV_CUBLAS mooee=$DTXQCD_MOOEE_CUBLAS mooee_fwdcache=$DTXQCD_MOOEE_FWDCACHE ratforce=$DTXQCD_RATFORCE_GPU mp_cg=$DTXQCD_MP_CG"
 echo "  TRAJ(target)=$TRAJ  N_SKIP=$N_SKIP  CG_TOL=$CG_TOL  suffix='${DTXQCD_SUFFIX}'  import='${IMPORT_CFG:-<resume-or-weakfield>}'  ${NO_METROP_ARG:+$NO_METROP_ARG}"
 
 srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS" \
@@ -121,6 +125,8 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       DTXQCD_PRECOMPUTE_GPU="$DTXQCD_PRECOMPUTE_GPU" DTXQCD_LOGDET_S_GPU="$DTXQCD_LOGDET_S_GPU" \
       DTXQCD_LOGDET_GPU="$DTXQCD_LOGDET_GPU" DTXQCD_MOOEEINV_CUBLAS="$DTXQCD_MOOEEINV_CUBLAS" \
       DTXQCD_MOOEE_CUBLAS="$DTXQCD_MOOEE_CUBLAS" \
+      DTXQCD_MOOEE_FWDCACHE="$DTXQCD_MOOEE_FWDCACHE" \
+      DTXQCD_MP_CG="$DTXQCD_MP_CG" \
       DTXQCD_RATFORCE_GPU="$DTXQCD_RATFORCE_GPU" \
       INTEGRATOR="$INTEGRATOR" MDSTEPS="$MDSTEPS" TRAJL="$TRAJL" \
       GAUGE_MULT="$GAUGE_MULT" AUX_MULT="$AUX_MULT" \
