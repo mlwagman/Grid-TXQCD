@@ -44,6 +44,9 @@
 #include <Grid/qcd/action/fermion/WilsonCloverFermion.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalAction.h>
 #include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverRationalActionMP.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/qcd/action/pseudofermion/OneFlavourSchurCloverQudaForceRationalActionMP.h>
+#endif
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
 
@@ -470,7 +473,12 @@ int main(int argc, char **argv) {
   std::unique_ptr<WCFstrangeF>            StrangeFermOpF;
   std::unique_ptr<QCDLogDetCloverEOAction<WilsonImplR>>             StrangeLogDet;
   std::unique_ptr<OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>
-      StrangeSchur;
+      StrangeSchurMP;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>>
+      StrangeSchurQuda;
+#endif
+  Action<LatticeGaugeField> *StrangeSchurInner = nullptr;  // -> MP or QUDA-force
   std::unique_ptr<DTXQCDQCDActionAdapter>                           StrangeLogDetAd;
   std::unique_ptr<DTXQCDQCDActionAdapter>                           StrangeSchurAd;
   if (add_strange) {
@@ -496,14 +504,42 @@ int main(int argc, char **argv) {
         WilsonAnisotropyCoefficients(), strange_impl_p);
     StrangeLogDet  = std::make_unique<QCDLogDetCloverEOAction<WilsonImplR>>(
         *StrangeFermOp, /*nf=*/1);
-    StrangeSchur   = std::make_unique<
-        OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>(
-        *StrangeFermOp, *StrangeFermOpF, StrangeRBGridF.get(), strange_rat, 50);
+    // Schur det(Mpc^dag Mpc)^{1/2}.  QUDA_FORCE=1 swaps the per-pole Grid force
+    // chain for the fused GPU computeCloverForceQuda kernel (even-parity Schur;
+    // det(Mpc_ee)=det(Mpc_oo) by the Schur identity, so the det(Mee) LogDet
+    // companion is correct for both).  Default = Grid MP path.
+    bool strange_quda = false;
+#ifdef GRID_HAVE_QUDA
+    if (const char *qf = std::getenv("QUDA_FORCE"); qf && std::atoi(qf) != 0) {
+      strange_quda = true;
+      QudaCloverParams qp;
+      qp.mass            = mass_strange;
+      qp.csw             = csw_;
+      qp.anti_periodic_t = true;
+      qp.tol             = tol;
+      qp.max_iter        = cgmax;
+      qp.gamma_basis     = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+      StrangeSchurQuda = std::make_unique<
+          OneFlavourSchurCloverQudaForceRationalActionMP<WilsonImplR, WilsonImplF>>(
+          *StrangeFermOp, *StrangeFermOpF, StrangeRBGridF.get(), strange_rat, qp, 50);
+      StrangeSchurInner = StrangeSchurQuda.get();
+      std::cout << GridLogMessage
+                << "[DTXQCD] strange Nf=1: QUDA_FORCE active (fused GPU clover "
+                   "force kernel)" << std::endl;
+    }
+#endif
+    if (!strange_quda) {
+      StrangeSchurMP = std::make_unique<
+          OneFlavourSchurCloverRationalActionMP<WilsonImplR, WilsonImplF>>(
+          *StrangeFermOp, *StrangeFermOpF, StrangeRBGridF.get(), strange_rat, 50);
+      StrangeSchurInner = StrangeSchurMP.get();
+    }
     StrangeLogDetAd = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeLogDet);
-    StrangeSchurAd  = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeSchur);
+    StrangeSchurAd  = std::make_unique<DTXQCDQCDActionAdapter>(*StrangeSchurInner);
     std::cout << GridLogMessage
-              << "[DTXQCD] Nf=2+1: spectator strange ADDED (MP double+single, "
-                 "mass_strange=" << mass_strange << " csw=" << csw_ << " rat["
+              << "[DTXQCD] Nf=2+1: spectator strange ADDED ("
+              << (strange_quda ? "QUDA-force" : "MP double+single")
+              << ", mass_strange=" << mass_strange << " csw=" << csw_ << " rat["
               << strange_rat.lo << "," << strange_rat.hi << "] deg="
               << strange_rat.degree << ")" << std::endl;
   } else {
