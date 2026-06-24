@@ -59,7 +59,8 @@ static void PerturbAux(const DTXQCDField &U, const DTXQCDField &Y, RealD scale,
 
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
-  Coordinate latt(std::vector<int>{4, 4, 4, 4});
+  Coordinate latt = GridDefaultLatt();              // honor --grid (e.g. 16.16.16.48)
+  if (latt.size() == 0) latt = Coordinate(std::vector<int>{4, 4, 4, 4});
   Coordinate simd = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi  = GridDefaultMpi();
   GridCartesian         Grid(latt, simd, mpi);
@@ -116,6 +117,16 @@ int main(int argc, char **argv) {
     DtxqcdComplexSymmetricCFGaussian(pRNG, U.n);
     DtxqcdComplexSymmetricCFGaussian(pRNG, Y.d);
     DtxqcdComplexSymmetricCFGaussian(pRNG, Y.n);
+  }
+
+  // AUX_SCALE: shrink the (variance-1) aux toward the production fluctuation
+  // (~1/lambda).  Large random aux makes M_ee near-singular at large volume,
+  // which inflates the aux-force FD; AUX_SCALE<1 isolates a real force-formula
+  // bug from that conditioning artifact.
+  if (const char *v = std::getenv("AUX_SCALE"); v && *v) {
+    RealD as = std::atof(v);
+    U.sigma = as * U.sigma; U.pi = as * U.pi; U.d = as * U.d;
+    U.n = as * U.n;         U.s = as * U.s;   U.p = as * U.p;
   }
 
   const RealD mass = 0.4;
