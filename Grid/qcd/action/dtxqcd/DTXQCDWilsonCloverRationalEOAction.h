@@ -308,48 +308,13 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     us_hop += usecond();
 
     // ---- Gauge clover force via Cmunu chain rule (csw != 0 only) ----
+    // Virtual hook: the QUDA-primitive subclass overrides this to batch every
+    // (block, flavor, pole) rhs into one computeCloverSigmaForceWithSchurFields
+    // call per doubled block (DTXQCD_QUDA_FULL=1 path).  Default = the Cmunu
+    // chain on the already-accumulated clover_sigma_full[] (csw != 0 only).
     us_clov -= usecond();
-    if (csw_ != 0.0) {
-      typedef WilsonImplR Impl;
-      std::vector<LatticeColourMatrix> Ulinks;
-      Ulinks.reserve(Nd);
-      for (int mu = 0; mu < Nd; ++mu) {
-        LatticeColourMatrix Umu(&grid_);
-        Umu = PeekIndex<LorentzIndex>(U.U, mu);
-        Ulinks.push_back(std::move(Umu));
-      }
-
-      LatticeGaugeField clover_force(&grid_);
-      clover_force = Zero();
-
-      for (int mu = 0; mu < Nd; ++mu) {
-        LatticeColourMatrix force_mu(&grid_);
-        force_mu = Zero();
-        for (int nu = 0; nu < Nd; ++nu) {
-          if (mu == nu) continue;
-          int m = std::min(mu, nu);
-          int n = std::max(mu, nu);
-          int mn = 0;
-          {
-            int idx = 0;
-            for (int mm = 0; mm < Nd; ++mm)
-              for (int nn = mm + 1; nn < Nd; ++nn) {
-                if (mm == m && nn == n) mn = idx;
-                ++idx;
-              }
-          }
-          RealD sign = (mu < nu) ? 1.0 : -1.0;
-          force_mu += (0.25 * sign) *
-              WilsonCloverHelpers<Impl>::Cmunu(Ulinks, clover_sigma_full[mn],
-                                               mu, nu);
-        }
-        pokeLorentz(clover_force, Ulinks[mu] * force_mu, mu);
-      }
-      // Cmunu output is Convention B; multiply by -1/2 to get the integrator's
-      // Convention A (mirrors LogDet).  ACCUMULATE (+=) into dSdU.U so the
-      // hopping gauge force (already added per pole) is preserved.
-      dSdU.U = dSdU.U + ComplexD(-0.5, 0.0) * clover_force;
-    }
+    AccumulateGaugeCloverForce(U, Xk, Yk, Wek, Zek, Dw,
+                                clover_sigma_full, dSdU);
     us_clov += usecond();
     t_force.Stop();
     std::cout << GridLogMessage << "[" << action_name()
@@ -462,6 +427,68 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
       const RealD ak = PowerNegQuarter.residues[k];
       AccumulateHoppingForce(Xk[k], Yk[k], Wek[k], Zek[k], ak, Dw, dSdU);
     }
+  }
+
+  // Gauge clover-sigma force (csw != 0 only).  Virtual so the QUDA-primitive
+  // subclass can replace the Cmunu chain with a batched
+  // computeCloverSigmaForceWithSchurFields call (DTXQCD_QUDA_FULL=1 path).
+  //
+  // Default impl = the original deriv() inline Cmunu loop:
+  //   For each μ:  Σ_{ν≠μ}  0.25·sign(μ,ν)·Cmunu(U, CS[mn(μ,ν)], μ, ν)
+  //   pokeLorentz(F, U_μ · force_μ, μ)
+  //   dSdU.U += -0.5 · F   (Convention-A correction)
+  //
+  // (Xk, Yk, Wek, Zek) carry the Schur-completed Nf fermion blocks for every
+  // pole — unused in the default impl but required by overrides that bypass
+  // clover_sigma_full and pack directly into QUDA.
+  virtual void AccumulateGaugeCloverForce(
+      const DTXQCDField &U,
+      const std::vector<DTXQCDFermionDoubled> &Xk,
+      const std::vector<DTXQCDFermionDoubled> &Yk,
+      const std::vector<DTXQCDFermionDoubled> &Wek,
+      const std::vector<DTXQCDFermionDoubled> &Zek,
+      DTXQCDWilsonCloverFermionEO &Dw,
+      std::vector<LatticeColourMatrix> &clover_sigma_full,
+      DTXQCDField &dSdU) {
+    (void)Xk; (void)Yk; (void)Wek; (void)Zek; (void)Dw;
+    if (csw_ == 0.0) return;
+    typedef WilsonImplR Impl;
+    std::vector<LatticeColourMatrix> Ulinks;
+    Ulinks.reserve(Nd);
+    for (int mu = 0; mu < Nd; ++mu) {
+      LatticeColourMatrix Umu(&grid_);
+      Umu = PeekIndex<LorentzIndex>(U.U, mu);
+      Ulinks.push_back(std::move(Umu));
+    }
+    LatticeGaugeField clover_force(&grid_);
+    clover_force = Zero();
+    for (int mu = 0; mu < Nd; ++mu) {
+      LatticeColourMatrix force_mu(&grid_);
+      force_mu = Zero();
+      for (int nu = 0; nu < Nd; ++nu) {
+        if (mu == nu) continue;
+        int m = std::min(mu, nu);
+        int n = std::max(mu, nu);
+        int mn = 0;
+        {
+          int idx = 0;
+          for (int mm = 0; mm < Nd; ++mm)
+            for (int nn = mm + 1; nn < Nd; ++nn) {
+              if (mm == m && nn == n) mn = idx;
+              ++idx;
+            }
+        }
+        RealD sign = (mu < nu) ? 1.0 : -1.0;
+        force_mu += (0.25 * sign) *
+            WilsonCloverHelpers<Impl>::Cmunu(Ulinks, clover_sigma_full[mn],
+                                             mu, nu);
+      }
+      pokeLorentz(clover_force, Ulinks[mu] * force_mu, mu);
+    }
+    // Cmunu output is Convention B; multiply by -1/2 to get the integrator's
+    // Convention A (mirrors LogDet).  ACCUMULATE (+=) into dSdU.U so the
+    // hopping gauge force (already added per pole) is preserved.
+    dSdU.U = dSdU.U + ComplexD(-0.5, 0.0) * clover_force;
   }
 
   // Per-pole hopping gauge force, accumulated directly into dSdU.U.

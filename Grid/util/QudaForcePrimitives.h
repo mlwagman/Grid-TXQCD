@@ -493,6 +493,134 @@ inline void computeCloverSigmaForceWithSchurFields(
 }
 
 // ----------------------------------------------------------------------------
+// computeCloverSigmaOprodWithSchurFields  (Phase H.1 candidate-(c) variant C-b)
+// ----------------------------------------------------------------------------
+// Same Schur-input contract as computeCloverSigmaForceWithSchurFields but
+// STOPS after computeCloverSigmaOprod — does NOT call cloverDerivative or
+// updateMomentum.  Returns the raw σ-Oprod tensor (6 ColourMatrix per site,
+// indexed by μν lex with μ<ν) as a host buffer, which the caller folds via
+// Grid's Cmunu chain (preserves per-block CS asymmetry that QUDA's internal
+// Cmunu would lock in).  Cost vs the force sibling: skips cloverDerivative
+// kernel + updateMomentum, adds a D2H of oprod_size = 6·V·18·8 bytes.
+//
+// Caller supplies the output buffer h_oprod, sized V·6·18 doubles in MILC
+// EO order (parity_major, then mn=0..5, then 18 doubles per ColourMatrix).
+// Subsequent EO→lex permute and pokeSite into LatticeColourMatrix happens
+// in the DTXQCD primitive — kept here as raw-buffer interface to mirror the
+// existing wrappers' style.
+inline void computeCloverSigmaOprodWithSchurFields(
+    double *h_oprod,                       // OUT: V·6·18 doubles, MILC EO order
+    void **h_x_par, void **h_p_par,
+    void **h_x_other, void **h_p_other,
+    int nvector,
+    const std::vector<double> &coeff,
+    double ck, double dt,
+    double sigma_trace_coeff,
+    QudaGaugeParam *gauge_param,
+    QudaInvertParam *inv_param)
+{
+  using namespace ::quda;
+  if (!::gaugePrecise) errorQuda("No resident gauge field");
+  if (!::cloverPrecise) errorQuda("No resident clover field");
+  if (inv_param->matpc_type != QUDA_MATPC_EVEN_EVEN_ASYMMETRIC &&
+      inv_param->matpc_type != QUDA_MATPC_ODD_ODD_ASYMMETRIC) {
+    errorQuda("MatPC type %d not supported", inv_param->matpc_type);
+  }
+
+  // Build a CPU-side TENSOR_GEOMETRY GaugeField pointing at the user buffer.
+  // We use a dummy gauge param with the right dimensions (taken from gauge_param)
+  // and link_type=GENERAL, reconstruct=NO, geometry=TENSOR (mirroring the
+  // device oprod setup below).
+  // GaugeFieldParam picks up gauge_order from gauge_param via this constructor.
+  GaugeFieldParam cpuOprodParam(*gauge_param, /*h_gauge=*/h_oprod,
+                                 QUDA_GENERAL_LINKS);
+  cpuOprodParam.location    = QUDA_CPU_FIELD_LOCATION;
+  cpuOprodParam.geometry    = QUDA_TENSOR_GEOMETRY;
+  cpuOprodParam.reconstruct = QUDA_RECONSTRUCT_NO;
+  cpuOprodParam.create      = QUDA_REFERENCE_FIELD_CREATE;
+  cpuOprodParam.field       = nullptr;
+  cpuOprodParam.setPrecision(QUDA_DOUBLE_PRECISION, false);
+  GaugeField cpuOprod(cpuOprodParam);
+
+  // Device oprod accumulator (TENSOR_GEOMETRY, RECONSTRUCT_NO).
+  GaugeFieldParam devOprodParam(cpuOprodParam);
+  devOprodParam.location = QUDA_CUDA_FIELD_LOCATION;
+  devOprodParam.create   = QUDA_ZERO_FIELD_CREATE;
+  devOprodParam.field    = &cpuOprod;
+  devOprodParam.setPrecision(gauge_param->cuda_prec, true);
+  GaugeField oprod(devOprodParam);
+
+  // Fermion params — copy of the force-sibling setup.
+  GaugeFieldParam fParam_for_dim(*gauge_param, /*h_gauge=*/nullptr,
+                                  QUDA_GENERAL_LINKS);
+  ColorSpinorParam qParam(nullptr, *inv_param, fParam_for_dim.x, false,
+                          QUDA_CUDA_FIELD_LOCATION);
+  qParam.setPrecision(devOprodParam.Precision(), devOprodParam.Precision(), true);
+  qParam.create     = QUDA_NULL_FIELD_CREATE;
+  qParam.gammaBasis = QUDA_UKQCD_GAMMA_BASIS;
+
+  std::vector<ColorSpinorField> x(nvector), p(nvector);
+  std::vector<array<double, 2>>  ferm_epsilon(nvector);
+
+  QudaParity parity =
+      inv_param->matpc_type == QUDA_MATPC_EVEN_EVEN_ASYMMETRIC
+          ? QUDA_EVEN_PARITY
+          : QUDA_ODD_PARITY;
+  QudaParity other_parity = static_cast<QudaParity>(1 - parity);
+
+  for (int i = 0; i < nvector; i++) {
+    x[i] = ColorSpinorField(qParam);
+    p[i] = ColorSpinorField(qParam);
+    {
+      ColorSpinorParam cp(h_x_par[i], *inv_param, fParam_for_dim.x,
+                          /*pc=*/true, inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][parity] = cf;
+    }
+    {
+      ColorSpinorParam cp(h_x_other[i], *inv_param, fParam_for_dim.x,
+                          /*pc=*/true, inv_param->input_location);
+      ColorSpinorField cf(cp);
+      x[i][other_parity] = cf;
+    }
+    {
+      ColorSpinorParam cp(h_p_par[i], *inv_param, fParam_for_dim.x,
+                          /*pc=*/true, inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][parity] = cf;
+    }
+    {
+      ColorSpinorParam cp(h_p_other[i], *inv_param, fParam_for_dim.x,
+                          /*pc=*/true, inv_param->input_location);
+      ColorSpinorField cf(cp);
+      p[i][other_parity] = cf;
+    }
+    // Same ferm_epsilon as the force sibling — uniform on both parities since
+    // Schur-completed off-parity fields already include κ scaling from the
+    // Wilson hop.
+    ferm_epsilon[i] = {2.0 * ck * coeff[i] * dt,
+                        2.0 * ck * coeff[i] * dt};
+  }
+
+  vector_ref<const ColorSpinorField> x_const(x);
+  vector_ref<const ColorSpinorField> p_const(p);
+
+  if (sigma_trace_coeff != 0.0) {
+    computeCloverSigmaTrace(oprod, *::cloverPrecise, sigma_trace_coeff,
+                            other_parity);
+  }
+
+  computeCloverSigmaOprod(oprod,
+                          inv_param->dagger == QUDA_DAG_YES ? p_const : x_const,
+                          inv_param->dagger == QUDA_DAG_YES ? x_const : p_const,
+                          ferm_epsilon);
+
+  // D2H: copy oprod into the user buffer.  Caller permutes EO→lex and
+  // pokeSite into LatticeColourMatrix[6].
+  cpuOprod.copy(oprod);
+}
+
+// ----------------------------------------------------------------------------
 // computeCloverWilsonForceWithSchurFields
 // ----------------------------------------------------------------------------
 // Wilson-hop-only force routine: same input contract as the σ-piece sibling
