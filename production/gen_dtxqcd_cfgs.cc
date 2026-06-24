@@ -37,6 +37,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSmearedConfiguration.h>
 #include <Grid/qcd/action/gauge/WilsonGaugeAction.h>
+#include <Grid/qcd/action/gauge/PlaqPlusRectangleAction.h>
 // Strange quark (Nf=1, ADD_STRANGE=1): plain Wilson-clover QCD action wrapped
 // into the composite field via DTXQCDQCDActionAdapter, exactly as TXQCD's
 // Nf=2+1 generator.  The chroma reference plaq is Nf=2+1, so a fair plaq/VEV
@@ -395,7 +396,15 @@ int main(int argc, char **argv) {
   }
 
   // ---- actions ----
-  DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_);
+  // Chroma's cl3_16_48_b6p1 uses LW_TREE_GAUGEACT (tree-level Symanzik:
+  // c0=beta, c1=-beta/(20*u0^2)), NOT the Wilson plaquette action.  TXQCD and
+  // gen_qcd both match this; DTXQCD previously used WilsonGaugeAction, which has
+  // a DIFFERENT equilibrium plaquette at beta=6.1 -> the gauge collapsed
+  // 0.5133->0.42 even with a verified-correct fermion action (frozen-aux
+  // confirmed: aux-independent, small dH, fermion det = Nf=2 exact).  Match
+  // chroma's gauge action so the QCD equilibrium is reproduced.
+  DTXQCDGaugeActionAdapter<PlaqPlusRectangleAction<PeriodicGimplR>>
+      GaugeAction(beta_, -beta_ / (20.0 * u0 * u0));
   DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lam);
   DTXQCDLogDetCloverEOAction                   LogDet(Grid, RBGrid, mass, csw_);
 
@@ -637,7 +646,9 @@ int main(int argc, char **argv) {
     Smear.set_Field(U);
     PFAction.is_smeared    = true;
     if (!use_full_pf) LogDet.is_smeared = true;  // LogDet inactive in FULL branch
-    GaugeAction.is_smeared = true;
+    GaugeAction.is_smeared = false;  // chroma's LW_TREE acts on THIN links
+                                     // (stout wraps only the fermion); matches
+                                     // TXQCD/gen_qcd (is_smeared=false)
     if (add_strange) {                            // strange acts on smeared gauge
       StrangeLogDetAd->is_smeared = true;
       StrangeSchurAd->is_smeared  = true;
