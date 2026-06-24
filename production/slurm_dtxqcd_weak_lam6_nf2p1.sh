@@ -24,7 +24,13 @@
 # NO_METROP=100 force-accepts the thermalization burn-in (matches the TXQCD
 # weak-field head); compare per-traj plaq + scalar (sigma/s) VEV trends over the
 # early trajectories.  Driver count: traj_to_run = TRAJ - NO_METROP - start.
-# Output -> cfgs/dtxqcd_lam6.0000_weak_nf2p1/
+# 2026-06-24: AUX_FLUCT_LAMBDA now defaults to lambda (was hardwired to 10), so
+# the aux init is drawn at the CORRECT equilibrium variance 1/lambda^2 per
+# component.  The old _weak_nf2p1 stream started ~1.7x too narrow at lambda=6
+# (drawn at 1/10 instead of 1/6) -> large far-from-equilibrium relaxation
+# (systematic negative dH + growing aux norm).  Fresh _fi suffix forces a clean
+# fixed-init restart (a resume would skip init and keep the wrong start).
+# Output -> cfgs/dtxqcd_lam6.0000_weak_nf2p1_fi/
 #   submit:  sbatch production/slurm_dtxqcd_weak_lam6_nf2p1.sh
 # ============================================================================
 mkdir -p /lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs
@@ -35,9 +41,9 @@ nvidia-smi --query-gpu=index,name --format=csv,noheader
 LAMBDA_DTXQCD=6.0 \
 ADD_STRANGE=1 \
 MASS_STRANGE=-0.245 \
-DTXQCD_SUFFIX="_weak_nf2p1" \
+DTXQCD_SUFFIX="_weak_nf2p1_fi" \
 TRAJ=200 \
-NO_METROP=100 \
+NO_METROP=10 \
 N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 

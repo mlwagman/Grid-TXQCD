@@ -56,7 +56,7 @@ using namespace TXQCDProduction;
 // Fresh-start DTXQCD field initialisation, ported from
 // Test_dtxqcd_2pt_gencfgs.cc (csw-parametrized for production):
 //   - weak-field gauge (GenerateWeakFieldGauge, wf=0.1),
-//   - aux drawn at AUX_FLUCT_LAMBDA width (default 10) + a saddle shift Σ,
+//   - aux drawn at AUX_FLUCT_LAMBDA width (default = lambda) + a saddle shift Σ,
 //   - AUX_INIT=value  → Σ fixed explicitly,
 //   - AUX_INIT_AUTO=1 → self-consistent saddle by bisection on
 //                       g(Σ)=Σ−Σ_DTXQCD(Σ) (avoids the slow singlet
@@ -74,10 +74,15 @@ static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
   sRNG.SeedFixedIntegers({1, 2, 3, 4, 5});
   pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
 
-  // Fluctuation width for FillAuxFields, decoupled from the physical lambda
-  // (FLUCT=10 keeps the doubled M well-conditioned on the cold gauge).
-  if (std::getenv("AUX_FLUCT_LAMBDA") == nullptr)
-    setenv("AUX_FLUCT_LAMBDA", "10.0", 0);
+  // Aux init fluctuation width tracks the physical lambda by default, so a
+  // fresh start is drawn at the equilibrium variance 1/lambda^2 per component
+  // (FillAuxFields uses lambda_var = lambda when AUX_FLUCT_LAMBDA is unset).
+  // Starting at the right variance avoids a large far-from-equilibrium
+  // relaxation (systematic negative dH + growing aux norm).  AUX_FLUCT_LAMBDA
+  // can still be set to OVERRIDE the width (escape hatch for the spike-zone
+  // lambda~0.5-2, where wide aux can near-singularize M_ee on a cold gauge).
+  // Previously this hardwired AUX_FLUCT_LAMBDA=10, making every lambda != 10
+  // start far too narrow (the small-lambda "slow thermalization").
 
   RealD Sigma_init = 0.0;
   bool sigma_auto = false;
@@ -133,7 +138,12 @@ static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
   if (sigma_auto) {
     auto measure_sigma_dtxqcd = [&](RealD Sigma_at) -> RealD {
       pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
-      DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_at);
+      // MEAN-ONLY aux for the saddle solve: the self-consistent condensate is a
+      // mean-field quantity, and full-variance fluctuations (width 1/lambda)
+      // drive M48 near-singular at small lambda -> Tr M^-1 CG stalls.  Picard-0
+      // (Sigma_at=0) is then cold = well-conditioned Wilson-clover.
+      DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_at,
+                                         /*with_fluct=*/false);
       DTXQCDWilsonCloverFermionEO Dw_dtxqcd(U.U, Grid_, RBGrid_, mass, csw,
                                             U.sigma, U.pi, U.d, U.n, U.s, U.p);
       const RealD V = (RealD)Grid_.gSites();
@@ -473,8 +483,20 @@ int main(int argc, char **argv) {
   WilsonImplParams strange_impl_p;
   strange_impl_p.boundary_phases.resize(Nd, 1.0);
   strange_impl_p.boundary_phases[Nd - 1] = -1.0;   // APBC time (chroma)
-  OneFlavourRationalParams strange_rat(1.0e-4, 100.0, cgmax, tol, 20, 64,
-                                       100, 1e-6, 1e-4);
+  // Strange (Nf=1) rational degree is independently settable from the light
+  // (RHMC_DEG): RHMC_DEG_STRANGE, default 12.  The strange is plain QCD (no aux),
+  // so its Mpc spectrum is QCD-like and degree 12 suffices -- degree 20 was
+  // overkill (deg 12 already covers the light at large lambda, aux~0 ~ QCD).
+  // NB: lo=1e-4 is a conservative ~6-decade bound; if degree 12 under-resolves
+  // it (PFE failure or large rational error -> dH), tighten lo toward the
+  // measured strange spectrum or bump RHMC_DEG_STRANGE.
+  const int strange_deg =
+      TXQCDProduction::detail::env_int("RHMC_DEG_STRANGE", 12);
+  OneFlavourRationalParams strange_rat(1.0e-4, 100.0, cgmax, tol, strange_deg,
+                                       64, 100, 1e-6, 1e-4);
+  std::cout << GridLogMessage << "Strange rational: lo=" << strange_rat.lo
+            << " hi=" << strange_rat.hi << " degree=" << strange_rat.degree
+            << std::endl;
   std::unique_ptr<GridCartesian>          StrangeGridF;
   std::unique_ptr<GridRedBlackCartesian>  StrangeRBGridF;
   std::unique_ptr<LatticeGaugeFieldF>     StrangeUmuF;
@@ -562,15 +584,24 @@ int main(int argc, char **argv) {
   //      aux a 4x multiplier mirroring the TXQCD production hierarchy.  In the
   //      FULL branch L1 holds only the rational PF (no separate LogDet).
   typedef Representations<EmptyRep<DTXQCDField>> Reps;
+  // LOGDET_AT_GAUGE=1: integrate the LogDet at the gauge sub-level (xGAUGE_MULT
+  // finer) instead of the coarse fermion level L1.  The LogDet force ~
+  // Tr(M_ee^-1 dM_ee) spikes at near-singular M_ee (large aux at small lambda,
+  // e.g. lambda=1 <s>*~6.4 gave Fdt spikes 9.3@MDS=10, 3.5@MDS=40), and it is
+  // cheap (per-site, no CG), so refining it tames those spikes for little cost
+  // while the expensive rational PF stays coarse.  Default 0 = unchanged.
+  const bool logdet_at_gauge =
+      !use_full_pf && TXQCDProduction::detail::env_int("LOGDET_AT_GAUGE", 0) != 0;
   ActionLevel<DTXQCDField, Reps> L1(1);
   L1.push_back(&PFAction);
-  if (!use_full_pf) L1.push_back(&LogDet);
+  if (!use_full_pf && !logdet_at_gauge) L1.push_back(&LogDet);
   if (add_strange) {
     L1.push_back(StrangeLogDetAd.get());   // QCD det(Mee) -- no aux dependence
     L1.push_back(StrangeSchurAd.get());    // QCD det(Mpc) -- no aux dependence
   }
   ActionLevel<DTXQCDField, Reps> L2(TXQCDProduction::detail::env_int("GAUGE_MULT", 2));
   L2.push_back(&GaugeAction);
+  if (logdet_at_gauge) L2.push_back(&LogDet);  // refined LogDet (xGAUGE_MULT), see above
   ActionLevel<DTXQCDField, Reps> L3(TXQCDProduction::detail::env_int("AUX_MULT",  4));
   L3.push_back(&AuxAction);
   ActionSet<DTXQCDField, Reps> Aset;

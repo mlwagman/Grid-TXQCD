@@ -50,6 +50,10 @@ AUX_MULT="${AUX_MULT:-1}"
 
 # ---- saddle init + rational autoscale (the "fancy init") -----------------
 AUX_INIT_AUTO="${AUX_INIT_AUTO:-1}"
+# AUX_INIT=<Sigma> gives an explicit saddle and SKIPS the EO-based auto-solve
+# (takes precedence over AUX_INIT_AUTO).  Needed at small lambda where the
+# now-correct (larger) init aux makes the EO saddle solve near-singular / stall.
+AUX_INIT="${AUX_INIT:-}"
 RAT_AUTO_HI="${RAT_AUTO_HI:-1}"
 
 # ---- GPU acceleration (cuBLAS batched 48x48; all default ON under CUDA) ---
@@ -129,6 +133,7 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       STOUT_NSMEAR="$STOUT_NSMEAR" STOUT_RHO="$STOUT_RHO" \
       ADD_STRANGE="$ADD_STRANGE" MASS_STRANGE="$MASS_STRANGE" \
       AUX_INIT_AUTO="$AUX_INIT_AUTO" RAT_AUTO_HI="$RAT_AUTO_HI" \
+      ${AUX_INIT:+AUX_INIT="$AUX_INIT"} \
       DTXQCD_PRECOMPUTE_GPU="$DTXQCD_PRECOMPUTE_GPU" DTXQCD_LOGDET_S_GPU="$DTXQCD_LOGDET_S_GPU" \
       DTXQCD_LOGDET_GPU="$DTXQCD_LOGDET_GPU" DTXQCD_MOOEEINV_CUBLAS="$DTXQCD_MOOEEINV_CUBLAS" \
       DTXQCD_MOOEE_CUBLAS="$DTXQCD_MOOEE_CUBLAS" \

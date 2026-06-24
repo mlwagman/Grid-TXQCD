@@ -423,7 +423,19 @@ class DTXQCDCompositeImpl {
   // and s, giving ⟨s⟩ = Σ/λ² (factor N_F=2 too small) and ⟨Trσ⟩ = N_F·N_C·Σ/λ²
   // (factor N_C=3 too large).  Corrected here.
   static inline void FillAuxFields(GridParallelRNG &pRNG, Field &U,
-                                    RealD lambda, RealD Sigma = 0.0) {
+                                    RealD lambda, RealD Sigma = 0.0,
+                                    bool with_fluct = true) {
+    // with_fluct=false -> MEAN-ONLY aux: zero the Gaussian fluctuations and keep
+    // only the saddle shift below.  Used by the AUX_INIT_AUTO condensate solve:
+    // the self-consistent saddle is a MEAN-FIELD quantity (the fluctuations
+    // average out of the SD condition), and at small lambda the full-variance
+    // (width 1/lambda) fluctuations drive M48 near-singular so the Tr M^-1 CG
+    // stalls.  Cold (Sigma=0, no fluct) is just the well-conditioned Wilson-
+    // clover operator -- the proper mean-field starting point for Picard-0.
+    if (!with_fluct) {
+      U.sigma = Zero(); U.pi = Zero(); U.d = Zero();
+      U.n = Zero(); U.s = Zero(); U.p = Zero();
+    } else {
     RealD lambda_var = lambda;
     if (const char *e = std::getenv("AUX_FLUCT_LAMBDA"); e && *e) {
       lambda_var = std::atof(e);
@@ -457,6 +469,7 @@ class DTXQCDCompositeImpl {
       }
       // d, n already truly complex-symm from generation.
     }
+    }  // end if (with_fluct)
 
     if (Sigma != 0.0) {
       // σ per-entry shift = Σ/(N_C λ²)  → ⟨Trσ⟩ = N_F · Σ/λ²

@@ -21,8 +21,12 @@
 # NO_METROP=1 force-accepts only traj 0 (absorb the aux saddle -> equilibrium
 # transient on the freshly-imported gauge); the rest run real Metropolis.
 # Driver count: traj_to_run = TRAJ - NO_METROP - start_traj.
-# Output -> cfgs/dtxqcd_lam10.0000_fromchroma_nf2p1/  (fresh suffix => IMPORT_CFG
-# forks; does NOT collide with the old Nf=2 _fromchroma dir).
+# 2026-06-24: relaunched after the AUX_FLUCT_LAMBDA-defaults-to-lambda fix.  For
+# lambda=10 the fix is a NO-OP (the old hardwire was 10 == lambda), so this is
+# the unchanged known-good CONTROL of the fixed-init overnight set.  Fresh _fi
+# suffix keeps it collision-free with the older pending _gfix job.
+# Output -> cfgs/dtxqcd_lam10.0000_fromchroma_nf2p1_fi/  (fresh suffix =>
+# IMPORT_CFG forks; does NOT collide with the old _fromchroma dirs).
 #   submit:  sbatch production/slurm_dtxqcd_chromafork_lam10_nf2p1.sh
 # ============================================================================
 mkdir -p /lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs
@@ -37,9 +41,9 @@ IMPORT_CFG="$CHROMA_CFG" \
 LAMBDA_DTXQCD=10.0 \
 ADD_STRANGE=1 \
 MASS_STRANGE=-0.245 \
-DTXQCD_SUFFIX="_fromchroma_nf2p1" \
+DTXQCD_SUFFIX="_fromchroma_nf2p1_fi" \
 TRAJ=41 \
-NO_METROP=1 \
+NO_METROP=10 \
 N_SKIP=5 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 
