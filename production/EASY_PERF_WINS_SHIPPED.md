@@ -109,6 +109,29 @@ materializes for DTXQCD is open until the wiring is done.
 
 ## 4. DTXQCD Hasenbusch porting — work plan (NOT shipped this session)
 
+### TXQCD-side benchmark data — Hasenbusch is a NET LOSS at this configuration
+
+The TXQCD Hasenbusch bench was measured in this session
+(`Grid-TXQCD/production/EASY_PERF_WINS_SHIPPED.md` Section 3). Headline:
+Hasenbusch is **18× SLOWER per fermion P_update** than baseline at b6.1
+λ=10 (1-GPU), because the QUDA σ-piece primitive
+(`TXQCDWilsonCloverRationalEOActionQudaPrimitive`) is only wired into the
+single-rational PF, not the Hasenbusch ladder. CG iter counts ARE 30%
+lower with Hasenbusch, but the per-iter Grid-only cost dominates.
+
+For DTXQCD this means porting Hasenbusch would inherit the same QUDA
+path mismatch — DTXQCD Phase H.1 σ-clover QUDA is in
+`DTXQCDWilsonCloverRationalEOActionQudaPrimitive` (Grid base type), not
+in any Hasenbusch base. So the DTXQCD ladder would similarly bypass the
+QUDA acceleration. Net: porting Hasenbusch to DTXQCD without ALSO
+porting the QUDA primitive to Hasenbusch is unlikely to pay off either.
+
+**Updated recommendation**: DTXQCD Hasenbusch is NOT a priority. The
+profile's Cand. 1 (HP MP-CG SP-matrix) is a better next investment
+(~10-15% trajectory savings, no QUDA path mismatch risk).
+
+
+
 ### What would need to happen
 
 1. **New class** `Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverHasenbuschAction.h`
