@@ -55,6 +55,10 @@ AUX_INIT_AUTO="${AUX_INIT_AUTO:-1}"
 # now-correct (larger) init aux makes the EO saddle solve near-singular / stall.
 AUX_INIT="${AUX_INIT:-}"
 RAT_AUTO_HI="${RAT_AUTO_HI:-1}"
+# RHMC_DEG overrides the light (DTXQCD/full) rational degree (generator default
+# 12).  Fewer poles are adequate where the spectrum is well-gapped (small lambda,
+# huge aux regularize -> lambda_min elevated) -> cheaper multishift.
+RHMC_DEG="${RHMC_DEG:-}"
 
 # ---- GPU acceleration (cuBLAS batched 48x48; all default ON under CUDA) ---
 DTXQCD_PRECOMPUTE_GPU="${DTXQCD_PRECOMPUTE_GPU:-1}"
@@ -67,6 +71,11 @@ DTXQCD_RATFORCE_GPU="${DTXQCD_RATFORCE_GPU:-1}"
 # Mixed-precision multishift CG for the light rational PF (validated 2026-06-23,
 # dH bit-equivalent at cfg.10000 lam=10; per-traj ~17% faster on top of fwdcache).
 DTXQCD_MP_CG="${DTXQCD_MP_CG:-1}"
+# Pure-SP cleanup inside the MP-CG (no mid-CG DP reliable update during the
+# per-shift cleanup pass; one DP HermOp verify at the end with fall-back to
+# legacy MP cleanup on per-shift failure).  Default OFF; turn on after the
+# DTXQCD_MP_CG_CLEANUP_RESULTS dH+wallclock evidence is in.
+DTXQCD_MP_CG_CLEANUP="${DTXQCD_MP_CG_CLEANUP:-0}"
 
 # ---- QUDA fermion-force acceleration (default ON; validated multi-rank) ----
 # Set QUDA_FORCE=0 / DTXQCD_QUDA_HYBRID=0 to fall back to the cuBLAS force path
@@ -105,6 +114,10 @@ fi
 # ---- run control ---------------------------------------------------------
 TRAJ="${TRAJ:-2000}"                 # TARGET total (not an increment)
 N_SKIP="${N_SKIP:-10}"               # checkpoint save interval
+# Sub-sample the expensive Tr M^-1 (Hutchinson <qbar q>) diagnostic.  signPf +
+# extremal M^dag M spectrum stay every traj; only the slow multi-source CG is
+# throttled.  Default 1 (every traj) = code default; production sets >1.
+DIAG_TRMINV_INTERVAL="${DIAG_TRMINV_INTERVAL:-1}"
 CG_TOL="${CG_TOL:-1e-8}"
 OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 DEVICE_MEM="${DEVICE_MEM:-38000}"
@@ -123,8 +136,8 @@ echo "=== run_dtxqcd_gencfgs  $(date) ==="
 echo "  lattice=$LATT  mpi=$MPI ($NTASKS ranks)  lambda=$LAMBDA_DTXQCD  m=$MASS_LIGHT_DTXQCD  csw=$CSW"
 echo "  integrator=$INTEGRATOR MDS=$MDSTEPS trajL=$TRAJL  (gauge x$GAUGE_MULT, aux x$AUX_MULT)"
 echo "  stout=$STOUT_NSMEAR(rho $STOUT_RHO)  AUX_INIT_AUTO=$AUX_INIT_AUTO  RAT_AUTO_HI=$RAT_AUTO_HI"
-echo "  GPU: precompute=$DTXQCD_PRECOMPUTE_GPU logdetS=$DTXQCD_LOGDET_S_GPU logdet=$DTXQCD_LOGDET_GPU mooeeinv=$DTXQCD_MOOEEINV_CUBLAS mooee=$DTXQCD_MOOEE_CUBLAS mooee_fwdcache=$DTXQCD_MOOEE_FWDCACHE ratforce=$DTXQCD_RATFORCE_GPU mp_cg=$DTXQCD_MP_CG"
-echo "  TRAJ(target)=$TRAJ  N_SKIP=$N_SKIP  CG_TOL=$CG_TOL  suffix='${DTXQCD_SUFFIX}'  import='${IMPORT_CFG:-<resume-or-weakfield>}'  ${NO_METROP_ARG:+$NO_METROP_ARG}"
+echo "  GPU: precompute=$DTXQCD_PRECOMPUTE_GPU logdetS=$DTXQCD_LOGDET_S_GPU logdet=$DTXQCD_LOGDET_GPU mooeeinv=$DTXQCD_MOOEEINV_CUBLAS mooee=$DTXQCD_MOOEE_CUBLAS mooee_fwdcache=$DTXQCD_MOOEE_FWDCACHE ratforce=$DTXQCD_RATFORCE_GPU mp_cg=$DTXQCD_MP_CG mp_cg_cleanup=$DTXQCD_MP_CG_CLEANUP"
+echo "  TRAJ(target)=$TRAJ  N_SKIP=$N_SKIP  CG_TOL=$CG_TOL  diag_trminv_interval=$DIAG_TRMINV_INTERVAL  suffix='${DTXQCD_SUFFIX}'  import='${IMPORT_CFG:-<resume-or-weakfield>}'  ${NO_METROP_ARG:+$NO_METROP_ARG}"
 
 srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS" \
   env OMP_NUM_THREADS="$OMP_NUM_THREADS" \
@@ -134,15 +147,18 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       ADD_STRANGE="$ADD_STRANGE" MASS_STRANGE="$MASS_STRANGE" \
       AUX_INIT_AUTO="$AUX_INIT_AUTO" RAT_AUTO_HI="$RAT_AUTO_HI" \
       ${AUX_INIT:+AUX_INIT="$AUX_INIT"} \
+      ${RHMC_DEG:+RHMC_DEG="$RHMC_DEG"} \
       DTXQCD_PRECOMPUTE_GPU="$DTXQCD_PRECOMPUTE_GPU" DTXQCD_LOGDET_S_GPU="$DTXQCD_LOGDET_S_GPU" \
       DTXQCD_LOGDET_GPU="$DTXQCD_LOGDET_GPU" DTXQCD_MOOEEINV_CUBLAS="$DTXQCD_MOOEEINV_CUBLAS" \
       DTXQCD_MOOEE_CUBLAS="$DTXQCD_MOOEE_CUBLAS" \
       DTXQCD_MOOEE_FWDCACHE="$DTXQCD_MOOEE_FWDCACHE" \
       DTXQCD_MP_CG="$DTXQCD_MP_CG" \
+      DTXQCD_MP_CG_CLEANUP="$DTXQCD_MP_CG_CLEANUP" \
       DTXQCD_RATFORCE_GPU="$DTXQCD_RATFORCE_GPU" \
       INTEGRATOR="$INTEGRATOR" MDSTEPS="$MDSTEPS" TRAJL="$TRAJL" \
       GAUGE_MULT="$GAUGE_MULT" AUX_MULT="$AUX_MULT" \
       TRAJ="$TRAJ" N_SKIP="$N_SKIP" CG_TOL="$CG_TOL" \
+      DIAG_TRMINV_INTERVAL="$DIAG_TRMINV_INTERVAL" \
       ${DTXQCD_SUFFIX:+DTXQCD_SUFFIX="$DTXQCD_SUFFIX"} \
       ${IMPORT_CFG:+IMPORT_CFG="$IMPORT_CFG"} \
       ${USE_FULL_PF:+USE_FULL_PF="$USE_FULL_PF"} \
