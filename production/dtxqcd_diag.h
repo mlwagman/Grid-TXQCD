@@ -36,6 +36,8 @@
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDFermionDoubled.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDRemezAutoScale.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxCorrelator.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
 #include <Grid/serialisation/Hdf5IO.h>
@@ -76,7 +78,17 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
         actions_(std::move(actions)),
         grid_(Grid_), rbgrid_(RBGrid_), prng_(pRNG_),
         mass_(mass), csw_(csw), lambda_(lambda),
-        n_vev_noise_(n_vev_noise) {}
+        n_vev_noise_(n_vev_noise) {
+    // The Tr M48^{-1} Hutchinson estimator (the Sigma=<qbar q> measurement) is
+    // a silent multi-source CG -- the dominant per-traj diagnostic cost
+    // (~minutes/traj at 16^3x48, vs ~11 s for the gamma5.M48 eigensolve).  Sigma
+    // is slowly varying, so sub-sample it: DIAG_TRMINV_INTERVAL=N runs it every
+    // N trajectories (NaN on the skipped trajs keeps the series traj-aligned).
+    // Default 1 = every traj (unchanged); production sets N>1.
+    if (const char *e = std::getenv("DIAG_TRMINV_INTERVAL"); e && *e)
+      trminv_interval_ = std::atoi(e);
+    if (trminv_interval_ < 1) trminv_interval_ = 1;
+  }
 
   // ---- HmcObservable interface --------------------------------------------
   void TrajectoryComplete(int traj, Grid::DTXQCDField &U,
@@ -103,7 +115,7 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     fdt_avg_.push_back(std::move(fdta));
     fdt_max_.push_back(std::move(fdtm));
 
-    record_aux(U);
+    record_aux(traj, U);
 
     if (interval_ > 0 && traj % interval_ == 0) flush(traj);
   }
@@ -118,9 +130,8 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
   // Eigen used only for the small real tridiagonal eigen-solve.  Ported from
   // DtxqcdTest2pt::DtxqcdDiagnostics::compute_g5M_evals, with csw passed
   // through (the test hardcoded csw=0).
-  std::vector<RealD> compute_g5M_evals(DTXQCDField &U, int Nev, int Nm) {
-    DTXQCDWilsonCloverFermionEO Dw(U.U, grid_, rbgrid_, mass_, csw_,
-                                   U.sigma, U.pi, U.d, U.n, U.s, U.p);
+  std::vector<RealD> compute_g5M_evals(DTXQCDWilsonCloverFermionEO &Dw,
+                                       int Nev, int Nm) {
     auto g5m = [&](const DTXQCDFermionDoubled &x, DTXQCDFermionDoubled &y) {
       Dw.M(const_cast<DTXQCDFermionDoubled &>(x), y);
       for (int a = 0; a < DtxqcdNf; ++a) {
@@ -198,9 +209,7 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
   // Sigma_DTXQCD per quark via Hutchinson on the full doubled M48 operator.
   // Returns (1/V . 2 . N_F) Tr M48^{-1}.  Ported verbatim from the test
   // version, with csw passed through.
-  RealD compute_trminv(DTXQCDField &U) {
-    DTXQCDWilsonCloverFermionEO Dw(U.U, grid_, rbgrid_, mass_, csw_,
-                                   U.sigma, U.pi, U.d, U.n, U.s, U.p);
+  RealD compute_trminv(DTXQCDWilsonCloverFermionEO &Dw) {
     RealD V = (RealD)grid_.gSites();
     RealD acc = 0.0;
     const RealD cg_tol = 1e-8;
@@ -246,7 +255,7 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     return acc / (n_vev_noise_ * 2.0 * DtxqcdNf);
   }
 
-  void record_aux(DTXQCDField &U) {
+  void record_aux(int traj, DTXQCDField &U) {
     RealD V = (RealD)U.Grid()->gSites();
     norm_sigma_.push_back(norm2(U.sigma) / V);
     norm_pi_   .push_back(norm2(U.pi)    / V);
@@ -254,7 +263,43 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     norm_n_    .push_back(norm2(U.n)     / V);
     norm_s_    .push_back(norm2(U.s)     / V);
     norm_p_    .push_back(norm2(U.p)     / V);
-    vev_trminv_.push_back(compute_trminv(U));
+
+    // One fermion operator, shared across Tr M^{-1}, the M^dag M Lanczos, and
+    // the gamma5.M48 eigensolve (was 2-3 fresh constructions per traj, each
+    // paying ImportFields).  The [diag-timing] markers below let the GridLog
+    // timestamps split the per-substep cost on the first run.
+    std::cout << GridLogMessage << "[diag-timing] build operator" << std::endl;
+    DTXQCDWilsonCloverFermionEO Dw(U.U, grid_, rbgrid_, mass_, csw_,
+                                   U.sigma, U.pi, U.d, U.n, U.s, U.p);
+
+    // Independent extremal M^dag M spectrum (same fast Lanczos the RAT_AUTO_HI
+    // auto-scale uses, ~6.6 s/traj).  Cross-check vs the gamma5.M48 evals below:
+    // since (gamma5.M48)^2 = M^dag M exactly, |lambda_min(gamma5.M48)| must equal
+    // sqrt(lambda_min(M^dag M)).  Saved as the per-traj gap / sign-flip-risk
+    // order parameter (free relative to the trajectory itself).
+    std::cout << GridLogMessage << "[diag-timing] M^dag M min/max Lanczos" << std::endl;
+    {
+      RealD m2lo = 0.0, m2hi = 0.0;
+      DTXQCDMOp Mop(Dw);
+      DtxqcdLanczosMinMax(Mop, &grid_, prng_, /*Nm=*/30, /*cb=*/-1, m2lo, m2hi);
+      mdagm_lmin_.push_back(m2lo);
+      mdagm_lmax_.push_back(m2hi);
+      std::cout << GridLogMessage << "[MdagM evals]  lambda_min=" << m2lo
+                << "  lambda_max=" << m2hi
+                << "  sqrt(min)=" << std::sqrt(std::max(m2lo, 0.0)) << std::endl;
+    }
+
+    // Tr M48^{-1} (Sigma=<qbar q>): the dominant per-traj cost (silent custom
+    // multi-source CG).  Sub-sampled at DIAG_TRMINV_INTERVAL; NaN on skipped
+    // trajs keeps vev_trminv_ aligned with traj_.
+    if (traj % trminv_interval_ == 0) {
+      std::cout << GridLogMessage << "[diag-timing] Tr M^{-1} Hutchinson (n_noise="
+                << n_vev_noise_ << ")" << std::endl;
+      vev_trminv_.push_back(compute_trminv(Dw));
+    } else {
+      vev_trminv_.push_back(std::numeric_limits<RealD>::quiet_NaN());
+    }
+    std::cout << GridLogMessage << "[diag-timing] aux correlators" << std::endl;
 
     // Aux wall-wall correlators (collective sliceSum -- runs on every rank).
     DtxqcdAuxWallCorrelators awc = DtxqcdComputeAuxWallCorrelators(U, lambda_);
@@ -288,7 +333,8 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
       if (const char *e = std::getenv("G5M_NEV"); e && *e) Nev = std::atoi(e);
       int Nm = 40;
       if (const char *e = std::getenv("G5M_NKRYLOV"); e && *e) Nm = std::atoi(e);
-      auto evs = compute_g5M_evals(U, Nev, Nm);
+      std::cout << GridLogMessage << "[diag-timing] gamma5.M48 eigensolve" << std::endl;
+      auto evs = compute_g5M_evals(Dw, Nev, Nm);
       g5M_evals_.push_back(evs);
       int n_neg_low = 0;
       RealD abs_min = std::numeric_limits<RealD>::infinity();
@@ -309,10 +355,9 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     // sign-problem order parameter min|gamma5.M48| = sqrt(min M48^dag M48), plus
     // the converged signed gamma5.M48 spectrum.  Expensive (~Nm*ord M^dag M
     // applies/traj), so opt-in; the cheap g5M_evals above stays always-on.
-    if (eig_diag_enabled()) {
+    if (eig_diag_enabled() && (traj % trminv_interval_ == 0)) {
+      std::cout << GridLogMessage << "[diag-timing] converged Chebyshev eig_diag" << std::endl;
       EigDiagParams ep = eig_diag_params_from_env();
-      DTXQCDWilsonCloverFermionEO Dw(U.U, grid_, rbgrid_, mass_, csw_,
-                                     U.sigma, U.pi, U.d, U.n, U.s, U.p);
       std::vector<RealD> em2, eg5;
       RunEigDiagDtxqcd(Dw, &grid_, prng_, ep, em2, eg5);
       eig_M2_.push_back(em2);
@@ -375,6 +420,8 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     write(wr, "norm_s",     norm_s_);
     write(wr, "norm_p",     norm_p_);
     write(wr, "vev_trminv", vev_trminv_);
+    write(wr, "mdagm_lmin", mdagm_lmin_);
+    write(wr, "mdagm_lmax", mdagm_lmax_);
     write(wr, "aux_C_pi_plus",  aux_C_pi_plus_);
     write(wr, "aux_C_pi_minus", aux_C_pi_minus_);
     write(wr, "aux_C_pi_zero",  aux_C_pi_zero_);
@@ -416,6 +463,7 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     norm_d_.clear();     norm_n_.clear();
     norm_s_.clear();     norm_p_.clear();
     vev_trminv_.clear();
+    mdagm_lmin_.clear(); mdagm_lmax_.clear();
     aux_C_pi_plus_.clear();  aux_C_pi_minus_.clear(); aux_C_pi_zero_.clear();
     aux_C_a0_plus_.clear();  aux_C_a0_minus_.clear(); aux_C_a0_zero_.clear();
     aux_C_s_.clear();        aux_C_p_.clear();
@@ -439,6 +487,7 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
   GridParallelRNG       &prng_;
   RealD mass_, csw_, lambda_;
   int   n_vev_noise_;
+  int   trminv_interval_ = 1;  // DIAG_TRMINV_INTERVAL: sub-sample Tr M^{-1}
 
   // Per-traj scalar series (flushed every `interval_` trajectories).
   std::vector<int>   traj_;
@@ -447,6 +496,9 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
   std::vector<std::vector<RealD>> fdt_avg_, fdt_max_;
   std::vector<RealD> norm_sigma_, norm_pi_, norm_d_, norm_n_, norm_s_, norm_p_;
   std::vector<RealD> vev_trminv_;
+  // Extremal M^dag M spectrum (fast Lanczos), every traj.  Cross-check:
+  // sqrt(mdagm_lmin) == |lambda_min(gamma5.M48)| (= g5M_evals smallest |.|).
+  std::vector<RealD> mdagm_lmin_, mdagm_lmax_;
   std::vector<std::vector<ComplexD>>
       aux_C_pi_plus_, aux_C_pi_minus_, aux_C_pi_zero_,
       aux_C_a0_plus_, aux_C_a0_minus_, aux_C_a0_zero_,
