@@ -30,7 +30,15 @@
 # (drawn at 1/10 instead of 1/6) -> large far-from-equilibrium relaxation
 # (systematic negative dH + growing aux norm).  Fresh _fi suffix forces a clean
 # fixed-init restart (a resume would skip init and keep the wrong start).
-# Output -> cfgs/dtxqcd_lam6.0000_weak_nf2p1_fi/
+# 2026-06-25: MDS=20 (was 10).  EO lambda=6 at MDS=10 gave a systematic dH~+3.5
+# (frozen chain, last 9 Metropolis all REJECTED -- the small-aux integration
+# error).  dH ~ (step)^4, so MDS=20 should drop it ~16x to ~0.2 IF it's
+# integration error (acceptance recovers); if +3.5 persists it's a real bias.
+# FRESH _mds20 suffix (new dir) -> clean MDS=20 weak-field stream that runs
+# alongside the MDS=10 _fi job (1288825) with NO checkpoint collision (cancel
+# 1288825 separately to free its node).  Re-thermalizes from weak-field, so the
+# MDS=20 acceptance verdict comes once it equilibrates (plaq -> ~0.51).
+# Output -> cfgs/dtxqcd_lam6.0000_weak_nf2p1_mds20/
 #   submit:  sbatch production/slurm_dtxqcd_weak_lam6_nf2p1.sh
 # ============================================================================
 mkdir -p /lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs
@@ -39,10 +47,11 @@ echo "=== DTXQCD Nf=2+1 weak-field lambda=6 thermalization  $(date) ==="
 nvidia-smi --query-gpu=index,name --format=csv,noheader
 
 LAMBDA_DTXQCD=6.0 \
+MDSTEPS=20 \
 ADD_STRANGE=1 \
 MASS_STRANGE=-0.245 \
-DTXQCD_SUFFIX="_weak_nf2p1_fi" \
-TRAJ=200 \
+DTXQCD_SUFFIX="_weak_nf2p1_mds20" \
+TRAJ=1500 \
 NO_METROP=10 \
 N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
