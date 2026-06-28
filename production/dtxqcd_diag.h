@@ -81,13 +81,18 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
         n_vev_noise_(n_vev_noise) {
     // The Tr M48^{-1} Hutchinson estimator (the Sigma=<qbar q> measurement) is
     // a silent multi-source CG -- the dominant per-traj diagnostic cost
-    // (~minutes/traj at 16^3x48, vs ~11 s for the gamma5.M48 eigensolve).  Sigma
-    // is slowly varying, so sub-sample it: DIAG_TRMINV_INTERVAL=N runs it every
-    // N trajectories (NaN on the skipped trajs keeps the series traj-aligned).
-    // Default 1 = every traj (unchanged); production sets N>1.
+    // (~minutes/traj at 16^3x48, vs ~11 s for the gamma5.M48 eigensolve).  It is
+    // a measurement-grade observable (better computed offline on saved trajs),
+    // and the cheap aux scalar VEV is a faithful proxy in the HMC observer: the
+    // saddle ties them by <s> = <Trsig> = N_f * Sigma / lambda^2 (verified live
+    // 2026-06-28: lambda=0.1 measured <s>=44.31/site vs N_f*Sigma*/lambda^2=44.3;
+    // lambda=2 <s>~1.25 vs 1.175).  So it is OFF in the observer by default and
+    // run as an offline measurement.  DIAG_TRMINV_INTERVAL=N>0 re-enables it
+    // every N trajectories for an inline spot-check (NaN on the skipped trajs
+    // keeps the series traj-aligned); the default 0 means never.
     if (const char *e = std::getenv("DIAG_TRMINV_INTERVAL"); e && *e)
       trminv_interval_ = std::atoi(e);
-    if (trminv_interval_ < 1) trminv_interval_ = 1;
+    if (trminv_interval_ < 0) trminv_interval_ = 0;
   }
 
   // ---- HmcObservable interface --------------------------------------------
@@ -290,9 +295,11 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     }
 
     // Tr M48^{-1} (Sigma=<qbar q>): the dominant per-traj cost (silent custom
-    // multi-source CG).  Sub-sampled at DIAG_TRMINV_INTERVAL; NaN on skipped
-    // trajs keeps vev_trminv_ aligned with traj_.
-    if (traj % trminv_interval_ == 0) {
+    // multi-source CG).  OFF in the observer by default (=0 -> offline
+    // measurement; the aux <s> VEV is the inline proxy).  DIAG_TRMINV_INTERVAL=N>0
+    // re-enables it every N trajs for a spot-check; NaN on skipped/off trajs
+    // keeps vev_trminv_ aligned with traj_.
+    if (trminv_interval_ > 0 && traj % trminv_interval_ == 0) {
       std::cout << GridLogMessage << "[diag-timing] Tr M^{-1} Hutchinson (n_noise="
                 << n_vev_noise_ << ")" << std::endl;
       vev_trminv_.push_back(compute_trminv(Dw));
@@ -355,7 +362,10 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
     // sign-problem order parameter min|gamma5.M48| = sqrt(min M48^dag M48), plus
     // the converged signed gamma5.M48 spectrum.  Expensive (~Nm*ord M^dag M
     // applies/traj), so opt-in; the cheap g5M_evals above stays always-on.
-    if (eig_diag_enabled() && (traj % trminv_interval_ == 0)) {
+    // Follows the trminv throttle when that is on (N>0); when trminv is off
+    // (default 0) and eig_diag is explicitly enabled, run it every traj.
+    if (eig_diag_enabled() &&
+        (trminv_interval_ <= 0 || traj % trminv_interval_ == 0)) {
       std::cout << GridLogMessage << "[diag-timing] converged Chebyshev eig_diag" << std::endl;
       EigDiagParams ep = eig_diag_params_from_env();
       std::vector<RealD> em2, eg5;
@@ -487,7 +497,7 @@ class DtxqcdDiagnostics : public Grid::HmcObservable<Grid::DTXQCDField> {
   GridParallelRNG       &prng_;
   RealD mass_, csw_, lambda_;
   int   n_vev_noise_;
-  int   trminv_interval_ = 1;  // DIAG_TRMINV_INTERVAL: sub-sample Tr M^{-1}
+  int   trminv_interval_ = 0;  // DIAG_TRMINV_INTERVAL: 0=off (offline meas), N>0=every N traj
 
   // Per-traj scalar series (flushed every `interval_` trajectories).
   std::vector<int>   traj_;

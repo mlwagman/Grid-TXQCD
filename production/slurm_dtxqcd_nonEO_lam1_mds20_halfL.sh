@@ -17,6 +17,6 @@ mkdir -p /lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs
 nvidia-smi --query-gpu=index,name --format=csv,noheader
 LAMBDA_DTXQCD=1.0 USE_FULL_PF=1 MDSTEPS=20 TRAJL=0.176776695296637 \
 ADD_STRANGE=1 MASS_STRANGE=-0.245 DTXQCD_SUFFIX="_nonEO_mds20_halfL" \
-TRAJ=105 NO_METROP=5 N_SKIP=2 DIAG_TRMINV_INTERVAL=10 \
+TRAJ=105 NO_METROP=5 N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 echo "=== lam1 nonEO MDS=20 halfL exited rc=$? $(date) ==="

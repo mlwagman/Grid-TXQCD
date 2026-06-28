@@ -18,6 +18,6 @@ mkdir -p /lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs
 nvidia-smi --query-gpu=index,name --format=csv,noheader
 LAMBDA_DTXQCD=0.25 USE_FULL_PF=1 MDSTEPS=10 TRAJL=0.176776695296637 RHMC_DEG=8 \
 ADD_STRANGE=1 MASS_STRANGE=-0.245 DTXQCD_SUFFIX="_nonEO_mds10_halfL_deg8" \
-TRAJ=105 NO_METROP=5 N_SKIP=2 DIAG_TRMINV_INTERVAL=10 \
+TRAJ=105 NO_METROP=5 N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 echo "=== lam0p25 nonEO MDS=10 halfL deg8 exited rc=$? $(date) ==="

@@ -114,10 +114,13 @@ fi
 # ---- run control ---------------------------------------------------------
 TRAJ="${TRAJ:-2000}"                 # TARGET total (not an increment)
 N_SKIP="${N_SKIP:-10}"               # checkpoint save interval
-# Sub-sample the expensive Tr M^-1 (Hutchinson <qbar q>) diagnostic.  signPf +
-# extremal M^dag M spectrum stay every traj; only the slow multi-source CG is
-# throttled.  Default 1 (every traj) = code default; production sets >1.
-DIAG_TRMINV_INTERVAL="${DIAG_TRMINV_INTERVAL:-1}"
+# The expensive Tr M^-1 (Hutchinson <qbar q>) diagnostic is OFF in the HMC
+# observer by default (0): it is a measurement-grade observable run offline on
+# saved trajs, and the cheap aux <s> VEV is its inline proxy (saddle ties them by
+# <s> = N_f Sigma / lambda^2).  signPf + extremal M^dag M spectrum stay every
+# traj regardless.  Set DIAG_TRMINV_INTERVAL=N>0 to re-enable an inline spot-check
+# every N trajectories.
+DIAG_TRMINV_INTERVAL="${DIAG_TRMINV_INTERVAL:-0}"
 CG_TOL="${CG_TOL:-1e-8}"
 OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 DEVICE_MEM="${DEVICE_MEM:-38000}"
