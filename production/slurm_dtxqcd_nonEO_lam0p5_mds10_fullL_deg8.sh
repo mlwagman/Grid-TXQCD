@@ -10,6 +10,11 @@
 #SBATCH --exclusive
 #SBATCH --time=24:00:00
 #SBATCH --output=slurm-logs/dtx_nEO_l0p5f.%j.out
+# !!! SUPERSEDED / FAILED -- DO NOT RESUBMIT.  This fullL MDS=10 (eps=0.0354) blew
+# up at lambda=0.5: first traj dH=11.4 (too stiff for the doubled eps; dH~eps^4).
+# Replaced by slurm_dtxqcd_nonEO_lam0p5_mds20_fullL.sh (fullL MDS=20, eps-matched
+# 0.0177).  Kept only as the record of where the doubled-eps fullL breaks. !!!
+#
 # lambda=0.5 NON-EO weak-field, MDS=10 + FULL trajL (sqrt2/4) -> eps=0.0354, + 8
 # rational poles.  FRESH fullL chain (separate _fullL_deg8 dir).  STIFFEST of the
 # small-lambda fullL tests: lambda=0.5 is closer to the lambda~1-2 stiffness peak
