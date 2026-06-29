@@ -524,7 +524,19 @@ class DTXQCDMpcOpQUDA {
 
   ~DTXQCDMpcOpQUDA() {
     ResetAuxCache();
-    shutdown_style_b_();
+    // Task #223: skip QUDA persistent-handle teardown.  QUDA's atexit cleanup
+    // tears down its global state before our destructor runs at program exit;
+    // calling delete on the persistent Dirac* or .reset() on a ColorSpinorField
+    // unique_ptr at this point crashes inside QUDA's destructor (it accesses
+    // already-freed internal state — observed as `Aborted (core dumped)` in
+    // libquda.so::ColorSpinorField::destroy after trajectory + dH writes
+    // complete cleanly).  Persistent QUDA handles are program-lifetime
+    // objects; the OS reclaims their memory at process exit.  Drop ownership
+    // without invoking destructors so we exit with rc=0 instead of rc=134.
+    style_b_state_.dirac = nullptr;
+    (void)style_b_state_.in_native.release();
+    (void)style_b_state_.out_native.release();
+    style_b_state_.initialized = false;
     if (aux_perm_d_) {
       acceleratorFreeDevice(aux_perm_d_);
       aux_perm_d_ = nullptr;
