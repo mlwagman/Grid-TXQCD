@@ -40,7 +40,7 @@ export CUDA_CACHE_PATH=/lustre2/nplqcd/cache
 # on first force/inverter calls per run. Critical for MG solvers (lighter
 # quarks where MG setup is slow). Cache is per-(architecture, gauge geometry,
 # kappa, csw, etc.) and re-tunes only when those change.
-export QUDA_RESOURCE_PATH=/lustre2/nplqcd/cache/quda_resource
+export QUDA_RESOURCE_PATH=/lustre2/nplqcd/cache/quda_resource_cuda12p2
 
 # Emit module list and paths when sourced interactively, keep quiet in jobs.
 if [ -t 1 ]; then

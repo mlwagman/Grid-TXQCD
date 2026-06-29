@@ -47,6 +47,12 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCG.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StageB.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC.h>
+#endif
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDRationalForceGpuKernel.h>
@@ -134,7 +140,7 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
       eta.upper.f[a] = scale * eta.upper.f[a];
       eta.lower.f[a] = scale * eta.lower.f[a];
     }
-    ApplyRational(Mop, PowerEighth, eta, Phi_);
+    ApplyRational(U, Mop, PowerEighth, eta, Phi_);
   }
 
   // ------------------------------------------------------------------
@@ -146,7 +152,7 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     auto Dw = MakeEOp(U);
     DTXQCDMOp Mop(Dw);
     DTXQCDFermionDoubled Y(&grid_);
-    ApplyRational(Mop, PowerNegQuarter, Phi_, Y);
+    ApplyRational(U, Mop, PowerNegQuarter, Phi_, Y);
     ComplexD ip = innerProduct(Phi_, Y);
     RealD action = ip.real();
     std::cout << GridLogMessage << "[" << action_name() << "] S = " << action
@@ -180,8 +186,8 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     Xk.reserve(Npole);
     for (int k = 0; k < Npole; ++k) Xk.emplace_back(&grid_);
     std::vector<RealD> md_tol(Npole, param_.mdtolerance);
-    DTXQCDMultiShiftCG(Mop, PowerNegQuarter.poles, md_tol, Phi_, Xk,
-                       param_.MaxIter);
+    RunMultiShift(U, Mop, PowerNegQuarter.poles, md_tol, Phi_, Xk,
+                  param_.MaxIter);
 
     // ---- Y_k = M X_k (one Wilson + Delta + Cross + Clover apply per pole) ----
     std::vector<DTXQCDFermionDoubled> Yk;
@@ -214,8 +220,11 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     for (int k = 0; k < Npole; ++k) {
       const RealD ak = PowerNegQuarter.residues[k];
       AccumulateSiteForcesAll(Xk[k], Yk[k], ak, dSdU, clover_sigma_full);
-      AccumulateHoppingForce(Xk[k], Yk[k], ak, Dw, dSdU);
     }
+
+    // ---- Wilson hopping force: batched hook (default = per-pole CPU loop;
+    // subclass overrides with QUDA computeCloverWilsonForceWithSchurFields).
+    AccumulateHoppingForceAllPoles(U, Xk, Yk, Dw, dSdU);
 
     // ---- Gauge clover force via Cmunu chain rule (csw != 0 only) ----
     if (csw_ != 0.0) {
@@ -284,15 +293,16 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
   // Multishift-CG + linear combination: out = norm * in + sum_k residues[k] * xk[k]
   // where xk[k] = (M^dag M + poles[k])^{-1} in (multi-shift solve).
   // Identical structure to the EO sibling, but on full-volume grid.
-  void ApplyRational(DTXQCDMOp &Mop, const MultiShiftFunction &rat,
+  void ApplyRational(const DTXQCDField &U, DTXQCDMOp &Mop,
+                     const MultiShiftFunction &rat,
                      const DTXQCDFermionDoubled &in,
                      DTXQCDFermionDoubled &out) {
     const int nshift = static_cast<int>(rat.poles.size());
     std::vector<DTXQCDFermionDoubled> xk;
     xk.reserve(nshift);
     for (int k = 0; k < nshift; ++k) xk.emplace_back(&grid_);
-    DTXQCDMultiShiftCG(Mop, rat.poles, rat.tolerances, in, xk,
-                       param_.MaxIter);
+    RunMultiShift(U, Mop, rat.poles, rat.tolerances, in, xk,
+                  param_.MaxIter);
 
     for (int a = 0; a < DtxqcdNf; ++a) {
       out.upper.f[a] = rat.norm * in.upper.f[a];
@@ -305,6 +315,82 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
         out.lower.f[a] = out.lower.f[a] + c * xk[k].lower.f[a];
       }
     }
+  }
+
+  // M-wrap.6: env-gated multishift backend selector.
+  // DTXQCD_MULTISHIFT_QUDA=1 → route through DTXQCDMultiShiftCGQUDA
+  //                              (DP outer + QUDA-DP inner via DTXQCDMpcOpQUDA).
+  // Default (unset/0) → DTXQCDMultiShiftCG (all-Grid-DP), bit-exact to pre-gate.
+  // Read on every call (no static cache) so the FD test can toggle the gate
+  // between deriv() invocations in a single process.  At ~1 µs/call this is
+  // negligible vs the multishift-CG cost on the other side.
+  static int MultishiftQudaEnabled() {
+#ifndef GRID_HAVE_QUDA
+    return 0;
+#else
+    const char *e = std::getenv("DTXQCD_MULTISHIFT_QUDA");
+    return (e && *e) ? std::atoi(e) : 0;
+#endif
+  }
+
+  // M-wrap.5b.2 inner gate: DTXQCD_MULTISHIFT_QUDA_STAGE = A (default) | B
+  //   A: DTXQCDMultiShiftCGQUDA (Stage A, host-mode Mop.M per inner iter).
+  //   B: DTXQCDMultiShiftCGQUDA_StageB (Stage B, device-resident inner loop).
+  // Only consulted when MultishiftQudaEnabled() returns true.
+  static char MultishiftQudaStage() {
+    static char v = []() {
+      const char *e = std::getenv("DTXQCD_MULTISHIFT_QUDA_STAGE");
+      if (!e || !*e) return 'A';
+      return (*e == 'B' || *e == 'b' || *e == '1') ? 'B' : 'A';
+    }();
+    return v;
+  }
+
+  // Phase 2.5 Style C inner gate: DTXQCD_STAGEB_STYLE=C selects the native-CSF
+  // multishift CG (DTXQCDMultiShiftCGQUDA_StyleC) when STAGE=B.  All inner
+  // kernels (Mat / aux / Pre / Post / Gamma5) run on FloatNOrder-accessed
+  // native ColorSpinorField storage; no per-iter layout convert.
+  // Locked at first call to keep the path stable across CG iters.
+  static bool StyleCEnabled() {
+    static bool v = []() {
+      const char *e = std::getenv("DTXQCD_STAGEB_STYLE");
+      return (e && *e && (*e == 'C' || *e == 'c'));
+    }();
+    return v;
+  }
+
+  void RunMultiShift(const DTXQCDField &U, DTXQCDMOp &Mop,
+                     const std::vector<RealD> &poles,
+                     const std::vector<RealD> &tol,
+                     const DTXQCDFermionDoubled &src,
+                     std::vector<DTXQCDFermionDoubled> &xk,
+                     int MaxIter) {
+#ifdef GRID_HAVE_QUDA
+    if (MultishiftQudaEnabled()) {
+      DTXQCDField &Unc = const_cast<DTXQCDField &>(U);
+      DTXQCDMpcOpQUDA Mop_quda(Unc.U, grid_, rbgrid_, mass_, csw_,
+                               Unc.sigma, Unc.pi, Unc.d, Unc.n,
+                               Unc.s,     Unc.p);
+      if (MultishiftQudaStage() == 'B') {
+        // Style C: native-CSF CG state + M_device_csf inner mat-vec.  Gated
+        // by env DTXQCD_STAGEB_STYLE=C (the same env that flips M_device
+        // between MatQuda and persistent-Dirac uses 'B'; 'C' selects the
+        // full native CG state path introduced in Phase 2.5).
+        if (StyleCEnabled()) {
+          DTXQCDMultiShiftCGQUDA_StyleC(Mop, Mop_quda, poles, tol, src, xk,
+                                         MaxIter);
+        } else {
+          DTXQCDMultiShiftCGQUDA_StageB(Mop, Mop_quda, poles, tol, src, xk,
+                                         MaxIter);
+        }
+      } else {
+        DTXQCDMultiShiftCGQUDA(Mop, Mop_quda, poles, tol, src, xk, MaxIter);
+      }
+      return;
+    }
+#endif
+    (void)U;
+    DTXQCDMultiShiftCG(Mop, poles, tol, src, xk, MaxIter);
   }
 
   // Accumulate (+= coef * arr) a lex-ordered FULL-grid host array into a
@@ -339,6 +425,26 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
 #endif
     }();
     return v;
+  }
+
+  // Batched all-poles hook for the Wilson hopping gauge force.  Default = run
+  // the per-pole CPU AccumulateHoppingForce path.  Subclass
+  // DTXQCDWilsonCloverRationalFullActionQudaPrimitive overrides this to batch
+  // every (flavor, pole) RHS through one QUDA
+  // computeCloverWilsonForceWithSchurFields call per doubled block.
+  // U is passed only to support the QUDA loader's SetGauge(gauge); the base
+  // implementation does not use it (Dw already carries U).
+  virtual void AccumulateHoppingForceAllPoles(
+      const DTXQCDField &U,
+      const std::vector<DTXQCDFermionDoubled> &Xk,
+      const std::vector<DTXQCDFermionDoubled> &Yk,
+      DTXQCDWilsonCloverFermionEO &Dw,
+      DTXQCDField &dSdU) {
+    const int Npole = static_cast<int>(Xk.size());
+    for (int k = 0; k < Npole; ++k) {
+      const RealD ak = PowerNegQuarter.residues[k];
+      AccumulateHoppingForce(Xk[k], Yk[k], ak, Dw, dSdU);
+    }
   }
 
   // Per-pole hopping gauge force on the full operator.

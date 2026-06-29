@@ -187,7 +187,7 @@ inline void buildMultigridParam(QudaMultigridParam &mg,
     mg.setup_ca_basis_size[l] = 4;
     mg.setup_ca_lambda_min[l] = 0.0;
     mg.setup_ca_lambda_max[l] = -1.0;
-    mg.n_vec_batch[l] = 1;
+    // mg.n_vec_batch[l] = 1;  // QUDA-newer field; not in src/quda (CUDA-12.2 install)
 
     // Coarse solver
     mg.coarse_solver[l] = QUDA_GCR_INVERTER;
@@ -230,7 +230,7 @@ inline void buildMultigridParam(QudaMultigridParam &mg,
     mg.verbosity[l] = mg_user.verbosity;
     mg.setup_use_mma[l] = QUDA_BOOLEAN_FALSE;
     mg.dslash_use_mma[l] = QUDA_BOOLEAN_FALSE;
-    mg.transfer_use_mma[l] = QUDA_BOOLEAN_FALSE;
+    // mg.transfer_use_mma[l] = QUDA_BOOLEAN_FALSE;  // QUDA-newer field; not in src/quda (CUDA-12.2 install)
     mg.vec_load[l] = QUDA_BOOLEAN_FALSE;
     mg.vec_store[l] = QUDA_BOOLEAN_FALSE;
     std::snprintf(mg.vec_infile[l],  sizeof(mg.vec_infile[l]),  "%s", "");

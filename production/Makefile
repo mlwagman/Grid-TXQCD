@@ -19,13 +19,26 @@ LIBS     = $(shell $(GRID_CONFIG) --libs)
 # QMP_PREFIX defaults to QUDA_PREFIX (which is true for /home/agrebe/install/quda-5),
 # but chroma's install puts QMP in a separate directory so override as needed.
 # QUDA_STATIC=1 forces -l:libquda.a + -l:libqmp.a (chroma's archives are static).
-QUDA_PREFIX ?= /lustre2/nplqcd/Grid-TXQCD/external/quda-install
-# external/quda-install (locally built, matches the QUDA API our code uses)
-# does not ship QMP; pull QMP from the older install which has both.
+#
+# 2026-06-29: switched default QUDA_PREFIX to the CUDA-12.2-compatible install
+# at /lustre2/nplqcd/install/quda_cuda12p2/ (built from /lustre2/nplqcd/src/quda
+# during Path B2).  The previous external/quda-install was built against
+# CUDA-12.3+ headers (cuda/ptx + libcudacxx prefetch_L1/L2 that aren't in
+# 12.2) and could not be re-used by anyone needing the FloatNOrder accessor
+# in external code.  The new install ships the older API our code uses:
+#   - QUDA_FLOAT2_FIELD_ORDER (no NATIVE alias)
+#   - FloatNOrder<Float, Ns, Nc, N_=2> (explicit 4th template arg)
+# Extra include paths -I targets/cuda + targets/cuda/externals are required to
+# pick up target_device.h and trove/ptr.h from external code.  Runtime needs
+# QUDA_RESOURCE_PATH=/lustre2/nplqcd/cache/quda_resource_cuda12p2 (version-keyed
+# tunecache).
+QUDA_PREFIX ?= /lustre2/nplqcd/install/quda_cuda12p2
+# quda_cuda12p2 (locally built from src/quda for CUDA 12.2) does not ship QMP;
+# pull QMP from the older install which has both.
 QMP_PREFIX ?= /lustre2/nplqcd/install/quda
 QUDA_STATIC ?=
 ifneq ($(QUDA_PREFIX),)
-  CXXFLAGS += -DGRID_HAVE_QUDA -I$(QUDA_PREFIX)/include -I$(QMP_PREFIX)/include
+  CXXFLAGS += -DGRID_HAVE_QUDA -I$(QUDA_PREFIX)/include -I$(QUDA_PREFIX)/include/targets/cuda -I$(QUDA_PREFIX)/include/targets/cuda/externals -I$(QMP_PREFIX)/include
   LDFLAGS  += -L$(QUDA_PREFIX)/lib -L$(QMP_PREFIX)/lib -Xlinker -rpath -Xlinker $(QUDA_PREFIX)/lib -Xlinker -rpath -Xlinker $(QMP_PREFIX)/lib
   ifneq ($(QUDA_STATIC),)
     # nvcc treats positional .a paths as input files; use -l:libname syntax
@@ -89,6 +102,54 @@ meas_conn_txqcd_nf3: meas_conn_txqcd.cc params.h meas_helper.h
 
 meas_disco_txqcd_nf3: meas_disco_txqcd.cc params.h meas_helper.h
 	$(CXX) $(CXXFLAGS) -DTXQCD_Nf=3 -o $@ $< $(LDFLAGS) $(LIBS)
+
+# Style B Phase 2.5 Session 3d — DTXQCD native kernel impl objects.
+# These are compiled with the trove externals visible (no `using namespace
+# Grid;` in their TUs).  gen_dtxqcd_cfgs needs them linked in for the Style C
+# CG path; other binaries link them too as a safety since they appear in
+# DTXQCDMpcOpQUDA.h forward decls.  Each impl .cc lives in
+# Grid/qcd/action/dtxqcd/.
+DTXQCD_NATIVE_IMPL_SRCS = \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc
+
+DTXQCD_NATIVE_IMPL_OBJS = \
+  dtxqcd_quda_gamma5_native_impl.o \
+  dtxqcd_quda_pre_mat_lower_native_impl.o \
+  dtxqcd_quda_post_mat_lower_native_impl.o \
+  dtxqcd_quda_aux_kernel_native_v2_impl.o
+
+dtxqcd_quda_gamma5_native_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_pre_mat_lower_native_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_post_mat_lower_native_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_aux_kernel_native_v2_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# Specific rule for gen_dtxqcd_cfgs: split compile + link so nvcc receives only
+# .cu/.cc sources during compile and only .o objects during link (nvcc gets
+# confused if .o appears alongside .cc on the same invocation).
+gen_dtxqcd_cfgs.o: gen_dtxqcd_cfgs.cc params.h eig_diag.h meas_helper.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# Use nvcc-link by stripping -x cu from CXX (the nvcc wrapper otherwise tries
+# to compile .o inputs as CUDA source — they're already ELF objects).
+LINKER = $(subst -x cu,,$(CXX))
+
+gen_dtxqcd_cfgs: gen_dtxqcd_cfgs.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ gen_dtxqcd_cfgs.o $(DTXQCD_NATIVE_IMPL_OBJS) \
+	  $(LDFLAGS) $(LIBS)
 
 # Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
 # edits (e.g. EIG_DIAG tuning) force a rebuild of gen_qcd_cfgs* and the

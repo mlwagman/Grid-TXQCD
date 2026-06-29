@@ -164,7 +164,8 @@ public:
     Quda::eo_buffer_to_fermion(sol_eo.data(), sol);
 
     last_iter_ = inv_param_.iter;
-    last_residual_ = inv_param_.true_res[0];
+    // src/quda (CUDA-12.2): true_res is a scalar double (newer QUDA has it as an array).
+    last_residual_ = inv_param_.true_res;
     last_secs_ = inv_param_.secs;
   }
 
