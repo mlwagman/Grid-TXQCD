@@ -40,6 +40,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMeooeOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMooeeOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDDeltaCloverOp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDFusedAuxClover.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDBatchedInverse48.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
@@ -173,6 +174,15 @@ class DTXQCDWilsonCloverFermionEO {
     for (int a = 0; a < DtxqcdNf; ++a) {
       meooe_.UpperWilson().M(in.upper.f[a], out.upper.f[a]);
       meooe_.LowerWilson().M(in.lower.f[a], out.lower.f[a]);
+    }
+    if (DtxqcdFusedAuxClover::Enabled()) {
+      // Fused path: two accelerator_for kernels emit (Delta_diag + cross +
+      // clover) for both upper and lower into out (which already holds
+      // Wilson + mass per block).  Eliminates 4 separate kernel launches and
+      // half of the σ_μν / γ5 pre-rotations vs the 6-kernel legacy path.
+      ApplyFusedAuxCrossClover(csw_, sigma_, pi_, d_, n_, s_, p_, FS_, in, out,
+                                /*accumulate=*/true);
+      return;
     }
     AddDiagAndCrossAndClover(in, out);
   }

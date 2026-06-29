@@ -52,6 +52,8 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StageB.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC_MpMultishift.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC_MpMultishiftRefine.h>
 #endif
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
@@ -318,43 +320,74 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
   }
 
   // M-wrap.6: env-gated multishift backend selector.
-  // DTXQCD_MULTISHIFT_QUDA=1 → route through DTXQCDMultiShiftCGQUDA
-  //                              (DP outer + QUDA-DP inner via DTXQCDMpcOpQUDA).
-  // Default (unset/0) → DTXQCDMultiShiftCG (all-Grid-DP), bit-exact to pre-gate.
+  // Task #229 default-flip: the fast path (Style C, native-CSF CG state +
+  // M_device_csf inner mat-vec) is now the DEFAULT.  Opt out to the original
+  // pure-Grid-DP multishift via `DTXQCD_MULTISHIFT_QUDA=0` for emergencies /
+  // chain-restart bit-reproducibility (e.g., comparing against pre-Style-C
+  // production output).  Style C reproduces production dH to ~7 decimals
+  // and delivers ~1.5× per-traj speedup at λ=0.5 production-actual mass.
+  //
+  // DTXQCD_MULTISHIFT_QUDA: default ON (route through QUDA wrapper).
+  //                          =0 to opt out to all-Grid-DP DTXQCDMultiShiftCG.
   // Read on every call (no static cache) so the FD test can toggle the gate
-  // between deriv() invocations in a single process.  At ~1 µs/call this is
-  // negligible vs the multishift-CG cost on the other side.
+  // between deriv() invocations in a single process.
   static int MultishiftQudaEnabled() {
 #ifndef GRID_HAVE_QUDA
     return 0;
 #else
     const char *e = std::getenv("DTXQCD_MULTISHIFT_QUDA");
-    return (e && *e) ? std::atoi(e) : 0;
+    if (!e || !*e) return 1;  // default: route through QUDA wrapper
+    return std::atoi(e);
 #endif
   }
 
-  // M-wrap.5b.2 inner gate: DTXQCD_MULTISHIFT_QUDA_STAGE = A (default) | B
+  // DTXQCD_MULTISHIFT_QUDA_STAGE = A | B (default).
+  //   B: DTXQCDMultiShiftCGQUDA_StageB / Style C (device-resident inner loop).
   //   A: DTXQCDMultiShiftCGQUDA (Stage A, host-mode Mop.M per inner iter).
-  //   B: DTXQCDMultiShiftCGQUDA_StageB (Stage B, device-resident inner loop).
   // Only consulted when MultishiftQudaEnabled() returns true.
   static char MultishiftQudaStage() {
     static char v = []() {
       const char *e = std::getenv("DTXQCD_MULTISHIFT_QUDA_STAGE");
-      if (!e || !*e) return 'A';
-      return (*e == 'B' || *e == 'b' || *e == '1') ? 'B' : 'A';
+      if (!e || !*e) return 'B';  // default Stage B (Style C lives here)
+      return (*e == 'A' || *e == 'a') ? 'A' : 'B';
     }();
     return v;
   }
 
-  // Phase 2.5 Style C inner gate: DTXQCD_STAGEB_STYLE=C selects the native-CSF
-  // multishift CG (DTXQCDMultiShiftCGQUDA_StyleC) when STAGE=B.  All inner
-  // kernels (Mat / aux / Pre / Post / Gamma5) run on FloatNOrder-accessed
-  // native ColorSpinorField storage; no per-iter layout convert.
+  // DTXQCD_STAGEB_STYLE = A | C (default).
+  //   C: DTXQCDMultiShiftCGQUDA_StyleC (native-CSF FloatNOrder, fast path).
+  //   A: DTXQCDMultiShiftCGQUDA_StageB (raw-buffer per-call MatQuda; broken/slow,
+  //      preserved for forensics — do not use in production).
   // Locked at first call to keep the path stable across CG iters.
   static bool StyleCEnabled() {
     static bool v = []() {
       const char *e = std::getenv("DTXQCD_STAGEB_STYLE");
-      return (e && *e && (*e == 'C' || *e == 'c'));
+      if (!e || !*e) return true;  // default Style C (the fast path)
+      return !(*e == 'A' || *e == 'a');
+    }();
+    return v;
+  }
+
+  // Session D canonical MP multishift gate.  Selects Phase A (SP multishift
+  // with DP reliable update) + Phase B (per-shift DP polish) instead of the
+  // existing pure-DP Style C or the Session B per-shift SP cleanup tail.
+  // Requires DTXQCD_MULTISHIFT_QUDA_STAGE=B + DTXQCD_STAGEB_STYLE=C.
+  static bool MpMultishiftEnabled() {
+    static bool v = []() {
+      const char *e = std::getenv("DTXQCD_MP_CG_MULTISHIFT");
+      return (e && *e && *e != '0');
+    }();
+    return v;
+  }
+
+  // MP-CG Session H gate: SP multishift + DP MULTISHIFT refinement (NOT
+  // per-pole polish).  Preserves Krylov sharing across SP→DP boundary.
+  // Mutually exclusive with MpMultishiftEnabled; refine takes precedence
+  // if both set.
+  static bool MpMultishiftRefineEnabled() {
+    static bool v = []() {
+      const char *e = std::getenv("DTXQCD_MP_CG_MULTISHIFT_REFINE");
+      return (e && *e && *e != '0');
     }();
     return v;
   }
@@ -377,8 +410,18 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
         // between MatQuda and persistent-Dirac uses 'B'; 'C' selects the
         // full native CG state path introduced in Phase 2.5).
         if (StyleCEnabled()) {
-          DTXQCDMultiShiftCGQUDA_StyleC(Mop, Mop_quda, poles, tol, src, xk,
-                                         MaxIter);
+          if (MpMultishiftRefineEnabled()) {
+            // Session H: SP multishift + DP MULTISHIFT refinement (no per-pole).
+            DTXQCDMultiShiftCGQUDA_StyleC_MpMultishiftRefine(
+                Mop, Mop_quda, poles, tol, src, xk, MaxIter);
+          } else if (MpMultishiftEnabled()) {
+            // Session D canonical pattern: SP multishift + DP polish.
+            DTXQCDMultiShiftCGQUDA_StyleC_MpMultishift(Mop, Mop_quda, poles,
+                                                       tol, src, xk, MaxIter);
+          } else {
+            DTXQCDMultiShiftCGQUDA_StyleC(Mop, Mop_quda, poles, tol, src, xk,
+                                           MaxIter);
+          }
         } else {
           DTXQCDMultiShiftCGQUDA_StageB(Mop, Mop_quda, poles, tol, src, xk,
                                          MaxIter);

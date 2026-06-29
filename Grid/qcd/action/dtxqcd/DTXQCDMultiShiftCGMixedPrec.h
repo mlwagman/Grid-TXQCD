@@ -60,6 +60,63 @@ inline void DtxqcdHermOpF(DTXQCDMopF &Mop_f,
   Mop_f.Mdag(tmp_f, mmp_f);
 }
 
+// Pure-SP single-shift CG cleanup:
+//   solve (M^dag M + pole) x = src to tol with SP matvec + SP residual
+//   accumulator, NO mid-call DP reliable update, warm-started from the
+//   multishift's approximate x.  Caller decides whether to call this or the
+//   legacy MP version; this one drops DP HermOps entirely from the inner.
+//
+//   Returns true on success (SP residual reached target); false if MaxIter
+//   exhausted without convergence.  The caller is expected to verify the
+//   answer with one DP HermOp at the end and fall back to the legacy MP
+//   cleanup if needed.
+template <class DTXQCDMopF>
+inline bool DTXQCDSingleShiftCGSpCleanup(
+    DTXQCDMopF &Mop_f, RealD pole, RealD tol,
+    const DTXQCDFermionDoubled &src, DTXQCDFermionDoubled &x,
+    int MaxIter) {
+  using namespace dtxqcd_msshift_detail;
+  GridBase *grid   = src.Grid();
+  GridBase *grid_f = &Mop_f.RbGrid();
+  DTXQCDFermionDoubled r(grid), p(grid), Ap(grid), mmp(grid);
+  DTXQCDFermionDoubledF p_f(grid_f), mmp_f(grid_f), tmp_f(grid_f);
+
+  auto ApplyShiftSP = [&](const DTXQCDFermionDoubled &in,
+                          DTXQCDFermionDoubled &out) {
+    DtxqcdPrecisionChange(p_f, in);
+    DtxqcdHermOpF(Mop_f, p_f, mmp_f, tmp_f);
+    DtxqcdPrecisionChange(out, mmp_f);
+    Axpy(out, pole, in);                 // out = (MdagM + pole) in  (SP matvec)
+  };
+
+  // Initial residual via SP matvec (warm start from x).  This is the only
+  // place we differ from DTXQCDSingleShiftCGMixedPrec: no DP starting probe.
+  ApplyShiftSP(x, mmp);
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    r.upper.f[a] = src.upper.f[a] - mmp.upper.f[a];
+    r.lower.f[a] = src.lower.f[a] - mmp.lower.f[a];
+  }
+  p = r;
+  RealD rsq = norm2(r);
+  RealD ssq = norm2(src);
+  RealD target = ssq * tol * tol;
+  if (rsq < target) return true;
+
+  for (int k = 1; k <= MaxIter; ++k) {
+    ApplyShiftSP(p, Ap);                 // Ap = (MdagM + pole) p
+    RealD pAp = real(innerProduct(p, Ap));
+    RealD alpha = rsq / pAp;
+    Axpy(x, alpha, p);                   // x += alpha p
+    Axpy(r, -alpha, Ap);                 // r -= alpha Ap
+    RealD rsq_new = norm2(r);
+    if (rsq_new < target) return true;
+    RealD beta = rsq_new / rsq;
+    rsq = rsq_new;
+    Scale_Add(p, beta, r);               // p = beta p + r
+  }
+  return false;
+}
+
 // Single-shift reliable-update mixed-precision CG cleanup:
 //   solve (M^dag M + pole) x = src to tol, SP matvec + DP reliable update,
 //   warm-started from the multishift's approximate x.  Used to polish the
@@ -311,7 +368,60 @@ inline void DTXQCDMultiShiftCGMixedPrec(
       // ~1e-7).  Polish each under-converged shift with a single-shift
       // reliable-update MP CG, warm-started from psi[s] -- still SP matvec, so
       // the speedup is preserved; far cheaper than a full DP multishift.
+      //
+      // DTXQCD_MP_CG_CLEANUP=1: skip the per-shift DP probe + DP reliable
+      // updates inside cleanup; run pure-SP cleanup; verify with ONE DP
+      // HermOp per shift at the end.  If any shift fails verification, fall
+      // back to legacy MP cleanup for that shift.
+      const char *cleanup_env = std::getenv("DTXQCD_MP_CG_CLEANUP");
+      const int cleanup_sp_only = (cleanup_env && *cleanup_env) ? std::atoi(cleanup_env) : 0;
       int n_cleanup = 0;
+      int n_fallback = 0;
+      if (cleanup_sp_only) {
+        // Skip the per-shift DP probe.  Use the SP residual bound
+        // c * z[s][iz]^2 (already enforced by the convergence check above) as
+        // the proxy for "is shift s done?".  Then run pure-SP cleanup for
+        // shifts whose SP bound exceeds the per-shift target; do a single DP
+        // verify per shift at the end and fall back if needed.
+        for (int s = 0; s < nshift; ++s) {
+          // Trust the multishift SP recurrence: every shift's residual proxy
+          // already passed its target.  Run the SP-only single-shift cleanup
+          // anyway as a safety polish; the warm start means it usually
+          // returns at iter 0 (cheap).
+          ++n_cleanup;
+          bool sp_ok = DTXQCDSingleShiftCGSpCleanup(Mop_f, poles[s], tol[s],
+                                                    src, psi[s], MaxIter);
+          // One DP HermOp to verify.  This is the only DP work per shift in
+          // the SP-only cleanup path.
+          RealD dd = DtxqcdHermOpD(Mop_d, psi[s], mmp, tmp);
+          (void)dd;
+          Axpy(mmp, poles[s], psi[s]);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            r.upper.f[a] = mmp.upper.f[a] - src.upper.f[a];
+            r.lower.f[a] = mmp.lower.f[a] - src.lower.f[a];
+          }
+          RealD true_resid = std::sqrt(norm2(r) / norm2(src));
+          if (!sp_ok || true_resid > tol[s]) {
+            // SP cleanup wasn't enough.  Fall back to the legacy MP cleanup
+            // (DP reliable update inside) for this shift only.
+            ++n_fallback;
+            DTXQCDSingleShiftCGMixedPrec(Mop_d, Mop_f, poles[s], tol[s], src,
+                                         psi[s], MaxIter, ReliableUpdateFreq);
+          }
+        }
+        std::cout << GridLogMessage
+                  << "[DTXQCDMultiShiftCGMixedPrec] converged iter=" << k
+                  << " nshift=" << nshift
+                  << " reliable_updates=" << reliable_updates
+                  << " sp_cleanup_shifts=" << n_cleanup
+                  << " sp_cleanup_fallback=" << n_fallback
+                  << "  SP-matrix=" << MatrixTimer.Elapsed()
+                  << "  precChange=" << PrecChangeTimer.Elapsed()
+                  << "  reliable=" << ReliableTimer.Elapsed()
+                  << "  [MP_CG_CLEANUP=1]" << std::endl;
+        return;
+      }
+      // Legacy path: per-shift DP probe + MP cleanup (with DP reliable update inside).
       for (int s = 0; s < nshift; ++s) {
         RealD dd = DtxqcdHermOpD(Mop_d, psi[s], mmp, tmp);
         (void)dd;

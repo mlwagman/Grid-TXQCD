@@ -428,7 +428,7 @@ inline void ApplyAuxKernelNative(
     quda::ColorSpinorField &in_l0, quda::ColorSpinorField &in_l1,
     quda::ColorSpinorField &out_u0, quda::ColorSpinorField &out_u1,
     quda::ColorSpinorField &out_l0, quda::ColorSpinorField &out_l1,
-    bool transpose_aux = true, bool use_dn_conj = true) {
+    bool transpose_aux, bool use_dn_conj) {
   if (transpose_aux && use_dn_conj)
     ApplyAuxKernelNativeImpl<true, true>(aux, perm_d,
         in_u0, in_u1, in_l0, in_l1, out_u0, out_u1, out_l0, out_l1);

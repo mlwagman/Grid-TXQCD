@@ -113,13 +113,21 @@ DTXQCD_NATIVE_IMPL_SRCS = \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_impl.cc \
-  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_sp_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_sp_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_sp_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_sp_impl.cc
 
 DTXQCD_NATIVE_IMPL_OBJS = \
   dtxqcd_quda_gamma5_native_impl.o \
   dtxqcd_quda_pre_mat_lower_native_impl.o \
   dtxqcd_quda_post_mat_lower_native_impl.o \
-  dtxqcd_quda_aux_kernel_native_v2_impl.o
+  dtxqcd_quda_aux_kernel_native_v2_impl.o \
+  dtxqcd_quda_gamma5_native_sp_impl.o \
+  dtxqcd_quda_pre_mat_lower_native_sp_impl.o \
+  dtxqcd_quda_post_mat_lower_native_sp_impl.o \
+  dtxqcd_quda_aux_kernel_native_v2_sp_impl.o
 
 dtxqcd_quda_gamma5_native_impl.o: \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_impl.cc
@@ -137,6 +145,23 @@ dtxqcd_quda_aux_kernel_native_v2_impl.o: \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
+# Phase β Session B — SP variants
+dtxqcd_quda_gamma5_native_sp_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_sp_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_pre_mat_lower_native_sp_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_sp_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_post_mat_lower_native_sp_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_sp_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_aux_kernel_native_v2_sp_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_sp_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
 # Specific rule for gen_dtxqcd_cfgs: split compile + link so nvcc receives only
 # .cu/.cc sources during compile and only .o objects during link (nvcc gets
 # confused if .o appears alongside .cc on the same invocation).
@@ -150,6 +175,17 @@ LINKER = $(subst -x cu,,$(CXX))
 gen_dtxqcd_cfgs: gen_dtxqcd_cfgs.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ gen_dtxqcd_cfgs.o $(DTXQCD_NATIVE_IMPL_OBJS) \
 	  $(LDFLAGS) $(LIBS)
+
+# Phase W.3: full-QUDA Wilson hop force test.  Pulls in DTXQCDMpcOpQUDA.h
+# transitively (via DTXQCDWilsonCloverRationalFullActionQudaPrimitive.h ->
+# DTXQCDWilsonCloverRationalFullAction.h), which references the SP native
+# kernel symbols, so link DTXQCD_NATIVE_IMPL_OBJS.
+Test_dtxqcd_wilson_hop_full_quda.o: Test_dtxqcd_wilson_hop_full_quda.cc params.h eig_diag.h meas_helper.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_wilson_hop_full_quda: Test_dtxqcd_wilson_hop_full_quda.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_wilson_hop_full_quda.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
 # Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
 # edits (e.g. EIG_DIAG tuning) force a rebuild of gen_qcd_cfgs* and the

@@ -528,21 +528,23 @@ inline void computeCloverSigmaOprodWithSchurFields(
   }
 
   // Build a CPU-side TENSOR_GEOMETRY GaugeField pointing at the user buffer.
-  // We use a dummy gauge param with the right dimensions (taken from gauge_param)
-  // and link_type=GENERAL, reconstruct=NO, geometry=TENSOR (mirroring the
-  // device oprod setup below).
-  // GaugeFieldParam picks up gauge_order from gauge_param via this constructor.
+  // Pattern mirrors the force sibling at line 394-403: bare constructor with
+  // host-pointer arg sets internal bookkeeping for QUDA_REFERENCE_FIELD_CREATE
+  // implicitly; do NOT mutate `create` or `field` after the constructor —
+  // doing so clobbers QUDA's host-pointer bookkeeping and causes a buffer
+  // overrun that corrupts adjacent heap allocations at V≥8⁴.
+  // (Original Phase H.1 commit `6b08a6b0` had these explicit mutations, which
+  // passed 4⁴ FD by chance but corrupted aux force lattices at 8⁴+.)
   GaugeFieldParam cpuOprodParam(*gauge_param, /*h_gauge=*/h_oprod,
                                  QUDA_GENERAL_LINKS);
   cpuOprodParam.location    = QUDA_CPU_FIELD_LOCATION;
   cpuOprodParam.geometry    = QUDA_TENSOR_GEOMETRY;
   cpuOprodParam.reconstruct = QUDA_RECONSTRUCT_NO;
-  cpuOprodParam.create      = QUDA_REFERENCE_FIELD_CREATE;
-  cpuOprodParam.field       = nullptr;
-  cpuOprodParam.setPrecision(QUDA_DOUBLE_PRECISION, false);
   GaugeField cpuOprod(cpuOprodParam);
 
-  // Device oprod accumulator (TENSOR_GEOMETRY, RECONSTRUCT_NO).
+  // Device oprod accumulator (TENSOR_GEOMETRY, RECONSTRUCT_NO).  Mirrors the
+  // force sibling's device-mom pattern (line 397-403): mutate from cpuParam
+  // copy, set ZERO_FIELD_CREATE + back-reference for the sister.
   GaugeFieldParam devOprodParam(cpuOprodParam);
   devOprodParam.location = QUDA_CUDA_FIELD_LOCATION;
   devOprodParam.create   = QUDA_ZERO_FIELD_CREATE;
@@ -550,10 +552,11 @@ inline void computeCloverSigmaOprodWithSchurFields(
   devOprodParam.setPrecision(gauge_param->cuda_prec, true);
   GaugeField oprod(devOprodParam);
 
-  // Fermion params — copy of the force-sibling setup.
-  GaugeFieldParam fParam_for_dim(*gauge_param, /*h_gauge=*/nullptr,
-                                  QUDA_GENERAL_LINKS);
-  ColorSpinorParam qParam(nullptr, *inv_param, fParam_for_dim.x, false,
+  // Fermion params — mirror the force sibling (line 405-409) exactly, using
+  // cpuOprodParam.x for lattice dimensions.  No separate fParam_for_dim
+  // (which was an extra GaugeFieldParam whose destruction touched the host
+  // pointer bookkeeping at V≥8⁴).
+  ColorSpinorParam qParam(nullptr, *inv_param, cpuOprodParam.x, false,
                           QUDA_CUDA_FIELD_LOCATION);
   qParam.setPrecision(devOprodParam.Precision(), devOprodParam.Precision(), true);
   qParam.create     = QUDA_NULL_FIELD_CREATE;
@@ -572,25 +575,25 @@ inline void computeCloverSigmaOprodWithSchurFields(
     x[i] = ColorSpinorField(qParam);
     p[i] = ColorSpinorField(qParam);
     {
-      ColorSpinorParam cp(h_x_par[i], *inv_param, fParam_for_dim.x,
+      ColorSpinorParam cp(h_x_par[i], *inv_param, cpuOprodParam.x,
                           /*pc=*/true, inv_param->input_location);
       ColorSpinorField cf(cp);
       x[i][parity] = cf;
     }
     {
-      ColorSpinorParam cp(h_x_other[i], *inv_param, fParam_for_dim.x,
+      ColorSpinorParam cp(h_x_other[i], *inv_param, cpuOprodParam.x,
                           /*pc=*/true, inv_param->input_location);
       ColorSpinorField cf(cp);
       x[i][other_parity] = cf;
     }
     {
-      ColorSpinorParam cp(h_p_par[i], *inv_param, fParam_for_dim.x,
+      ColorSpinorParam cp(h_p_par[i], *inv_param, cpuOprodParam.x,
                           /*pc=*/true, inv_param->input_location);
       ColorSpinorField cf(cp);
       p[i][parity] = cf;
     }
     {
-      ColorSpinorParam cp(h_p_other[i], *inv_param, fParam_for_dim.x,
+      ColorSpinorParam cp(h_p_other[i], *inv_param, cpuOprodParam.x,
                           /*pc=*/true, inv_param->input_location);
       ColorSpinorField cf(cp);
       p[i][other_parity] = cf;

@@ -713,7 +713,30 @@ class DTXQCDWilsonCloverRationalEOActionQudaPrimitive
     // Host buffer for σ-Oprod: V × 6 × 18 doubles.  We allocate it per call
     // (cheap — V*6*18*8 bytes; for 16³×48 = 170 MB which is fine on one
     // GPU node; for 4⁴ negligible).  Persistent buffer would be a follow-up.
-    std::vector<double> oprod_host(uint64_t(V) * 6 * 18, 0.0);
+    //
+    // CANARY PROBE 2026-06-25 — buffer-overrun detection.  Allocate
+    // [PAD][PAYLOAD V*6*18][PAD] doubles with a sentinel pattern in the pads.
+    // After the QUDA call, scan the pads for non-sentinel writes — any hit
+    // localizes which side of the payload is overrunning and by how much.
+    //
+    // Sentinel: NaN encoding 0x7FF80000DEADBEEF (signaling NaN with magic
+    // tag).  Easily distinguished from any QUDA-produced float that's a
+    // legitimate sum of bilinears (rarely > O(1e3)).
+    const uint64_t payload = uint64_t(V) * 6 * 18;
+    const uint64_t PAD_DOUBLES = 65536;  // 512 KB pad each side — plenty for any plausible OOB
+    std::vector<double> oprod_full(2 * PAD_DOUBLES + payload, 0.0);
+    {
+      // Write sentinel pattern: alternating +DEADBEEF / -DEADBEEF doubles
+      // (specific bit pattern so we can tell if QUDA wrote there).
+      union { uint64_t u; double d; } sentinel_lo, sentinel_hi;
+      sentinel_lo.u = 0x7FF80000DEADBEEFULL;
+      sentinel_hi.u = 0x7FF80000CAFEBABEULL;
+      for (uint64_t i = 0; i < PAD_DOUBLES; ++i) {
+        oprod_full[i]                              = sentinel_lo.d;
+        oprod_full[PAD_DOUBLES + payload + i]      = sentinel_hi.d;
+      }
+    }
+    double *oprod_host = &oprod_full[PAD_DOUBLES];
 
     int saved_use_resident = inv_param.use_resident_solution;
     QudaDagType saved_dagger = inv_param.dagger;
@@ -735,43 +758,94 @@ class DTXQCDWilsonCloverRationalEOActionQudaPrimitive
     const double sigma_trace_coeff = 0.0;
 
     Quda::computeCloverSigmaOprodWithSchurFields(
-        oprod_host.data(),
+        oprod_host,
         x_ptrs.data(), y_ptrs.data(),
         w_ptrs.data(), z_ptrs.data(),
         Nrhs, coeff_rhs,
         ck, dt, sigma_trace_coeff,
         &force_gauge_param, &inv_param);
 
+    // ---- Canary check: scan pads for QUDA writes ----
+    {
+      union { uint64_t u; double d; } sentinel_lo, sentinel_hi;
+      sentinel_lo.u = 0x7FF80000DEADBEEFULL;
+      sentinel_hi.u = 0x7FF80000CAFEBABEULL;
+      uint64_t lo_overruns = 0, hi_overruns = 0;
+      int64_t  lo_min_idx = -1, lo_max_idx = -1;
+      int64_t  hi_min_idx = -1, hi_max_idx = -1;
+      double   lo_first_val = 0.0, hi_first_val = 0.0;
+      auto bits = [](double d){ union { double d; uint64_t u; } cv; cv.d=d; return cv.u; };
+      for (uint64_t i = 0; i < PAD_DOUBLES; ++i) {
+        if (bits(oprod_full[i]) != sentinel_lo.u) {
+          if (lo_min_idx < 0) { lo_min_idx = (int64_t)i; lo_first_val = oprod_full[i]; }
+          lo_max_idx = (int64_t)i;
+          ++lo_overruns;
+        }
+        uint64_t hi_pos = PAD_DOUBLES + payload + i;
+        if (bits(oprod_full[hi_pos]) != sentinel_hi.u) {
+          if (hi_min_idx < 0) { hi_min_idx = (int64_t)i; hi_first_val = oprod_full[hi_pos]; }
+          hi_max_idx = (int64_t)i;
+          ++hi_overruns;
+        }
+      }
+      if (lo_overruns || hi_overruns) {
+        std::cout << GridLogMessage
+                  << "[CANARY-PROBE] V=" << V
+                  << " payload=" << payload
+                  << " pad=" << PAD_DOUBLES
+                  << " lower=" << (lower ? "L" : "U")
+                  << "  lo_overruns=" << lo_overruns
+                  << " lo_range=[" << lo_min_idx << "," << lo_max_idx << "]"
+                  << " lo_first_val=" << lo_first_val
+                  << "  hi_overruns=" << hi_overruns
+                  << " hi_range=[" << hi_min_idx << "," << hi_max_idx << "]"
+                  << " hi_first_val=" << hi_first_val
+                  << std::endl;
+      } else {
+        std::cout << GridLogMessage
+                  << "[CANARY-PROBE] V=" << V
+                  << " payload=" << payload
+                  << " pads CLEAN (no OOB)"
+                  << " lower=" << (lower ? "L" : "U")
+                  << std::endl;
+      }
+    }
+
     inv_param.use_resident_solution = saved_use_resident;
     inv_param.dagger                = saved_dagger;
     inv_param.twist_flavor          = saved_twist;
     inv_param.input_location        = saved_input_loc;
 
-    // Unpack: oprod_host layout (MILC TENSOR_GEOMETRY, RECONSTRUCT_NO):
-    //   contiguous in (site_eo) outer, (mn) middle (6 values, 0..5), (entry)
-    //   inner (18 doubles for a 3x3 complex ColourMatrix).
-    //   per_site_doubles = 6 * 18 = 108.
+    // Unpack: QUDA writes TENSOR_GEOMETRY GaugeField in MILC EO order with
+    // PARITY-MAJOR layout (parity 0 sites first, then parity 1 sites).  Within
+    // a parity, QUDA's canonical EO mapping is:
+    //   site_eo_quda = (((t * Lz + z) * Ly + y) * (Lx/2)) + (x/2)
+    // This is NOT the same as `site_lex >> 1` which `Quda::eo_to_lex_permute`
+    // assumes — at 4⁴ both maps happen to coincide site-by-site for all V,
+    // but at 8⁴+ they diverge and the permute would put data at wrong sites.
+    //
+    // Per-site layout within each parity slot is 6 (μν) × 18 doubles
+    // (3×3 complex ColourMatrix), so per-site_eo stride = 108 doubles.
     Coordinate lc = this->grid_.LocalDimensions();
+    const int Lx = lc[0], Ly = lc[1], Lz = lc[2];
+    const int Lx2 = Lx / 2;
+    const int V_eo_unpack = V / 2;
     for (int mn = 0; mn < 6; ++mn) {
-      // Extract mn slot for all EO sites (V * 18 doubles).
-      std::vector<double> eo_buf(uint64_t(V) * 18);
-      thread_for(site_eo, V, {
-        const double *src = &oprod_host[(uint64_t(site_eo) * 6 + mn) * 18];
-        double *dst = &eo_buf[uint64_t(site_eo) * 18];
-        std::memcpy(dst, src, 18 * sizeof(double));
-      });
-      // EO→lex permute.
-      std::vector<double> lex_buf(uint64_t(V) * 18);
-      Quda::eo_to_lex_permute(eo_buf.data(), lex_buf.data(), V, 18, lc);
-      // Per-site convert to ColourMatrix + pokeSite.
       cs_out[mn] = Zero();
       cs_out[mn].Checkerboard() = 0;  // full grid; checkerboard tag is inert
       using SiteCM = typename LatticeColourMatrix::scalar_object;
       Coordinate lex_coord(Nd);
       for (int lex_site = 0; lex_site < V; ++lex_site) {
         Lexicographic::CoorFromIndex(lex_coord, lex_site, lc);
+        const int x = lex_coord[0];
+        const int y = lex_coord[1];
+        const int z = lex_coord[2];
+        const int t = lex_coord[3];
+        const int parity = (x + y + z + t) & 1;
+        const int site_eo_quda = ((t * Lz + z) * Ly + y) * Lx2 + (x / 2);
+        const uint64_t site_idx = uint64_t(parity) * V_eo_unpack + site_eo_quda;
+        const double *p = &oprod_host[(site_idx * 6 + mn) * 18];
         SiteCM scm;
-        const double *p = &lex_buf[uint64_t(lex_site) * 18];
         for (int i = 0; i < 3; ++i) {
           for (int j = 0; j < 3; ++j) {
             scm()()(i, j) = ComplexD(p[(i * 3 + j) * 2],

@@ -117,20 +117,35 @@ int main(int argc, char **argv) {
   // σ-piece convention (one round of deriv() on each path), not the integrator
   // — bit-exactness against the production CG-tol is unnecessary.  At deg=6
   // and tol=1e-8, both refresh() and deriv() converge in ~2-5k iterations.
+  // DTXQCD_TEST_RAT_DEGREE env knob lets us probe degree-dependent bugs
+  // (e.g. the 16³×48 dH=6121 production smoke regression vs deg=6 4⁴ FD pass).
+  int rat_degree = 6;
+  if (const char *e_d = std::getenv("DTXQCD_TEST_RAT_DEGREE")) {
+    if (*e_d) rat_degree = std::atoi(e_d);
+  }
   OneFlavourRationalParams rp(/*lo*/        1.0e-1,
                               /*hi*/        2.0e2,
                               /*MaxIter*/   20000,
                               /*tol*/       1.0e-8,
-                              /*degree*/    6,
+                              /*degree*/    rat_degree,
                               /*precision*/ 50,
                               /*BoundsCheckFreq*/ 0,
                               /*mdtol*/     1.0e-8);
+  std::cout << GridLogMessage << "[FD test] RAT_DEGREE = " << rat_degree << std::endl;
 
-  // Two action instances — they share the same csw, mass, RNG, but each
+  // Two action instances — they share the same csw, mass, but each
   // owns its own pseudofermion.  refresh() with the same RNG state seeds the
   // same Phi in both, so deriv() differences come ONLY from the σ-piece path.
+  //
+  // CRITICAL: each action needs its OWN sRNG too (not just pRNG).  If both
+  // refresh() calls share the same GridSerialRNG, the first call advances
+  // its state and the second sees different randoms → different Phi → fake
+  // aux-force discrepancy at V≥8⁴.  At 4⁴ the sRNG happens not to advance
+  // measurably (small lattice consumes nothing).
   GridParallelRNG pRNG_A(&Grid);  pRNG_A.SeedFixedIntegers({901, 902, 903, 904});
   GridParallelRNG pRNG_B(&Grid);  pRNG_B.SeedFixedIntegers({901, 902, 903, 904});
+  GridSerialRNG sRNG_A;           sRNG_A.SeedFixedIntegers({611, 612, 613, 614});
+  GridSerialRNG sRNG_B;           sRNG_B.SeedFixedIntegers({611, 612, 613, 614});
 
   DTXQCDWilsonCloverRationalEOActionQudaPrimitive action_A(
       Grid, RBGrid, mass, rp, csw);
@@ -138,8 +153,8 @@ int main(int argc, char **argv) {
       Grid, RBGrid, mass, rp, csw);
 
   // Same RNG seeds → same Phi after refresh.
-  action_A.refresh(U, sRNG, pRNG_A);
-  action_B.refresh(U, sRNG, pRNG_B);
+  action_A.refresh(U, sRNG_A, pRNG_A);
+  action_B.refresh(U, sRNG_B, pRNG_B);
 
   DTXQCDField dSdU_A(&Grid), dSdU_B(&Grid);
 

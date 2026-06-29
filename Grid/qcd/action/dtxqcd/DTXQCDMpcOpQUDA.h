@@ -74,6 +74,13 @@
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_decl.h>
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_decl.h>
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_decl.h>
+// Phase β Session B — SP native kernel decls for the MP-CG cleanup path.
+// Activated only when DTXQCD_MP_CG_CLEANUP=1.  Pure additions (DP-Style C
+// behaviour unchanged).
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_sp_decl.h>
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_sp_decl.h>
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_sp_decl.h>
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_sp_decl.h>
 #include <Grid/util/QudaInit.h>
 #include <Grid/util/QudaFieldConvert.h>
 
@@ -391,6 +398,14 @@ class DTXQCDMpcOpQUDA {
     return style_b_state_.cuda_param_tmpl;
   }
 
+  // SP variant — used by DoubledStateCSFSp.allocate().  Caller-owned SP CSFs
+  // (FloatNOrder<float,4,3,4>, UKQCD basis, halo-padded) hold the inner-loop
+  // SP cleanup state.  Lazy-builds the SP persistent Dirac on first call.
+  quda::ColorSpinorParam MakeNativeCsfParamSp() {
+    init_style_c_sp_();
+    return style_c_sp_state_.cuda_param_tmpl;
+  }
+
   void M_device_csf(quda::ColorSpinorField *in_upper[DtxqcdNf],
                     quda::ColorSpinorField *in_lower[DtxqcdNf],
                     quda::ColorSpinorField *out_upper[DtxqcdNf],
@@ -493,6 +508,96 @@ class DTXQCDMpcOpQUDA {
     }
   }
 
+  // ------------------------------------------------------------------------
+  // Phase β Session B — SP-precision M_device_csf_sp / Mdag_device_csf_sp.
+  // Identical structure to the DP version above but with SP native kernels
+  // and SP persistent Dirac (cuda_prec=QUDA_SINGLE_PRECISION).  The aux fields
+  // and perm-table are precision-agnostic and shared with the DP path.
+  //
+  // Aux field accumulation runs as `aux_kernel + ax(scale)` with the same
+  // 0.5/kappa rescale as the DP path.  SP scratch CSFs live in the caller's
+  // DoubledStateCSFSp arrays; this routine does no allocation.
+  // ------------------------------------------------------------------------
+  void M_device_csf_sp(quda::ColorSpinorField *in_upper[DtxqcdNf],
+                      quda::ColorSpinorField *in_lower[DtxqcdNf],
+                      quda::ColorSpinorField *out_upper[DtxqcdNf],
+                      quda::ColorSpinorField *out_lower[DtxqcdNf],
+                      quda::ColorSpinorField *scratch_lower[DtxqcdNf],
+                      bool dagger = false) {
+    GRID_ASSERT(gauge_loaded_ && "DTXQCDMpcOpQUDA::M_device_csf_sp called before SetGauge");
+    init_style_b_();
+    init_style_c_sp_();
+    init_aux_perm_();
+
+    cudaDeviceSynchronize();
+
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      DtxqcdQudaPreMatLowerNativeSp::ApplyPreMatLowerNativeSp(
+          *in_lower[a], *scratch_lower[a]);
+    }
+
+    cudaDeviceSynchronize();
+
+    double scale = 0.5 / inv_param_.kappa;
+    quda::vector<quda::Complex> a_coeff{quda::Complex(scale, 0.0)};
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      if (dagger) {
+        style_c_sp_state_.dirac->Mdag(*out_upper[a], *in_upper[a]);
+      } else {
+        style_c_sp_state_.dirac->M(*out_upper[a], *in_upper[a]);
+      }
+      style_c_sp_state_.dirac->Mdag(*out_lower[a], *scratch_lower[a]);
+
+      quda::vector_ref<quda::ColorSpinorField> y_ref_u{*out_upper[a]};
+      quda::vector_ref<quda::ColorSpinorField> y_ref_l{*out_lower[a]};
+      quda::blas::ax(a_coeff, y_ref_u);
+      quda::blas::ax(a_coeff, y_ref_l);
+    }
+
+    cudaDeviceSynchronize();
+
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      DtxqcdQudaPostMatLowerNativeSp::ApplyPostMatLowerNativeSp(*out_lower[a]);
+    }
+
+    int V = Quda::local_volume(grid_);
+    if (!aux_cache_.allocated()) {
+      DtxqcdQudaAuxKernelDevice::allocate_aux_cache(aux_cache_, (std::size_t)V);
+    }
+    DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_, p_,
+                                                   aux_cache_);
+    DtxqcdQudaAuxKernelNativeV2Sp::ApplyAuxKernelNativeSp(
+        aux_cache_, aux_perm_d_,
+        *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
+        *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
+        /*transpose_aux=*/true, /*use_dn_conj=*/true);
+
+    cudaDeviceSynchronize();
+  }
+
+  void Mdag_device_csf_sp(quda::ColorSpinorField *in_upper[DtxqcdNf],
+                         quda::ColorSpinorField *in_lower[DtxqcdNf],
+                         quda::ColorSpinorField *out_upper[DtxqcdNf],
+                         quda::ColorSpinorField *out_lower[DtxqcdNf],
+                         quda::ColorSpinorField *scratch_lower[DtxqcdNf]) {
+    GRID_ASSERT(gauge_loaded_ && "DTXQCDMpcOpQUDA::Mdag_device_csf_sp called before SetGauge");
+    int g5_variant = g5_variant_();
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      DtxqcdQudaGamma5NativeSp::ApplyGamma5InplaceNativeSp(*in_upper[a], g5_variant);
+      DtxqcdQudaGamma5NativeSp::ApplyGamma5InplaceNativeSp(*in_lower[a], g5_variant);
+    }
+    M_device_csf_sp(in_upper, in_lower, out_upper, out_lower, scratch_lower,
+                    /*dagger=*/false);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      DtxqcdQudaGamma5NativeSp::ApplyGamma5InplaceNativeSp(*in_upper[a], g5_variant);
+      DtxqcdQudaGamma5NativeSp::ApplyGamma5InplaceNativeSp(*in_lower[a], g5_variant);
+    }
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      DtxqcdQudaGamma5NativeSp::ApplyGamma5InplaceNativeSp(*out_upper[a], g5_variant);
+      DtxqcdQudaGamma5NativeSp::ApplyGamma5InplaceNativeSp(*out_lower[a], g5_variant);
+    }
+  }
+
   // Env DTXQCD_STAGEB_STYLE = "B" or "b" → use persistent CSF + persistent
   // Dirac + dirac->M / dirac->Mdag in M_device (Style B, M-wrap.5b.3).
   // Anything else → MatQuda per call (Style A, M-wrap.5b.2 Option α/β baseline).
@@ -526,21 +631,28 @@ class DTXQCDMpcOpQUDA {
     ResetAuxCache();
     // Task #223: skip QUDA persistent-handle teardown.  QUDA's atexit cleanup
     // tears down its global state before our destructor runs at program exit;
-    // calling delete on the persistent Dirac* or .reset() on a ColorSpinorField
-    // unique_ptr at this point crashes inside QUDA's destructor (it accesses
-    // already-freed internal state — observed as `Aborted (core dumped)` in
-    // libquda.so::ColorSpinorField::destroy after trajectory + dH writes
-    // complete cleanly).  Persistent QUDA handles are program-lifetime
-    // objects; the OS reclaims their memory at process exit.  Drop ownership
-    // without invoking destructors so we exit with rc=0 instead of rc=134.
+    // calling delete on Dirac* or .reset() on a ColorSpinorField unique_ptr
+    // at this point crashes inside QUDA's destructor (it accesses already-
+    // freed internal state).  Persistent QUDA handles are program-lifetime
+    // objects; the OS reclaims their memory at exit cleanly.  Drop ownership
+    // without invoking destructors.
     style_b_state_.dirac = nullptr;
     (void)style_b_state_.in_native.release();
     (void)style_b_state_.out_native.release();
     style_b_state_.initialized = false;
+    style_c_sp_state_.dirac = nullptr;
+    style_c_sp_state_.initialized = false;
     if (aux_perm_d_) {
       acceleratorFreeDevice(aux_perm_d_);
       aux_perm_d_ = nullptr;
     }
+  }
+
+  // Phase β Session B — env DTXQCD_MP_CG_CLEANUP=1 → enable SP cleanup tail.
+  // NOT cached so tests can toggle between runs via setenv/unsetenv.
+  static bool sp_cleanup_enabled_() {
+    const char *e = std::getenv("DTXQCD_MP_CG_CLEANUP");
+    return (e && *e && std::atoi(e) != 0);
   }
 
   GridCartesian         *Grid()   { return grid_; }
@@ -639,9 +751,12 @@ class DTXQCDMpcOpQUDA {
                                                 : QUDA_PERIODIC_T;
     gauge_param_.cpu_prec = QUDA_DOUBLE_PRECISION;
     gauge_param_.cuda_prec = QUDA_DOUBLE_PRECISION;
-    gauge_param_.cuda_prec_sloppy = QUDA_DOUBLE_PRECISION;
-    gauge_param_.cuda_prec_precondition = QUDA_DOUBLE_PRECISION;
-    gauge_param_.cuda_prec_refinement_sloppy = QUDA_DOUBLE_PRECISION;
+    // Phase β Session B — SP sloppy gauge for the optional SP cleanup path
+    // (DTXQCD_MP_CG_CLEANUP=1).  QUDA's loadGaugeQuda allocates both DP and
+    // SP gauge copies when sloppy != main; no extra calls needed.
+    gauge_param_.cuda_prec_sloppy = QUDA_SINGLE_PRECISION;
+    gauge_param_.cuda_prec_precondition = QUDA_SINGLE_PRECISION;
+    gauge_param_.cuda_prec_refinement_sloppy = QUDA_SINGLE_PRECISION;
     gauge_param_.reconstruct = QUDA_RECONSTRUCT_NO;
     gauge_param_.reconstruct_sloppy = QUDA_RECONSTRUCT_NO;
     gauge_param_.reconstruct_precondition = QUDA_RECONSTRUCT_NO;
@@ -661,9 +776,10 @@ class DTXQCDMpcOpQUDA {
     inv_param_.clover_coeff  = csw_ * inv_param_.kappa;
     inv_param_.clover_cpu_prec = QUDA_DOUBLE_PRECISION;
     inv_param_.clover_cuda_prec = QUDA_DOUBLE_PRECISION;
-    inv_param_.clover_cuda_prec_sloppy = QUDA_DOUBLE_PRECISION;
-    inv_param_.clover_cuda_prec_precondition = QUDA_DOUBLE_PRECISION;
-    inv_param_.clover_cuda_prec_refinement_sloppy = QUDA_DOUBLE_PRECISION;
+    // Phase β Session B — SP sloppy clover for SP cleanup path.
+    inv_param_.clover_cuda_prec_sloppy = QUDA_SINGLE_PRECISION;
+    inv_param_.clover_cuda_prec_precondition = QUDA_SINGLE_PRECISION;
+    inv_param_.clover_cuda_prec_refinement_sloppy = QUDA_SINGLE_PRECISION;
     inv_param_.clover_order = QUDA_PACKED_CLOVER_ORDER;
     inv_param_.compute_clover = 1;
     inv_param_.compute_clover_inverse = 1;
@@ -746,6 +862,67 @@ class DTXQCDMpcOpQUDA {
     style_b_state_.in_native.reset();
     style_b_state_.out_native.reset();
     style_b_state_.initialized = false;
+  }
+
+  // Phase β Session B — persistent SP Dirac + SP CSF allocation template.
+  // Lazy-allocated on first M_device_csf_sp / MakeNativeCsfParamSp call.
+  struct StyleCSpPersistent {
+    quda::Dirac *dirac = nullptr;
+    quda::ColorSpinorParam cuda_param_tmpl;  // native SP CSF template
+    QudaInvertParam inv_param_sp;            // SP-precision shadow of inv_param_
+    bool initialized = false;
+  };
+  mutable StyleCSpPersistent style_c_sp_state_;
+
+  void init_style_c_sp_() {
+    if (style_c_sp_state_.initialized) return;
+    init_style_b_();  // ensures Dirac DP infra ready (gauge already loaded)
+    // Build an SP-precision shadow of inv_param_ — only the precision fields
+    // differ.  gauge_param_ is shared; QUDA picks up SP sloppy gauge if
+    // configured, otherwise the DP gauge is downcast on-the-fly per call.
+    style_c_sp_state_.inv_param_sp = inv_param_;
+    style_c_sp_state_.inv_param_sp.cpu_prec  = QUDA_SINGLE_PRECISION;
+    // Sloppy slots SP; cuda_prec stays DP for the Dirac construction path
+    // (gaugePrecise check inside setDiracSloppyParam's inner setDiracParam
+    // requires gaugePrecise->Precision() == inv_param->cuda_prec == DP).
+    style_c_sp_state_.inv_param_sp.cuda_prec = QUDA_SINGLE_PRECISION;  // tmp for CSF param
+    style_c_sp_state_.inv_param_sp.cuda_prec_sloppy = QUDA_SINGLE_PRECISION;
+    style_c_sp_state_.inv_param_sp.cuda_prec_refinement_sloppy = QUDA_SINGLE_PRECISION;
+    style_c_sp_state_.inv_param_sp.cuda_prec_precondition = QUDA_SINGLE_PRECISION;
+    style_c_sp_state_.inv_param_sp.clover_cuda_prec = QUDA_SINGLE_PRECISION;  // tmp
+    style_c_sp_state_.inv_param_sp.clover_cuda_prec_sloppy = QUDA_SINGLE_PRECISION;
+    style_c_sp_state_.inv_param_sp.clover_cuda_prec_precondition = QUDA_SINGLE_PRECISION;
+    style_c_sp_state_.inv_param_sp.clover_cuda_prec_refinement_sloppy = QUDA_SINGLE_PRECISION;
+
+    // SP cuda CSF template: built with cuda_prec=SP so the CSF allocation
+    // is genuinely SP.  Construction uses inv_param.cuda_prec for the
+    // LatticeFieldParam precision (color_spinor_field.h:240).
+    auto cpu_sp = style_b_state_.cpu_param_tmpl;
+    cpu_sp.setPrecision(QUDA_SINGLE_PRECISION);
+    style_c_sp_state_.cuda_param_tmpl = quda::ColorSpinorParam(
+        cpu_sp, style_c_sp_state_.inv_param_sp, QUDA_CUDA_FIELD_LOCATION);
+    style_c_sp_state_.cuda_param_tmpl.create = QUDA_NULL_FIELD_CREATE;
+
+    // Now switch inv_param_sp.cuda_prec / clover_cuda_prec to DP so the
+    // inner setDiracParam check inside setDiracSloppyParam passes
+    // (gaugePrecise + cloverPrecise are DP).
+    style_c_sp_state_.inv_param_sp.cuda_prec = QUDA_DOUBLE_PRECISION;
+    style_c_sp_state_.inv_param_sp.clover_cuda_prec = QUDA_DOUBLE_PRECISION;
+
+    // Persistent SP Dirac — use setDiracSloppyParam (interface_quda.cpp:1554)
+    // which overrides diracParam.gauge to gaugeSloppy (SP, pre-allocated by
+    // loadGaugeQuda because gauge_param_.cuda_prec_sloppy=SP).
+    quda::DiracParam dParam;
+    quda::setDiracSloppyParam(dParam, &style_c_sp_state_.inv_param_sp, /*pc=*/false);
+    style_c_sp_state_.dirac = quda::Dirac::create(dParam);
+    style_c_sp_state_.initialized = true;
+  }
+
+  void shutdown_style_c_sp_() {
+    if (!style_c_sp_state_.initialized) return;
+    delete style_c_sp_state_.dirac;
+    style_c_sp_state_.dirac = nullptr;
+    style_c_sp_state_.initialized = false;
   }
 
   // Style C perm table: (parity, x_cb) → our_eo_idx (production EO ordering).

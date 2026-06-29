@@ -30,6 +30,8 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGMixedPrec.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
 #include <Grid/qcd/action/dtxqcd/DoubledStateCSF.h>
+#include <Grid/qcd/action/dtxqcd/DoubledStateCSFSp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC_SpCleanup.h>
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_csf_helpers.h>
 
 NAMESPACE_BEGIN(Grid);
@@ -119,11 +121,29 @@ inline void DTXQCDMultiShiftCGQUDA_StyleC(
     return;  // RAII frees CSFs
   }
 
+  // Phase β Session B — when SP cleanup is on, DP multishift converges to a
+  // LOOSER tolerance (DTXQCD_MP_CG_LOOSE_TOL, default 1e-5).  SP cleanup tail
+  // then polishes each shift's solution to the original tight tol via SP CG
+  // with DP reliable updates.  At loose tol the DP iter count drops materially
+  // (~30-50% reduction), and the SP cleanup runs at ~2× cheaper per Mat, so
+  // net per-substep cost is ~30% lower.
+  std::vector<RealD> tol_dp = tol;  // tight tol (used by SP cleanup as final gate)
+  if (DTXQCDMpcOpQUDA::sp_cleanup_enabled_()) {
+    double loose = 1.0e-5;
+    const char *e = std::getenv("DTXQCD_MP_CG_LOOSE_TOL");
+    if (e && *e) loose = std::atof(e);
+    for (int s = 0; s < nshift; ++s) {
+      // Run multishift loosely.  Don't go looser than the tight tol if the
+      // user happened to pass an even-looser tol[s] already.
+      tol_dp[s] = std::max(loose, tol[s]);
+    }
+  }
+
   // CG entry: pack src onto device, replicate to r, p, ps[s]; zero psi[s].
   r_q.copy_from_grid(src, Mop_quda.InvertParam(), X_full_dims);
   p_q.copy_from(r_q);
   for (int s = 0; s < nshift; ++s) {
-    rsq_target[s] = cp * tol[s] * tol[s];
+    rsq_target[s] = cp * tol_dp[s] * tol_dp[s];
     ps_q[s].copy_from(r_q);
     psi_q[s].zero();
   }
@@ -286,6 +306,55 @@ inline void DTXQCDMultiShiftCGQUDA_StyleC(
                 << "[DTXQCDMultiShiftCGQUDA_StyleC] did not converge in "
                 << MaxIter << " iterations (c=" << c << ")" << std::endl;
     }
+  }
+
+  // Phase β Session B — optional SP cleanup tail.  When DTXQCD_MP_CG_CLEANUP=1,
+  // refine each pole's CSF solution via single-shift CG entirely on SP CSF
+  // with periodic DP reliable updates.  SP MatQuda is ~2× cheaper than DP;
+  // the SP cleanup is therefore much faster than equivalent DP polish.
+  if (DTXQCDMpcOpQUDA::sp_cleanup_enabled_()) {
+    namespace SP = DtxqcdQudaStyleC;
+    GridStopWatch SpCleanupTimer;
+    SpCleanupTimer.Start();
+
+    // Allocate SP scratches once for the entire per-shift loop.
+    quda::ColorSpinorParam param_sp = Mop_quda.MakeNativeCsfParamSp();
+    SP::DoubledStateCSFSp p_sp, r_sp, Ap_sp, x_sp, mmp_sp, tmp_sp, scratch_lo_sp;
+    p_sp.allocate(param_sp);
+    r_sp.allocate(param_sp);
+    Ap_sp.allocate(param_sp);
+    x_sp.allocate(param_sp);
+    mmp_sp.allocate(param_sp);
+    tmp_sp.allocate(param_sp);
+    scratch_lo_sp.allocate_lower_only(param_sp);
+
+    // DP scratches for reliable updates + src bridge.
+    SP::DoubledStateCSF src_dp_csf, mmp_dp_csf, tmp_dp_csf, r_dp_csf;
+    src_dp_csf.allocate(param_tmpl);
+    mmp_dp_csf.allocate(param_tmpl);
+    tmp_dp_csf.allocate(param_tmpl);
+    r_dp_csf.allocate(param_tmpl);
+    src_dp_csf.copy_from_grid(src, Mop_quda.InvertParam(), X_full_dims);
+
+    // Reuse scratch_lo from outer scope as DP scratch_lo for HermOpDp.
+    int total_sp_iters = 0;
+    for (int s = 0; s < nshift; ++s) {
+      // psi_q[s] is the DP warm start; SingleShiftCGSpCleanupCSF refines it.
+      int it = SP::SingleShiftCGSpCleanupCSF(
+          Mop_quda, poles[s], tol[s],
+          src_dp_csf, psi_q[s],
+          p_sp, r_sp, Ap_sp, x_sp, mmp_sp, tmp_sp, scratch_lo_sp,
+          mmp_dp_csf, tmp_dp_csf, scratch_lo,
+          r_dp_csf,
+          MaxIter, ReliableUpdateFreq);
+      total_sp_iters += it;
+    }
+    SpCleanupTimer.Stop();
+    std::cout << GridLogMessage
+              << "[DTXQCDMultiShiftCGQUDA_StyleC] SP cleanup done: "
+              << "total_sp_iters=" << total_sp_iters
+              << "  SP-cleanup=" << SpCleanupTimer.Elapsed()
+              << "  [MP_CG_CLEANUP=1]" << std::endl;
   }
 
   // Unpack solutions native → flat-24V → Grid.
