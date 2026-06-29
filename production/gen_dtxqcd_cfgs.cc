@@ -32,6 +32,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
 #ifdef GRID_HAVE_QUDA
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOActionQudaPrimitive.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullActionQudaPrimitive.h>
 #endif
 #include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDGaugeActionAdapter.h>
@@ -451,10 +452,32 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<DTXQCDWilsonCloverRationalFullActionQudaPrimitive>
+      PF_full_quda_holder;
+#endif
   if (!PFActionPtr && use_full_pf) {
-    PF_full_holder = std::make_unique<DTXQCDWilsonCloverRationalFullAction>(
-        Grid, RBGrid, mass, rp, csw_);
-    PFActionPtr = PF_full_holder.get();
+#ifdef GRID_HAVE_QUDA
+    const bool full_qw =
+        TXQCDProduction::detail::env_int("USE_FULL_PF_QUDA_WILSON", 1) != 0;
+    if (full_qw) {
+      PF_full_quda_holder = std::make_unique<
+          DTXQCDWilsonCloverRationalFullActionQudaPrimitive>(
+              Grid, RBGrid, mass, rp, csw_);
+      PFActionPtr = PF_full_quda_holder.get();
+      std::cout << GridLogMessage
+                << "[DTXQCD] PF action: non-EO + QUDA Wilson-hopping "
+                   "(USE_FULL_PF_QUDA_WILSON=1 default)" << std::endl;
+    }
+#endif
+    if (!PFActionPtr) {
+      PF_full_holder = std::make_unique<DTXQCDWilsonCloverRationalFullAction>(
+          Grid, RBGrid, mass, rp, csw_);
+      PFActionPtr = PF_full_holder.get();
+      std::cout << GridLogMessage
+                << "[DTXQCD] PF action: non-EO Grid backend "
+                   "(USE_FULL_PF_QUDA_WILSON=0 opt-out)" << std::endl;
+    }
   }
   if (!PFActionPtr) {
     PF_grid_holder = std::make_unique<DTXQCDWilsonCloverRationalEOAction>(
