@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=16
 #SBATCH --exclusive
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm-logs/dtx_w_l6_21.%j.out
 # ============================================================================
 # DTXQCD Nf=2+1 WEAK-FIELD thermalization run at lambda=6 -- direct comparison
