@@ -213,7 +213,12 @@ int main(int argc, char **argv) {
   int nsrc = (int)sources.size();
   std::cout << GridLogMessage << "  nsrc    = " << nsrc << std::endl;
 
-  std::vector<std::vector<RealD>>    all_pion;
+  // Four connected pseudoscalar traces per source:
+  //   du = tr(S_d adj S_u)  [ud̄, standard π⁺]   ud = tr(S_u adj S_d)  [dū]
+  //   uu = tr(S_u adj S_u)                       dd = tr(S_d adj S_d)
+  // In exact isospin all four coincide; at large λ (small aux) they agree up
+  // to aux noise, and uu−dd measures the per-cfg isospin breaking directly.
+  std::vector<std::vector<RealD>>    all_pi_du, all_pi_ud, all_pi_uu, all_pi_dd;
   std::vector<std::vector<ComplexD>> all_p_pos, all_p_neg, all_n_pos, all_n_neg;
 
   for (int isrc = 0; isrc < nsrc; ++isrc) {
@@ -230,9 +235,12 @@ int main(int argc, char **argv) {
       DtxqcdM48Props(*solver, Grid, src, S_u, S_d);
     }
 
-    all_pion.push_back(PionCorrelator(S_d, S_u));
+    all_pi_du.push_back(PionCorrelator(S_d, S_u));
+    all_pi_ud.push_back(PionCorrelator(S_u, S_d));
+    all_pi_uu.push_back(PionCorrelator(S_u, S_u));
+    all_pi_dd.push_back(PionCorrelator(S_d, S_d));
     auto p_pn = BaryonAabCorrelatorPosNeg(S_u, S_d);  // proton (uud)
-    auto n_pn = BaryonAabCorrelatorPosNeg(S_d, S_u);  // neutron (ddu)
+    auto n_pn = BaryonAabCorrelatorPosNeg(S_d, S_u);  // neutron (ddu = udd)
     all_p_pos.push_back(std::move(p_pn.first));
     all_p_neg.push_back(std::move(p_pn.second));
     all_n_pos.push_back(std::move(n_pn.first));
@@ -264,18 +272,25 @@ int main(int argc, char **argv) {
     }
     return out;
   };
-  auto pion_s  = shift_real(all_pion);
+  auto pi_du_s = shift_real(all_pi_du);
+  auto pi_ud_s = shift_real(all_pi_ud);
+  auto pi_uu_s = shift_real(all_pi_uu);
+  auto pi_dd_s = shift_real(all_pi_dd);
   auto p_pos_s = shift_fwd_apbc(all_p_pos);
   auto p_neg_s = shift_fwd_apbc(all_p_neg);
   auto n_pos_s = shift_fwd_apbc(all_n_pos);
   auto n_neg_s = shift_fwd_apbc(all_n_neg);
 
-  std::vector<RealD>    pion_avg(T, 0.0);
+  std::vector<RealD>    pi_du_avg(T, 0.0), pi_ud_avg(T, 0.0),
+                        pi_uu_avg(T, 0.0), pi_dd_avg(T, 0.0);
   std::vector<ComplexD> p_pos_avg(T, 0.0), p_neg_avg(T, 0.0);
   std::vector<ComplexD> n_pos_avg(T, 0.0), n_neg_avg(T, 0.0);
   for (int i = 0; i < nsrc; ++i)
     for (int t = 0; t < T; ++t) {
-      pion_avg[t]  += pion_s[i][t] / (double)nsrc;
+      pi_du_avg[t] += pi_du_s[i][t] / (double)nsrc;
+      pi_ud_avg[t] += pi_ud_s[i][t] / (double)nsrc;
+      pi_uu_avg[t] += pi_uu_s[i][t] / (double)nsrc;
+      pi_dd_avg[t] += pi_dd_s[i][t] / (double)nsrc;
       p_pos_avg[t] += p_pos_s[i][t] / (double)nsrc;
       p_neg_avg[t] += p_neg_s[i][t] / (double)nsrc;
       n_pos_avg[t] += n_pos_s[i][t] / (double)nsrc;
@@ -293,7 +308,11 @@ int main(int argc, char **argv) {
   std::string outfile = data_dir + "/conn_dtxqcd_" + std::to_string(traj) + ".h5";
   if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
-    write(wr, "pion_conn",         pion_avg);
+    write(wr, "pion_conn",         pi_du_avg);   // = pion_du (standard π⁺, ud̄)
+    write(wr, "pion_du",           pi_du_avg);   // tr(S_d adj S_u)
+    write(wr, "pion_ud",           pi_ud_avg);   // tr(S_u adj S_d)
+    write(wr, "pion_uu",           pi_uu_avg);   // tr(S_u adj S_u)
+    write(wr, "pion_dd",           pi_dd_avg);   // tr(S_d adj S_d)
     write(wr, "proton_pos",        p_pos_avg);
     write(wr, "proton_neg",        p_neg_avg);
     write(wr, "proton_fbavg",      p_fbavg);
@@ -302,7 +321,10 @@ int main(int argc, char **argv) {
     write(wr, "neutron_fbavg",     n_fbavg);
     write(wr, "nucleon",           p_pos_avg);        // legacy alias = proton +parity
     write(wr, "nucleon_iso_fbavg", nucl_iso_fbavg);
-    write(wr, "pion_per_src",       pion_s);
+    write(wr, "pion_du_per_src",    pi_du_s);
+    write(wr, "pion_ud_per_src",    pi_ud_s);
+    write(wr, "pion_uu_per_src",    pi_uu_s);
+    write(wr, "pion_dd_per_src",    pi_dd_s);
     write(wr, "proton_pos_per_src", p_pos_s);
     write(wr, "neutron_pos_per_src", n_pos_s);
     write(wr, "traj",   traj);
