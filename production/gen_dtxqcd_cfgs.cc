@@ -27,6 +27,7 @@
 #include <cstring>  // memcmp
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDParityHeatbath.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDLogDetCloverEOAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalEOAction.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h>
@@ -683,7 +684,25 @@ int main(int argc, char **argv) {
   DtxqcdDiagnostics diag(cfg_dir + "/hmc_diagnostics", meas_skip,
                          diag_actions,
                          Grid, RBGrid, pRNG, mass, csw_, lam, n_vev_noise);
-  std::vector<HmcObservable<DTXQCDField> *> Obs = {&ckpt, &diag};
+  // Full-P Z_2 heatbath (task #238).  DTXQCD_PARITY_HEATBATH_PROB in [0, 1]:
+  // Bernoulli probability of applying DtxqcdParity::ApplyField (gauge + all
+  // aux) after each accepted trajectory.  P is an exact symmetry, so any
+  // probability preserves detailed balance; default 0 keeps existing chains
+  // bit-identical.  Set to 0.5 on chains suffering from low-λ Tr[π] SSB
+  // ergodicity failure (see project_dtxqcd_low_lambda_isosinglet_condensate).
+  // Observer placement is BEFORE the checkpointer + diagnostics so the saved
+  // config reflects the post-flip state.
+  const RealD parity_heatbath_prob =
+      TXQCDProduction::detail::env_real("DTXQCD_PARITY_HEATBATH_PROB", 0.0);
+  DTXQCDParityHeatbath parity_heatbath(parity_heatbath_prob);
+  std::vector<HmcObservable<DTXQCDField> *> Obs;
+  if (parity_heatbath_prob > 0.0) {
+    std::cout << GridLogMessage << "[DTXQCDParityHeatbath] ENABLED  prob="
+              << parity_heatbath_prob << std::endl;
+    Obs.push_back(&parity_heatbath);
+  }
+  Obs.push_back(&ckpt);
+  Obs.push_back(&diag);
 
   // ---- smearing + integrator dispatch (2x2 runtime selection).
   //   STOUT_NSMEAR>0 (params.h default 1): stout-chained
