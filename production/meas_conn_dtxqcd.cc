@@ -1,26 +1,32 @@
-// meas_conn_dtxqcd: connected pion + nucleon correlators on existing DTXQCD
-// configs.  Sibling of meas_conn_txqcd.cc and meas_conn_qcd.cc.
+// meas_conn_dtxqcd: connected pion + nucleon correlators on DTXQCD configs.
 //
-// Uses plain Wilson Dirac on the DTXQCD gauge (no aux fields in the inverter)
-// -- the goal is to see whether the gauge ensemble has been shifted by aux
-// backreaction in a way that affects standard QCD observables (effective
-// pion mass, nucleon mass).  For the doubled DTXQCD operator with full aux
-// insertions, use a different binary; this one isolates the GAUGE-only diff.
+// DEFAULT (physical) path: the light-quark propagator is the upper block of
+// the doubled M48^{-1} — the genuine DTXQCD quark propagator, including the
+// aux (σ,π,d,n,s,p) backreaction and the d/n coupling to the charge-conjugate
+// block.  The operator is built on the STOUT-SMEARED gauge at production csw
+// (the same operator the sea quark saw) and solved on the fast QUDA
+// device-resident CG (dtxqcd_meas_helper.h).  Per source: 2 flavor × 12
+// spin·colour = 24 doubled solves.  u and d propagators differ per-cfg
+// (σ^{ij}_{0b} ≠ σ^{ij}_{1b}), so proton+neutron averaging gives a real noise
+// gain on top of FB averaging, exactly as in meas_conn_txqcd.
 //
-// Mirrors meas_conn_qcd.cc structure (point sources on a multi-src grid,
-// optional time-reversed nucleon, FB-averaging) but loads gauges from a
-// DTXQCDCheckpointer-format checkpoint (gauge + aux + RNG sidecars).
+// LEGACY path (DTXQCD_CONN_GAUGE_ONLY=1): plain Wilson Dirac on the DTXQCD
+// gauge, aux ignored — the original "is the GAUGE sector shifted by aux
+// backreaction?" probe.  Kept for that diagnostic; NOT the physical DTXQCD
+// correlator.
 //
 // Usage:
 //   ./meas_conn_dtxqcd <traj> [--grid LxLyLzLt] [--mpi mxmymzmt]
 //
 // Env knobs:
-//   CFG_DIR  : override default cfgs/dtxqcd_<lambda> input directory
-//   DATA_DIR : override default meas_2pt/dtxqcd_<lambda> output directory
-//   MEAS_SPACE_SRC, MEAS_TIME_SRC : source grid density per dim (see params.h)
-//   QCD_TIME_REVERSED=1 : also save the chroma-style time-reversed FB nucleon
+//   CFG_DIR, DATA_DIR         : override input/output directories
+//   MEAS_SPACE_SRC, MEAS_TIME_SRC : source-grid density per dim (params.h)
+//   CG_TOL (1e-8), CG_MAX     : solver stopping criteria
+//   DTXQCD_MEAS_QUDA (1)      : QUDA device CG (0 = Grid-CPU reference)
+//   DTXQCD_CONN_GAUGE_ONLY(0) : legacy plain-Wilson gauge-only probe
 
 #include "params.h"
+#include "dtxqcd_meas_helper.h"
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
 #include <Grid/qcd/action/fermion/WilsonFermion.h>
@@ -28,10 +34,13 @@
 #include <Grid/qcd/utils/WilsonLoops.h>
 
 using namespace TXQCDProduction;
+using namespace Grid;
 
-static std::vector<RealD> PionCorrelator(const LatticePropagator &S) {
-  LatticeComplex corr(S.Grid());
-  corr = trace(S * adj(S));
+// Connected pseudoscalar: tr(S_d · adj(S_u)).  In DTXQCD S_u ≠ S_d per-cfg.
+static std::vector<RealD> PionCorrelator(const LatticePropagator &S_d,
+                                         const LatticePropagator &S_u) {
+  LatticeComplex corr(S_d.Grid());
+  corr = trace(S_d * adj(S_u));
   std::vector<TComplex> Csl;
   sliceSum(corr, Csl, Nd - 1);
   std::vector<RealD> out(Csl.size());
@@ -40,31 +49,63 @@ static std::vector<RealD> PionCorrelator(const LatticePropagator &S) {
   return out;
 }
 
-// Returns {C_pos(t), C_neg(t)} -- nucleon +parity and -parity projectors.
-// Forward-backward average in analysis:
-//   C_avg(t) = (C_pos(t) - C_neg((T - t) mod T)) / 2
+// "aab" nucleon (q1=q2=S_aa, q3=S_b) with both parity projectors.
+//   proton (uud):  S_aa=S_u, S_b=S_d ;  neutron (ddu): S_aa=S_d, S_b=S_u.
+// Returns {C_pos(t), C_neg(t)} for FB averaging:
+//   C_avg(t) = (C_pos(t) - C_neg((T-t) mod T)) / 2
 static std::pair<std::vector<ComplexD>, std::vector<ComplexD>>
-NucleonCorrelatorPosNeg(const LatticePropagator &S) {
+BaryonAabCorrelatorPosNeg(const LatticePropagator &S_aa,
+                          const LatticePropagator &S_b) {
   Gamma G_A(Gamma::Algebra::Identity);
   Gamma G_B(Gamma::Algebra::SigmaXZ);
   int wick = 0;
   BaryonUtils<WilsonImplR>::WickContractions("uud", "uud", wick);
   auto contract_proj = [&](int parity) -> std::vector<ComplexD> {
-    LatticeComplex Cn(S.Grid());
+    LatticeComplex Cn(S_aa.Grid());
     BaryonUtils<WilsonImplR>::ContractBaryons(
-        S, S, S, G_A, G_B, G_A, G_B, wick, parity, Cn);
+        S_aa, S_aa, S_b, G_A, G_B, G_A, G_B, wick, parity, Cn);
     std::vector<TComplex> sl;
     sliceSum(Cn, sl, Nd - 1);
     std::vector<ComplexD> out(sl.size());
     for (size_t t = 0; t < sl.size(); ++t) out[t] = TensorRemove(sl[t]);
     return out;
   };
-  auto pos = contract_proj(+1);
-  auto neg = contract_proj(-1);
-  return {pos, neg};
+  return {contract_proj(+1), contract_proj(-1)};
 }
 
-// Plain Wilson point propagator on the DTXQCD gauge (aux ignored).
+// Physical DTXQCD light-quark propagators S_u, S_d from the doubled M48:
+// for each (flavor, spin, colour) embed a point source in the UPPER block at
+// slot `flavor`, solve M48 ψ = η via the helper, and read the UPPER block at
+// the same flavor slot as the quark propagator column.
+static void DtxqcdM48Props(DtxqcdMeasSolver &solver, GridCartesian &Grid,
+                           const Coordinate &src,
+                           LatticePropagator &S_u, LatticePropagator &S_d) {
+  S_u = Zero();
+  S_d = Zero();
+  for (int flavor = 0; flavor < DtxqcdNf; ++flavor) {
+    LatticePropagator &Sout = (flavor == 0) ? S_u : S_d;
+    for (int spin = 0; spin < Ns; ++spin) {
+      for (int col = 0; col < Nc; ++col) {
+        LatticePropagator srcP(&Grid);
+        srcP = Zero();
+        SpinColourMatrix kron;
+        kron = 1.0;
+        pokeSite(kron, srcP, src);
+        LatticeFermion sf(&Grid);
+        PropToFerm<WilsonImplR>(sf, srcP, spin, col);
+
+        DTXQCDFermionDoubled eta(&Grid), psi(&Grid);
+        eta = Zero();
+        eta.upper.f[flavor] = sf;
+        solver.Solve(eta, psi);
+
+        FermToProp<WilsonImplR>(Sout, psi.upper.f[flavor], spin, col);
+      }
+    }
+  }
+}
+
+// Legacy plain-Wilson point propagator on the DTXQCD gauge (aux ignored).
 static void WilsonPointProp(LatticePropagator &S, LatticeGaugeField &Umu,
                             RealD m, GridCartesian &Grid,
                             GridRedBlackCartesian &RBGrid,
@@ -135,14 +176,21 @@ int main(int argc, char **argv) {
 
   const RealD lam = lambda_dtxqcd;
   const RealD m   = mass_light_dtxqcd;
-  const RealD tol = TXQCDProduction::detail::env_real("CG_TOL", 1e-10);
+  const RealD tol = TXQCDProduction::detail::env_real("CG_TOL", 1e-8);
   const int   cgmax = TXQCDProduction::detail::env_int("CG_MAX", 100000);
+  const bool  gauge_only =
+      TXQCDProduction::detail::env_int("DTXQCD_CONN_GAUGE_ONLY", 0) != 0;
 
   int T = latt[Nd - 1];
   std::cout << GridLogMessage << "======== meas_conn_dtxqcd ========" << std::endl;
   std::cout << GridLogMessage << "  traj    = " << traj << std::endl;
   std::cout << GridLogMessage << "  lambda  = " << lam << std::endl;
   std::cout << GridLogMessage << "  mass    = " << m << std::endl;
+  std::cout << GridLogMessage << "  csw     = " << csw << std::endl;
+  std::cout << GridLogMessage << "  mode    = "
+            << (gauge_only ? "GAUGE-ONLY (plain Wilson, aux ignored)"
+                           : "PHYSICAL M48 (aux + stout + csw)")
+            << std::endl;
   std::cout << GridLogMessage << "  lattice = " << latt[0] << "x" << latt[1]
             << "x" << latt[2] << "x" << latt[3] << "  T=" << T << std::endl;
   std::cout << GridLogMessage << "  cfg dir = " << cfg_dir << std::endl;
@@ -155,12 +203,18 @@ int main(int argc, char **argv) {
                                   cfg_dir + "/ckpoint_rng", traj);
   RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
 
+  // The physical M48 solver (stout + csw + aux, QUDA device CG).  Only built
+  // when needed (the gauge-only probe uses a plain Wilson operator instead).
+  std::unique_ptr<DtxqcdMeasSolver> solver;
+  if (!gauge_only)
+    solver.reset(new DtxqcdMeasSolver(Grid, RBGrid, U, m, csw, tol, cgmax));
+
   auto sources = SourceGrid(latt, traj);
   int nsrc = (int)sources.size();
   std::cout << GridLogMessage << "  nsrc    = " << nsrc << std::endl;
 
   std::vector<std::vector<RealD>>    all_pion;
-  std::vector<std::vector<ComplexD>> all_nucl_pos, all_nucl_neg;
+  std::vector<std::vector<ComplexD>> all_p_pos, all_p_neg, all_n_pos, all_n_neg;
 
   for (int isrc = 0; isrc < nsrc; ++isrc) {
     Coordinate &src = sources[isrc];
@@ -168,25 +222,32 @@ int main(int argc, char **argv) {
               << " src=(" << src[0] << "," << src[1] << ","
               << src[2] << "," << src[3] << ")" << std::endl;
 
-    LatticePropagator S(&Grid);
-    WilsonPointProp(S, U.U, m, Grid, RBGrid, src, tol, cgmax);
-    all_pion.push_back(PionCorrelator(S));
-    auto pn = NucleonCorrelatorPosNeg(S);
-    all_nucl_pos.push_back(std::move(pn.first));
-    all_nucl_neg.push_back(std::move(pn.second));
+    LatticePropagator S_u(&Grid), S_d(&Grid);
+    if (gauge_only) {
+      WilsonPointProp(S_u, U.U, m, Grid, RBGrid, src, tol, cgmax);
+      S_d = S_u;  // isospin-symmetric in the gauge-only probe
+    } else {
+      DtxqcdM48Props(*solver, Grid, src, S_u, S_d);
+    }
+
+    all_pion.push_back(PionCorrelator(S_d, S_u));
+    auto p_pn = BaryonAabCorrelatorPosNeg(S_u, S_d);  // proton (uud)
+    auto n_pn = BaryonAabCorrelatorPosNeg(S_d, S_u);  // neutron (ddu)
+    all_p_pos.push_back(std::move(p_pn.first));
+    all_p_neg.push_back(std::move(p_pn.second));
+    all_n_pos.push_back(std::move(n_pn.first));
+    all_n_neg.push_back(std::move(n_pn.second));
   }
 
-  // Per-source SHIFT to source-relative time + APBC sign for nucleon.
+  // Per-source SHIFT to source-relative time + APBC sign for the baryon.
   bool apbc = true;
   auto shift_real = [&](const std::vector<std::vector<RealD>> &raw)
       -> std::vector<std::vector<RealD>> {
     std::vector<std::vector<RealD>> out(nsrc, std::vector<RealD>(T, 0.0));
     for (int i = 0; i < nsrc; ++i) {
       int ts = sources[i][Nd - 1];
-      for (int t_eff = 0; t_eff < T; ++t_eff) {
-        int t_lat = (t_eff + ts) % T;
-        out[i][t_eff] = raw[i][t_lat];
-      }
+      for (int t_eff = 0; t_eff < T; ++t_eff)
+        out[i][t_eff] = raw[i][(t_eff + ts) % T];
     }
     return out;
   };
@@ -203,39 +264,52 @@ int main(int argc, char **argv) {
     }
     return out;
   };
-  auto pion_s     = shift_real(all_pion);
-  auto nucl_pos_s = shift_fwd_apbc(all_nucl_pos);
-  auto nucl_neg_s = shift_fwd_apbc(all_nucl_neg);
+  auto pion_s  = shift_real(all_pion);
+  auto p_pos_s = shift_fwd_apbc(all_p_pos);
+  auto p_neg_s = shift_fwd_apbc(all_p_neg);
+  auto n_pos_s = shift_fwd_apbc(all_n_pos);
+  auto n_neg_s = shift_fwd_apbc(all_n_neg);
 
   std::vector<RealD>    pion_avg(T, 0.0);
-  std::vector<ComplexD> nucl_avg(T, 0.0), nucl_neg_avg(T, 0.0);
-  std::vector<ComplexD> nucl_fbavg(T, 0.0);
+  std::vector<ComplexD> p_pos_avg(T, 0.0), p_neg_avg(T, 0.0);
+  std::vector<ComplexD> n_pos_avg(T, 0.0), n_neg_avg(T, 0.0);
   for (int i = 0; i < nsrc; ++i)
     for (int t = 0; t < T; ++t) {
-      pion_avg[t]     += pion_s[i][t] / nsrc;
-      nucl_avg[t]     += nucl_pos_s[i][t] / (double)nsrc;
-      nucl_neg_avg[t] += nucl_neg_s[i][t] / (double)nsrc;
+      pion_avg[t]  += pion_s[i][t] / (double)nsrc;
+      p_pos_avg[t] += p_pos_s[i][t] / (double)nsrc;
+      p_neg_avg[t] += p_neg_s[i][t] / (double)nsrc;
+      n_pos_avg[t] += n_pos_s[i][t] / (double)nsrc;
+      n_neg_avg[t] += n_neg_s[i][t] / (double)nsrc;
     }
+  // FB average (Grid parity convention) + isospin average.
+  std::vector<ComplexD> p_fbavg(T, 0.0), n_fbavg(T, 0.0), nucl_iso_fbavg(T, 0.0);
   for (int t = 0; t < T; ++t) {
     int trev = (T - t) % T;
-    nucl_fbavg[t] = 0.5 * (nucl_avg[t] - nucl_neg_avg[trev]);
+    p_fbavg[t] = 0.5 * (p_pos_avg[t] - p_neg_avg[trev]);
+    n_fbavg[t] = 0.5 * (n_pos_avg[t] - n_neg_avg[trev]);
+    nucl_iso_fbavg[t] = 0.5 * (p_fbavg[t] + n_fbavg[t]);
   }
 
   std::string outfile = data_dir + "/conn_dtxqcd_" + std::to_string(traj) + ".h5";
   if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
-    // SOURCE-RELATIVE TIME, APBC sign applied.
-    write(wr, "pion_conn",     pion_avg);
-    write(wr, "nucleon",       nucl_avg);
-    write(wr, "nucleon_neg",   nucl_neg_avg);
-    write(wr, "nucleon_fbavg", nucl_fbavg);
-    write(wr, "pion_per_src",    pion_s);
-    write(wr, "nucleon_per_src", nucl_pos_s);
-    write(wr, "nucleon_neg_per_src", nucl_neg_s);
+    write(wr, "pion_conn",         pion_avg);
+    write(wr, "proton_pos",        p_pos_avg);
+    write(wr, "proton_neg",        p_neg_avg);
+    write(wr, "proton_fbavg",      p_fbavg);
+    write(wr, "neutron_pos",       n_pos_avg);
+    write(wr, "neutron_neg",       n_neg_avg);
+    write(wr, "neutron_fbavg",     n_fbavg);
+    write(wr, "nucleon",           p_pos_avg);        // legacy alias = proton +parity
+    write(wr, "nucleon_iso_fbavg", nucl_iso_fbavg);
+    write(wr, "pion_per_src",       pion_s);
+    write(wr, "proton_pos_per_src", p_pos_s);
+    write(wr, "neutron_pos_per_src", n_pos_s);
     write(wr, "traj",   traj);
     write(wr, "lambda", lam);
     write(wr, "mass",   m);
     write(wr, "plaq",   plaq);
+    write(wr, "gauge_only", (int)gauge_only);
     Coordinate s = src_grid_origin(traj);
     std::vector<int> sv(Nd);
     for (int d = 0; d < Nd; ++d) sv[d] = s[d];
@@ -244,5 +318,12 @@ int main(int argc, char **argv) {
 
   std::cout << GridLogMessage << "Written " << outfile << std::endl;
   Grid_finalize();
+#ifdef GRID_HAVE_QUDA
+  // Skip the C++ static-destructor / __cxa_finalize chain: QUDA's static
+  // ColorSpinorField destructors double-free at process exit.  Output is on
+  // disk and MPI is finalized — _Exit is safe (cf. meas_baryon_dtxqcd).
+  std::fflush(nullptr);
+  std::_Exit(0);
+#endif
   return 0;
 }

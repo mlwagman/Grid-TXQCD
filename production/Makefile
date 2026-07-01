@@ -187,6 +187,23 @@ Test_dtxqcd_wilson_hop_full_quda: Test_dtxqcd_wilson_hop_full_quda.o $(DTXQCD_NA
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_wilson_hop_full_quda.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
+# DTXQCD measurements that build the QUDA full-volume M operator via
+# dtxqcd_meas_helper.h (DTXQCDMpcOpQUDA) must link the SP/DP native-kernel
+# impl objects, exactly like the HMC test above.  The catch-all rule does not.
+meas_baryon_dtxqcd.o: meas_baryon_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helper.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+meas_baryon_dtxqcd: meas_baryon_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ meas_baryon_dtxqcd.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+meas_conn_dtxqcd.o: meas_conn_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helper.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+meas_conn_dtxqcd: meas_conn_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ meas_conn_dtxqcd.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
 # Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
 # edits (e.g. EIG_DIAG tuning) force a rebuild of gen_qcd_cfgs* and the
 # meas_* binaries that include them.  (Over-broad for binaries that don't

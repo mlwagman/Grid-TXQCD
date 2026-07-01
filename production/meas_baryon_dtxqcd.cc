@@ -25,6 +25,7 @@
 //   CG_TOL (1e-10), CG_MAX (10000)
 
 #include "params.h"
+#include "dtxqcd_meas_helper.h"
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
@@ -89,14 +90,22 @@ DiquarkEpsilonWall(const LatticeColourMatrix &d_iso, int t_src,
                                   : d_iso;
   LatticeColourVector wall(g);
   wall = Zero();
-  autoView(dv, d_use, CpuRead);
-  autoView(wv, wall,  CpuWrite);
-  thread_for(ss, g->oSites(), {
-    auto d = dv[ss]()();
-    wv[ss]()()(0) = d(1, 2) - d(2, 1);
-    wv[ss]()()(1) = d(2, 0) - d(0, 2);
-    wv[ss]()()(2) = d(0, 1) - d(1, 0);
-  });
+  {
+    // Scope the views so they CLOSE before the where()/LatticeCoordinate
+    // collectives below (which open their own view on `wall`).  Holding an
+    // autoView across a same-lattice collective trips GRID_ASSERT
+    // AccCache.cpuLock==0 on the non-unified GPU memory manager (this assert
+    // is CPU-lenient, which is why the bug stayed latent until the first GPU
+    // run of the baryon measurement).
+    autoView(dv, d_use, CpuRead);
+    autoView(wv, wall,  CpuWrite);
+    thread_for(ss, g->oSites(), {
+      auto d = dv[ss]()();
+      wv[ss]()()(0) = d(1, 2) - d(2, 1);
+      wv[ss]()()(1) = d(2, 0) - d(0, 2);
+      wv[ss]()()(2) = d(0, 1) - d(1, 0);
+    });
+  }
   if (t_src >= 0) {
     LatticeInteger t_coord(g);
     LatticeCoordinate(t_coord, Nd - 1);
@@ -247,54 +256,22 @@ int main(int argc, char **argv) {
               << "(SMEAR_WIDTH=0 or SMEAR_NITER=0)" << std::endl;
   }
 
-  // Build the FULL DOUBLED DTXQCD Wilson-clover Dirac operator on the gauge
-  // + aux fields.  This includes the flavour-dependent σ^{ij}_{ab} insertion
-  // in the diagonal block and the d, n diquark coupling between upper (q) and
-  // lower (q^C) doubled blocks.  csw=0 (plain Wilson hopping) matches the
-  // ensembles' csw=0 generation.  The u and d quark propagators are now
-  // GENUINELY DIFFERENT cfg-by-cfg because σ^{ij}_{0,b} ≠ σ^{ij}_{1,b} on
-  // each cfg even though their ensemble averages are equal by isospin symm.
-  DTXQCDWilsonCloverFermionEO DwDouble(U.U, Grid, RBGrid, m, /*csw=*/0.0,
-                                       U.sigma, U.pi, U.d, U.n, U.s, U.p);
-  DTXQCDMOp Mop(DwDouble);
-
-  // Hand-rolled CG on M^dag M (mirror of TxqcdCG in tests/txqcd/Test_txqcd_2pt_conn.cc).
-  // Solve M^dag M x = b for given b (caller supplies b = M^dag η).
-  auto DtxqcdCG = [&](const DTXQCDFermionDoubled &b,
-                      DTXQCDFermionDoubled &x) {
-    GridBase *g = b.Grid();
-    DTXQCDFermionDoubled r(g), p(g), Mp(g), MdMp(g);
-    x = Zero();
-    r = b;
-    p = r;
-    RealD rsq = norm2(r);
-    RealD bsq = std::max(norm2(b), 1e-30);
-    RealD tol2 = tol * tol * bsq;
-    int it;
-    for (it = 0; it < cgmax; ++it) {
-      Mop.M(p, Mp);
-      Mop.Mdag(Mp, MdMp);
-      ComplexD pAp = innerProduct(p, MdMp);
-      ComplexD alpha = ComplexD(rsq, 0.0) / pAp;
-      // x += alpha p; r -= alpha MdMp
-      for (int a = 0; a < DtxqcdNf; ++a) {
-        x.upper.f[a] = x.upper.f[a] + alpha * p.upper.f[a];
-        x.lower.f[a] = x.lower.f[a] + alpha * p.lower.f[a];
-        r.upper.f[a] = r.upper.f[a] - alpha * MdMp.upper.f[a];
-        r.lower.f[a] = r.lower.f[a] - alpha * MdMp.lower.f[a];
-      }
-      RealD rsq_new = norm2(r);
-      if (rsq_new < tol2) { rsq = rsq_new; break; }
-      RealD beta = rsq_new / rsq;
-      for (int a = 0; a < DtxqcdNf; ++a) {
-        p.upper.f[a] = r.upper.f[a] + beta * p.upper.f[a];
-        p.lower.f[a] = r.lower.f[a] + beta * p.lower.f[a];
-      }
-      rsq = rsq_new;
-    }
-    std::cout << GridLogMessage << "[baryon CG] iter=" << it
-              << " rsq/bsq=" << rsq / bsq << std::endl;
-  };
+  // Build the FULL DOUBLED DTXQCD Wilson-clover Dirac operator on the
+  // STOUT-SMEARED gauge + aux fields, at the PRODUCTION csw — i.e. the exact
+  // operator the sea quark saw during HMC.  This includes the flavour-dependent
+  // σ^{ij}_{ab} insertion in the diagonal block and the d, n diquark coupling
+  // between upper (q) and lower (q^C) doubled blocks.  The u and d quark
+  // propagators are GENUINELY DIFFERENT cfg-by-cfg because σ^{ij}_{0,b} ≠
+  // σ^{ij}_{1,b} on each cfg even though their ensemble averages are equal by
+  // isospin symm.
+  //
+  // (Previously this used csw=0 on the THIN unsmeared gauge — correct only for
+  // the old csw=0 scout ensembles, wrong for the csw=1.2493 stout-smeared
+  // production line.)  The solve routes through the same QUDA full-volume M
+  // operator the non-EO HMC uses (DTXQCD_MEAS_QUDA=1 default; =0 → Grid-CPU
+  // reference).  See dtxqcd_meas_helper.h.
+  const RealD csw_meas = csw;
+  DtxqcdMeasSolver solver(Grid, RBGrid, U, m, csw_meas, tol, cgmax);
 
   // Loop over (t_src ∈ {0,…,T-1}) × (flavor ∈ {u, d}) × (spin_sign ∈ {+1, -1}).
   // For each: build a wall fermion source η at t_src with positive-parity
@@ -308,10 +285,21 @@ int main(int argc, char **argv) {
   // SB_2d[f][s_idx][t_src][t_sink] indexes by f ∈ {0=u,1=d}, s_idx ∈ {0=↑,1=↓}.
   const int NF = 2, NS = 2;
   const int spin_signs[NS] = {+1, -1};  // ↑, ↓
+  // MEAS_BARYON_NTSRC: number of (strided) source times used for the
+  // translation average.  Default = T (every time slice).  A handful of
+  // well-separated t_src already gives most of the noise gain and cuts the
+  // solve count from 4·T to 4·NTSRC — this is also the fast path for the
+  // QUDA/CPU parity + timing validation.
+  int n_tsrc = TXQCDProduction::detail::env_int("MEAS_BARYON_NTSRC", T);
+  if (n_tsrc <= 0 || n_tsrc > T) n_tsrc = T;
+  std::vector<int> tsrc_list;
+  for (int j = 0; j < n_tsrc; ++j) tsrc_list.push_back((j * T) / n_tsrc);
+  std::cout << GridLogMessage << "[baryon] n_tsrc=" << n_tsrc << " of T=" << T
+            << "  (" << (NF * NS * n_tsrc) << " doubled solves)" << std::endl;
   std::vector<std::vector<std::vector<std::vector<ComplexD>>>>
       SB_2d(NF, std::vector<std::vector<std::vector<ComplexD>>>(
                 NS, std::vector<std::vector<ComplexD>>(T, std::vector<ComplexD>(T))));
-  for (int t_src = 0; t_src < T; ++t_src) {
+  for (int t_src : tsrc_list) {
     for (int fi = 0; fi < NF; ++fi) {
       for (int si = 0; si < NS; ++si) {
         // Build raw single-flavour fermion source (plain LatticeFermion):
@@ -329,12 +317,11 @@ int main(int argc, char **argv) {
                   << " spin=" << (si == 0 ? "↑" : "↓")
                   << " ||η_f||² = " << nrm << std::endl;
         // Embed into doubled fermion: upper.f[fi] = eta_f, all else zero.
-        DTXQCDFermionDoubled eta(&Grid), b(&Grid), psi(&Grid);
+        DTXQCDFermionDoubled eta(&Grid), psi(&Grid);
         eta = Zero();
         eta.upper.f[fi] = eta_f;
-        // Solve doubled M^†M CG
-        Mop.Mdag(eta, b);
-        DtxqcdCG(b, psi);
+        // Solve doubled M psi = eta on the full volume (helper: M†M CG, QUDA).
+        solver.Solve(eta, psi);
         // Extract upper.f[fi] for sink contraction (same flavour at source/sink)
         LatticeFermion psi_q = psi.upper.f[fi];
         // Apply Gaussian wavefunction smearing to the sink quark field.
@@ -352,13 +339,13 @@ int main(int argc, char **argv) {
   //   C_B^{(f,σ)}(Δt) = (1/T) Σ_{t_src} S_B^{(f,σ)}(t_src+Δt; t_src)
   // and the spin-averaged + flavor-averaged total per Eq 36.
   // Wall-wall normalization 1/V_3² applied here.
-  const RealD norm = 1.0 / (V3 * V3 * (RealD)T);
+  const RealD norm = 1.0 / (V3 * V3 * (RealD)n_tsrc);
   std::vector<std::vector<std::vector<ComplexD>>>
       C_per(NF, std::vector<std::vector<ComplexD>>(NS, std::vector<ComplexD>(T, 0.0)));
   for (int fi = 0; fi < NF; ++fi) {
     for (int si = 0; si < NS; ++si) {
       for (int dt = 0; dt < T; ++dt) {
-        for (int t_src = 0; t_src < T; ++t_src) {
+        for (int t_src : tsrc_list) {
           int t_sink = (t_src + dt) % T;
           C_per[fi][si][dt] += SB_2d[fi][si][t_src][t_sink];
         }
@@ -405,5 +392,15 @@ int main(int argc, char **argv) {
   }
   std::cout << GridLogMessage << "Written " << outfile << std::endl;
   Grid_finalize();
+#ifdef GRID_HAVE_QUDA
+  // The output is on disk and Grid_finalize() has run MPI_Finalize.  Skip the
+  // C++ static-destructor / __cxa_finalize chain: QUDA's own static
+  // ColorSpinorField destructors double-free at process exit (the persistent
+  // Style-C device state; cf. commit 6023005f which fixed the analogous
+  // DTXQCDMpcOpQUDA destructor crash, but QUDA's internal static teardown is
+  // out of our reach).  _Exit is safe here — nothing left to flush.
+  std::fflush(nullptr);
+  std::_Exit(0);
+#endif
   return 0;
 }
