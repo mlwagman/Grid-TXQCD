@@ -79,7 +79,8 @@ BaryonAabCorrelatorPosNeg(const LatticePropagator &S_aa,
 // the same flavor slot as the quark propagator column.
 static void DtxqcdM48Props(DtxqcdMeasSolver &solver, GridCartesian &Grid,
                            const Coordinate &src,
-                           LatticePropagator &S_u, LatticePropagator &S_d) {
+                           LatticePropagator &S_u, LatticePropagator &S_d,
+                           bool lower = false) {
   S_u = Zero();
   S_d = Zero();
   for (int flavor = 0; flavor < DtxqcdNf; ++flavor) {
@@ -96,10 +97,10 @@ static void DtxqcdM48Props(DtxqcdMeasSolver &solver, GridCartesian &Grid,
 
         DTXQCDFermionDoubled eta(&Grid), psi(&Grid);
         eta = Zero();
-        eta.upper.f[flavor] = sf;
+        if (lower) eta.lower.f[flavor] = sf; else eta.upper.f[flavor] = sf;
         solver.Solve(eta, psi);
-
-        FermToProp<WilsonImplR>(Sout, psi.upper.f[flavor], spin, col);
+        LatticeFermion out = lower ? psi.lower.f[flavor] : psi.upper.f[flavor];
+        FermToProp<WilsonImplR>(Sout, out, spin, col);
       }
     }
   }
@@ -221,6 +222,15 @@ int main(int argc, char **argv) {
   std::vector<std::vector<RealD>>    all_pi_du, all_pi_ud, all_pi_uu, all_pi_dd;
   std::vector<std::vector<ComplexD>> all_p_pos, all_p_neg, all_n_pos, all_n_neg;
 
+  // Optional LOWER (charge-conjugate) block: source AND sink in the lower block,
+  // RAW contraction (no C insertion).  Tests the conjecture that the source and
+  // sink C's cancel for a lower-src/lower-sink correlator (as they do for the
+  // meson) — so the raw lower nucleon should give the same MASS as the upper.
+  const bool do_lower = (!gauge_only) &&
+      TXQCDProduction::detail::env_int("DTXQCD_CONN_LOWER", 0) != 0;
+  std::vector<std::vector<RealD>>    all_pi_du_lo;
+  std::vector<std::vector<ComplexD>> all_p_pos_lo, all_n_pos_lo;
+
   for (int isrc = 0; isrc < nsrc; ++isrc) {
     Coordinate &src = sources[isrc];
     std::cout << GridLogMessage << "[conn DTXQCD] traj=" << traj
@@ -245,6 +255,14 @@ int main(int argc, char **argv) {
     all_p_neg.push_back(std::move(p_pn.second));
     all_n_pos.push_back(std::move(n_pn.first));
     all_n_neg.push_back(std::move(n_pn.second));
+
+    if (do_lower) {
+      LatticePropagator S_u_lo(&Grid), S_d_lo(&Grid);
+      DtxqcdM48Props(*solver, Grid, src, S_u_lo, S_d_lo, /*lower=*/true);
+      all_pi_du_lo.push_back(PionCorrelator(S_d_lo, S_u_lo));
+      all_p_pos_lo.push_back(BaryonAabCorrelatorPosNeg(S_u_lo, S_d_lo).first);
+      all_n_pos_lo.push_back(BaryonAabCorrelatorPosNeg(S_d_lo, S_u_lo).first);
+    }
   }
 
   // Per-source SHIFT to source-relative time + APBC sign for the baryon.
@@ -305,6 +323,21 @@ int main(int argc, char **argv) {
     nucl_iso_fbavg[t] = 0.5 * (p_fbavg[t] + n_fbavg[t]);
   }
 
+  // Lower-block (charge-conjugate) raw correlators: shift + average.
+  std::vector<RealD>    pi_du_lo_avg(T, 0.0);
+  std::vector<ComplexD> p_pos_lo_avg(T, 0.0), n_pos_lo_avg(T, 0.0);
+  if (do_lower) {
+    auto pi_du_lo_s = shift_real(all_pi_du_lo);
+    auto p_pos_lo_s = shift_fwd_apbc(all_p_pos_lo);
+    auto n_pos_lo_s = shift_fwd_apbc(all_n_pos_lo);
+    for (int i = 0; i < nsrc; ++i)
+      for (int t = 0; t < T; ++t) {
+        pi_du_lo_avg[t] += pi_du_lo_s[i][t] / (double)nsrc;
+        p_pos_lo_avg[t] += p_pos_lo_s[i][t] / (double)nsrc;
+        n_pos_lo_avg[t] += n_pos_lo_s[i][t] / (double)nsrc;
+      }
+  }
+
   std::string outfile = data_dir + "/conn_dtxqcd_" + std::to_string(traj) + ".h5";
   if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
@@ -321,6 +354,12 @@ int main(int argc, char **argv) {
     write(wr, "neutron_fbavg",     n_fbavg);
     write(wr, "nucleon",           p_pos_avg);        // legacy alias = proton +parity
     write(wr, "nucleon_iso_fbavg", nucl_iso_fbavg);
+    if (do_lower) {
+      // LOWER (charge-conjugate) block, RAW contraction — same-mass test.
+      write(wr, "pion_du_lower",     pi_du_lo_avg);
+      write(wr, "proton_pos_lower",  p_pos_lo_avg);
+      write(wr, "neutron_pos_lower", n_pos_lo_avg);
+    }
     write(wr, "pion_du_per_src",    pi_du_s);
     write(wr, "pion_ud_per_src",    pi_ud_s);
     write(wr, "pion_uu_per_src",    pi_uu_s);
