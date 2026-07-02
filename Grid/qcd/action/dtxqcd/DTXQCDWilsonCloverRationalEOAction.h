@@ -51,6 +51,13 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpF.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCG.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGMixedPrec.h>
+#ifdef GRID_HAVE_QUDA
+// EO Style C port (2026-07-02, task #239): device-resident odd-CB Schur op +
+// the templated Style C multishift.  Opt-in via DTXQCD_MULTISHIFT_QUDA=1
+// (explicit — unlike the non-EO action's default-ON — until Gate 5 flips it).
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA_EO.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC.h>
+#endif
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteForceKernel.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDRationalForceGpuKernel.h>
@@ -363,6 +370,19 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     std::vector<DTXQCDFermionDoubled> xk;
     xk.reserve(nshift);
     for (int k = 0; k < nshift; ++k) xk.emplace_back(&rbgrid_);
+#ifdef GRID_HAVE_QUDA
+    // EO Style C port: refresh()/S() solves carry the same weight as deriv's
+    // (two full multishifts per trajectory for the H measurement) — route
+    // them through the device path under the same gate.
+    if (EOStyleCEnabled()) {
+      Quda::initialize();
+      DTXQCDMpcOpQUDA_EO Mop_quda(Dw, Dw.Gauge(), grid_, rbgrid_, mass_, csw_,
+                                  Dw.Sigma(), Dw.Pi(), Dw.Dq(), Dw.Nq(),
+                                  Dw.Sq(), Dw.Pq());
+      DTXQCDMultiShiftCGQUDA_StyleC(Mop, Mop_quda, rat.poles, rat.tolerances,
+                                    in, xk, param_.MaxIter);
+    } else
+#endif
     if (MpCgEnabled() >= 2) {
       if (!Dw.SinglePrecEnabled()) Dw.EnableSinglePrec();
       DTXQCDMpcOpF Mop_f(Dw);
@@ -613,6 +633,21 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
     return (e && *e) ? std::max(1, std::atoi(e)) : 50;
   }
 
+  // EO Style C gate: DTXQCD_MULTISHIFT_QUDA=1 routes the EO multishift through
+  // the device-resident Schur wrapper + templated Style C solver.  Read per
+  // call (no static cache) so gate tests can toggle within one process.
+  // Default OFF for EO (explicit opt-in; the non-EO default-ON precedent
+  // applies only after Gate 5 signs off — HANDOFF_EO_STYLE_C_PORT.md rollback
+  // contract).
+  static bool EOStyleCEnabled() {
+#ifndef GRID_HAVE_QUDA
+    return false;
+#else
+    const char *e = std::getenv("DTXQCD_MULTISHIFT_QUDA");
+    return (e && *e && std::atoi(e) != 0);
+#endif
+  }
+
   // Dispatch the (M^dag M + poles)^{-1} multishift solve: double-precision by
   // default, mixed-precision (SP matvec + DP reliable update) when
   // DTXQCD_MP_CG is set.  Mop is the DP Schur operator over Dw; the SP twin is
@@ -622,6 +657,18 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
                        const std::vector<RealD> &tol,
                        const DTXQCDFermionDoubled &src,
                        std::vector<DTXQCDFermionDoubled> &xk) {
+#ifdef GRID_HAVE_QUDA
+    if (EOStyleCEnabled()) {
+      Quda::initialize();  // idempotent; bare-generator runs may not have
+                           // touched any other QUDA path before this point
+      DTXQCDMpcOpQUDA_EO Mop_quda(Dw, Dw.Gauge(), grid_, rbgrid_, mass_, csw_,
+                                  Dw.Sigma(), Dw.Pi(), Dw.Dq(), Dw.Nq(),
+                                  Dw.Sq(), Dw.Pq());
+      DTXQCDMultiShiftCGQUDA_StyleC(Mop, Mop_quda, poles, tol, src, xk,
+                                    param_.MaxIter);
+      return;
+    }
+#endif
     if (MpCgEnabled()) {
       if (!Dw.SinglePrecEnabled()) Dw.EnableSinglePrec();
       DTXQCDMpcOpF Mop_f(Dw);

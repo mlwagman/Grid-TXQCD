@@ -36,7 +36,9 @@ namespace DtxqcdQudaStyleCanonicalMP {
 
 // HermOp on SP CSF: (M†M)·p — same structure as DtxqcdHermOpQUDA_StyleC but
 // using M_device_csf_sp / Mdag_device_csf_sp.  Returns Re<p, (M†M)·p>.
-inline RealD HermOpSp(DTXQCDMpcOpQUDA &Mop_quda,
+// (Mop templated for the EO-port, 2026-07-02 — see StyleC.h note.)
+template <class DTXQCDMopQ>
+inline RealD HermOpSp(DTXQCDMopQ &Mop_quda,
                       DtxqcdQudaStyleC::DoubledStateCSFSp &p,
                       DtxqcdQudaStyleC::DoubledStateCSFSp &mmp,
                       DtxqcdQudaStyleC::DoubledStateCSFSp &tmp,
@@ -61,7 +63,8 @@ inline RealD HermOpSp(DTXQCDMpcOpQUDA &Mop_quda,
 
 // HermOp on DP CSF: (M†M)·p via M_device_csf / Mdag_device_csf.  Returns
 // Re<p, (M†M)·p>.  Used for DP reliable update + Phase B polish.
-inline RealD HermOpDp(DTXQCDMpcOpQUDA &Mop_quda,
+template <class DTXQCDMopQ>
+inline RealD HermOpDp(DTXQCDMopQ &Mop_quda,
                      DtxqcdQudaStyleC::DoubledStateCSF &p,
                      DtxqcdQudaStyleC::DoubledStateCSF &mmp,
                      DtxqcdQudaStyleC::DoubledStateCSF &tmp,
@@ -113,8 +116,9 @@ inline void UpdateAlphaZeta(std::vector<double> &alpha,
 // Solves (M†M + pole) x = src to tight tol.  Inner state lives in DP CSFs
 // passed in by caller (reused across shifts to avoid per-shift alloc).
 // Returns iteration count.
+template <class DTXQCDMopQ>
 inline int SingleShiftDpPolishCSF(
-    DTXQCDMpcOpQUDA &Mop_quda, double pole, double tol,
+    DTXQCDMopQ &Mop_quda, double pole, double tol,
     const DtxqcdQudaStyleC::DoubledStateCSF &src_dp,
     DtxqcdQudaStyleC::DoubledStateCSF &x_dp,
     DtxqcdQudaStyleC::DoubledStateCSF &p_dp,
@@ -175,10 +179,10 @@ inline int SingleShiftDpPolishCSF(
 // per-shift DP polish CG warm-started from SP solutions.  Canonical
 // production-grade MP multishift pattern; mirrors QUDA's
 // MultiShiftCG (Phase A) + per-shift CG refinement (Phase B).
-template <class DTXQCDMopD>
+template <class DTXQCDMopD, class DTXQCDMopQ = DTXQCDMpcOpQUDA>
 inline void DTXQCDMultiShiftCGQUDA_StyleC_MpMultishift(
     DTXQCDMopD &Mop_d,                  // Grid-DP HermOp (unused for now; Mop_quda's DP path is used)
-    DTXQCDMpcOpQUDA &Mop_quda,          // DP + SP HermOps via M_device_csf / M_device_csf_sp
+    DTXQCDMopQ &Mop_quda,               // DP + SP HermOps via M_device_csf / M_device_csf_sp
     const std::vector<RealD> &poles,
     const std::vector<RealD> &tol,
     const DTXQCDFermionDoubled &src,

@@ -135,7 +135,11 @@ struct DoubledStateCSF {
   void copy_from_grid(const DTXQCDFermionDoubled &src,
                       QudaInvertParam &inv_param,
                       const int X_full_dims[4]) {
-    int V = csf[0]->Volume();  // full-site volume on native CSF
+    // EO-port 2026-07-02: checkerboarded (parity) fields take the pc=true
+    // branch — within a parity, Grid's RB site order equals QUDA's cb_site
+    // (QudaFieldConvert.h:233), so the pack is unvectorize + straight copy.
+    const bool parity_field = src.upper.f[0].Grid()->_isCheckerBoarded;
+    int V = csf[0]->Volume();  // full- or half-volume per the CSF template
     std::size_t Nbytes = static_cast<std::size_t>(24) * V * sizeof(double);
     std::vector<double> host(24 * V);
     double *d_flat = (double *)acceleratorAllocDevice(Nbytes);
@@ -146,9 +150,17 @@ struct DoubledStateCSF {
     inv.input_location  = QUDA_CUDA_FIELD_LOCATION;
     inv.output_location = QUDA_CUDA_FIELD_LOCATION;
     auto pack_one = [&](const LatticeFermion &grid_fld, int slot) {
-      Quda::fermion_to_eo_buffer(grid_fld, host.data());
+      if (parity_field) {
+        typedef typename LatticeFermion::scalar_object FSobj;
+        std::vector<FSobj> sc;
+        unvectorizeToLexOrdArray(sc, grid_fld);
+        std::memcpy(host.data(), sc.data(), Nbytes);
+      } else {
+        Quda::fermion_to_eo_buffer(grid_fld, host.data());
+      }
       acceleratorCopyToDevice(host.data(), d_flat, Nbytes);
-      quda::ColorSpinorParam cpuParam(d_flat, inv, X_full, /*pc=*/false,
+      quda::ColorSpinorParam cpuParam(d_flat, inv, X_full,
+                                      /*pc=*/parity_field,
                                       QUDA_CUDA_FIELD_LOCATION);
       quda::ColorSpinorField cpu_csf(cpuParam);
       csf[slot]->copy(cpu_csf);
@@ -165,6 +177,8 @@ struct DoubledStateCSF {
   void copy_to_grid(DTXQCDFermionDoubled &dst,
                     QudaInvertParam &inv_param,
                     const int X_full_dims[4]) const {
+    const bool parity_field = dst.upper.f[0].Grid()->_isCheckerBoarded;
+    const int  parity_cb    = dst.upper.f[0].Checkerboard();
     int V = csf[0]->Volume();
     std::size_t Nbytes = static_cast<std::size_t>(24) * V * sizeof(double);
     std::vector<double> host(24 * V);
@@ -176,13 +190,22 @@ struct DoubledStateCSF {
     inv.input_location  = QUDA_CUDA_FIELD_LOCATION;
     inv.output_location = QUDA_CUDA_FIELD_LOCATION;
     auto unpack_one = [&](LatticeFermion &grid_fld, int slot) {
-      quda::ColorSpinorParam cpuParam(d_flat, inv, X_full, /*pc=*/false,
+      quda::ColorSpinorParam cpuParam(d_flat, inv, X_full,
+                                      /*pc=*/parity_field,
                                       QUDA_CUDA_FIELD_LOCATION);
       quda::ColorSpinorField cpu_csf(cpuParam);
       cpu_csf.copy(*csf[slot]);
       cudaDeviceSynchronize();
       acceleratorCopyFromDevice(d_flat, host.data(), Nbytes);
-      Quda::eo_buffer_to_fermion(host.data(), grid_fld);
+      if (parity_field) {
+        typedef typename LatticeFermion::scalar_object FSobj;
+        std::vector<FSobj> sc(V);
+        std::memcpy(sc.data(), host.data(), Nbytes);
+        vectorizeFromLexOrdArray(sc, grid_fld);
+        grid_fld.Checkerboard() = parity_cb;
+      } else {
+        Quda::eo_buffer_to_fermion(host.data(), grid_fld);
+      }
     };
     if (csf[0]) unpack_one(dst.upper.f[0], 0);
     if (csf[1]) unpack_one(dst.upper.f[1], 1);

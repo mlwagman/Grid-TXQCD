@@ -38,7 +38,11 @@ NAMESPACE_BEGIN(Grid);
 
 // HermOp (M†M)·p via M_device_csf then Mdag_device_csf, on caller's native
 // DoubledStateCSF.  Returns Re<p, (M†M)·p>.
-inline RealD DtxqcdHermOpQUDA_StyleC(DTXQCDMpcOpQUDA &Mop_quda,
+// EO-port 2026-07-02: the QUDA-side Mop is a template parameter so the
+// odd-CB Schur wrapper (DTXQCDMpcOpQUDA_EO) instantiates the same solver;
+// existing full-volume callers deduce DTXQCDMpcOpQUDA unchanged.
+template <class DTXQCDMopQ>
+inline RealD DtxqcdHermOpQUDA_StyleC(DTXQCDMopQ &Mop_quda,
                                      DtxqcdQudaStyleC::DoubledStateCSF &p,
                                      DtxqcdQudaStyleC::DoubledStateCSF &mmp,
                                      DtxqcdQudaStyleC::DoubledStateCSF &tmp,
@@ -66,10 +70,10 @@ inline RealD DtxqcdHermOpQUDA_StyleC(DTXQCDMpcOpQUDA &Mop_quda,
   return DtxqcdQudaStyleC::DoubledStateCSF::redot(p, mmp);
 }
 
-template <class DTXQCDMopD>
+template <class DTXQCDMopD, class DTXQCDMopQ = DTXQCDMpcOpQUDA>
 inline void DTXQCDMultiShiftCGQUDA_StyleC(
     DTXQCDMopD &Mop_d,                 // Grid-DP HermOp for reliable update
-    DTXQCDMpcOpQUDA &Mop_quda,         // QUDA-DP HermOp for inner mat-vec
+    DTXQCDMopQ &Mop_quda,              // QUDA-DP HermOp for inner mat-vec
     const std::vector<RealD> &poles,
     const std::vector<RealD> &tol,
     const DTXQCDFermionDoubled &src,
@@ -108,6 +112,17 @@ inline void DTXQCDMultiShiftCGQUDA_StyleC(
   // Reliable-update + final-unpack Grid scratches.
   DTXQCDFermionDoubled r_grid(grid), mmp_grid(grid), tmp_grid(grid),
       psi0_grid(grid);
+  // EO-port: on checkerboarded grids, expression templates assert on CB
+  // mismatch — stamp every local scratch (and the caller's psi) with the
+  // source's checkerboard.  No-op on full grids.
+  auto stamp_cb = [&](DTXQCDFermionDoubled &f) {
+    for (int a_ = 0; a_ < DtxqcdNf; ++a_) {
+      f.upper.f[a_].Checkerboard() = src.upper.f[a_].Checkerboard();
+      f.lower.f[a_].Checkerboard() = src.lower.f[a_].Checkerboard();
+    }
+  };
+  stamp_cb(r_grid); stamp_cb(mmp_grid); stamp_cb(tmp_grid); stamp_cb(psi0_grid);
+  for (int s = 0; s < nshift; ++s) stamp_cb(psi[s]);
 
   std::vector<RealD> alpha(nshift, 1.0);
   std::vector<RealD> bs(nshift);
@@ -172,6 +187,7 @@ inline void DTXQCDMultiShiftCGQUDA_StyleC(
 
   // psi[s] = -bs[s] · alpha[s] · src.  Grid-side scalar multiply then pack.
   DTXQCDFermionDoubled scaled_src(grid);
+  stamp_cb(scaled_src);
   for (int s = 0; s < nshift; ++s) {
     RealD scale = -bs[s] * alpha[s];
     for (int a = 0; a < DtxqcdNf; ++a) {
@@ -264,8 +280,14 @@ inline void DTXQCDMultiShiftCGQUDA_StyleC(
       ReliableTimer.Start();
       RealD c_old = c;
       psi_q[0].copy_to_grid(psi0_grid, Mop_quda.InvertParam(), X_full_dims);
+      stamp_cb(psi0_grid);
       RealD dd = DtxqcdHermOpD(Mop_d, psi0_grid, mmp_grid, tmp_grid);
       (void)dd;
+      // EO-port: the Grid HermOp's site-local kernels write through views
+      // without refreshing checkerboard metadata; re-stamp before the ETs
+      // below (no-op on full grids / correctly-tagged fields).
+      stamp_cb(mmp_grid);
+      stamp_cb(tmp_grid);
       Axpy(mmp_grid, poles[0], psi0_grid);
       for (int a = 0; a < DtxqcdNf; ++a) {
         r_grid.upper.f[a] = src.upper.f[a] - mmp_grid.upper.f[a];

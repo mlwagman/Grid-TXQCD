@@ -348,6 +348,15 @@ class DTXQCDWilsonCloverFermionEO {
   RealD Csw()  const { return csw_; }
   const std::vector<LatticeColourMatrix> &FieldStrength() const { return FS_; }
   DTXQCDMeooeDoubled &MeooeEngine() { return meooe_; }
+  // Aux-field references (EO Style C port: DTXQCDMpcOpQUDA_EO construction
+  // needs them from an already-built fermion).  Dq/Nq/Sq/Pq avoid collisions
+  // with existing single-letter locals in including TUs.
+  const LatticeDtxqcdSigma &Sigma() const { return sigma_; }
+  const LatticeDtxqcdPi    &Pi()    const { return pi_; }
+  const LatticeDtxqcdD     &Dq()    const { return d_; }
+  const LatticeDtxqcdN     &Nq()    const { return n_; }
+  const LatticeDtxqcdS     &Sq()    const { return s_; }
+  const LatticeDtxqcdP     &Pq()    const { return p_; }
   GridCartesian         &Grid()    { return grid_; }
   GridRedBlackCartesian &RbGrid()   { return rbgrid_; }
   GaugeField            &Gauge()    { return Umu_; }
@@ -364,6 +373,33 @@ class DTXQCDWilsonCloverFermionEO {
   const InvField &FwdCache(int cb) const {
     return (cb == Even) ? fwd_e_ : fwd_o_;
   }
+
+#ifdef GRID_CUDA
+  // EO Style C port (2026-07-02): expose the per-CB batched device matrix
+  // caches (column-major [Nsite*48*48], local RB-lex site order — which within
+  // a parity equals QUDA's cb_site order, see QudaFieldConvert.h:233) so
+  // DTXQCDMpcOpQUDA_EO can gemmBatched directly against them in its
+  // device-resident Schur chain.  Populated by BuildInverseCacheCB whenever
+  // DTXQCD_PRECOMPUTE_GPU=1 (the CUDA default).
+  static deviceVector<ComplexD> &InvDevCache(int cb) {
+    return (cb == Even) ? inv_dev_e_ : inv_dev_o_;
+  }
+  static uint64_t InvDevN(int cb) {
+    return (cb == Even) ? inv_dev_n_e_ : inv_dev_n_o_;
+  }
+  static uint64_t InvDevGen(int cb) {
+    return (cb == Even) ? inv_dev_gen_e_ : inv_dev_gen_o_;
+  }
+  static deviceVector<ComplexD> &FwdDevCache(int cb) {
+    return (cb == Even) ? fwd_dev_e_ : fwd_dev_o_;
+  }
+  static uint64_t FwdDevN(int cb) {
+    return (cb == Even) ? fwd_dev_n_e_ : fwd_dev_n_o_;
+  }
+  static uint64_t FwdDevGen(int cb) {
+    return (cb == Even) ? fwd_dev_gen_e_ : fwd_dev_gen_o_;
+  }
+#endif
 
  private:
   // Build F_{mu,nu} for the 6 (mu<nu) pairs from U via WilsonLoops, plus

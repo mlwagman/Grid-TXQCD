@@ -660,7 +660,11 @@ class DTXQCDMpcOpQUDA {
   QudaInvertParam       &InvertParam() { return inv_param_; }
   QudaGaugeParam        &GaugeParam()  { return gauge_param_; }
 
- private:
+ protected:
+  // (private->protected 2026-07-02: DTXQCDMpcOpQUDA_EO subclasses this wrapper
+  // to reuse the gauge-load / persistent-Dirac / aux-cache machinery for the
+  // odd-CB Schur (Mpc) device operator.  No virtual dispatch — the StyleC
+  // solvers are templated on the concrete Mop type.)
   // Core apply: handles M and (via dagger flag for the QUDA call) M† for the
   // Wilson-clover piece.  The aux contribution and γ_2·conj transformation
   // are unchanged either way at the wrapper level.  Mdag here is exposed via

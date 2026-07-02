@@ -23,7 +23,9 @@ namespace DtxqcdQudaStyleC {
 
 // Apply (M†M + pole)·in on SP CSF.  Mirrors DtxqcdHermOpQUDA_StyleC but with
 // SP M_device_csf_sp + Mdag_device_csf_sp.
-inline void HermOpSp(DTXQCDMpcOpQUDA &Mop_quda,
+// (Mop templated for the EO-port, 2026-07-02 — see StyleC.h note.)
+template <class DTXQCDMopQ>
+inline void HermOpSp(DTXQCDMopQ &Mop_quda,
                      DoubledStateCSFSp &in,
                      DoubledStateCSFSp &mmp,
                      DoubledStateCSFSp &tmp,
@@ -48,7 +50,8 @@ inline void HermOpSp(DTXQCDMpcOpQUDA &Mop_quda,
 }
 
 // Apply (M†M + pole)·in on DP CSF.  Used for reliable updates + final verify.
-inline void HermOpDp(DTXQCDMpcOpQUDA &Mop_quda,
+template <class DTXQCDMopQ>
+inline void HermOpDp(DTXQCDMopQ &Mop_quda,
                      DoubledStateCSF &in,
                      DoubledStateCSF &mmp,
                      DoubledStateCSF &tmp,
@@ -79,8 +82,9 @@ inline void HermOpDp(DTXQCDMpcOpQUDA &Mop_quda,
 //   mmp_sp, tmp_sp, scratch_lo_sp : SP scratch for inner HermOpSp
 //
 // Returns iter count.  On convergence, x_dp holds the refined DP solution.
+template <class DTXQCDMopQ>
 inline int SingleShiftCGSpCleanupCSF(
-    DTXQCDMpcOpQUDA &Mop_quda,
+    DTXQCDMopQ &Mop_quda,
     double pole, double tol,
     const DoubledStateCSF &src_dp,
     DoubledStateCSF &x_dp,

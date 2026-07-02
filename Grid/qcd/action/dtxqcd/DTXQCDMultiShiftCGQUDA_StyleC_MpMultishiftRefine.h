@@ -38,10 +38,10 @@ NAMESPACE_BEGIN(Grid);
 // Phase B — DP MULTISHIFT CG (NOT per-pole), warm-started from x(σ)_SP.
 //   Krylov sharing is preserved through the precision boundary by measuring
 //   the multishift ζ at Phase B init from actual DP residual ratios.
-template <class DTXQCDMopD>
+template <class DTXQCDMopD, class DTXQCDMopQ = DTXQCDMpcOpQUDA>
 inline void DTXQCDMultiShiftCGQUDA_StyleC_MpMultishiftRefine(
     DTXQCDMopD &Mop_d,                  // Grid-DP HermOp (currently unused)
-    DTXQCDMpcOpQUDA &Mop_quda,          // DP + SP HermOps via M_device_csf
+    DTXQCDMopQ &Mop_quda,               // DP + SP HermOps via M_device_csf
     const std::vector<RealD> &poles,
     const std::vector<RealD> &tol,
     const DTXQCDFermionDoubled &src,

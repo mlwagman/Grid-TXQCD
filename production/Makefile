@@ -187,6 +187,51 @@ Test_dtxqcd_wilson_hop_full_quda: Test_dtxqcd_wilson_hop_full_quda.o $(DTXQCD_NA
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_wilson_hop_full_quda.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
+# Tr[pi] vs p asymmetry diagnostic (u-equivalence + per-action deriv
+# aggregates).  Pulls in the rational full action -> DTXQCDMpcOpQUDA.h ->
+# native kernel symbols, so link DTXQCD_NATIVE_IMPL_OBJS like the test above.
+Test_dtxqcd_aux_force_aggregate.o: Test_dtxqcd_aux_force_aggregate.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_aux_force_aggregate: Test_dtxqcd_aux_force_aggregate.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_aux_force_aggregate.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+# Pfaffian-sign statistics over aux prior draws (dense gamma5.M48 spectrum at
+# 4^4 via cuSOLVER Zheevd) -- needs -lcusolver on top of the standard link.
+Test_dtxqcd_sign_aux_draws.o: Test_dtxqcd_sign_aux_draws.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_sign_aux_draws: Test_dtxqcd_sign_aux_draws.o
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_sign_aux_draws.o \
+	  $(LDFLAGS) $(LIBS) -lcusolver
+
+# EO Style C port Gate 1: device Schur op vs Grid reference (piecewise).
+# Pulls DTXQCDMpcOpQUDA_EO -> native kernel symbols.
+Test_dtxqcd_mpc_op_quda_eo.o: Test_dtxqcd_mpc_op_quda_eo.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_mpc_op_quda_eo: Test_dtxqcd_mpc_op_quda_eo.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_mpc_op_quda_eo.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+# EO Style C port Gate 2: multishift Grid-DP vs Style C on the EO Mop.
+Test_dtxqcd_multishift_quda_eo.o: Test_dtxqcd_multishift_quda_eo.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_multishift_quda_eo: Test_dtxqcd_multishift_quda_eo.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_multishift_quda_eo.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+# TXQCD Wilson-vs-Mobius(naive Delta) sign probe -- same dense cuSOLVER
+# machinery as the DTXQCD sibling.
+Test_txqcd_sign_aux_draws.o: Test_txqcd_sign_aux_draws.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_txqcd_sign_aux_draws: Test_txqcd_sign_aux_draws.o
+	$(LINKER) $(CXXFLAGS) -o $@ Test_txqcd_sign_aux_draws.o \
+	  $(LDFLAGS) $(LIBS) -lcusolver
+
 # DTXQCD measurements that build the QUDA full-volume M operator via
 # dtxqcd_meas_helper.h (DTXQCDMpcOpQUDA) must link the SP/DP native-kernel
 # impl objects, exactly like the HMC test above.  The catch-all rule does not.
