@@ -68,6 +68,10 @@ DTXQCD_MOOEEINV_CUBLAS="${DTXQCD_MOOEEINV_CUBLAS:-1}"
 DTXQCD_MOOEE_CUBLAS="${DTXQCD_MOOEE_CUBLAS:-1}"
 DTXQCD_MOOEE_FWDCACHE="${DTXQCD_MOOEE_FWDCACHE:-1}"
 DTXQCD_RATFORCE_GPU="${DTXQCD_RATFORCE_GPU:-1}"
+# EO Style C device multishift (commit 0a943e1e).  Empty/unset = incumbent
+# Grid/MP-CG path; =1 routes the EO rational's refresh/S/deriv multishifts
+# through the device-resident Schur op (gates 1-4 green 2026-07-02).
+DTXQCD_MULTISHIFT_QUDA="${DTXQCD_MULTISHIFT_QUDA:-}"
 # Mixed-precision multishift CG for the light rational PF (validated 2026-06-23,
 # dH bit-equivalent at cfg.10000 lam=10; per-traj ~17% faster on top of fwdcache).
 DTXQCD_MP_CG="${DTXQCD_MP_CG:-1}"
@@ -158,6 +162,7 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       DTXQCD_MP_CG="$DTXQCD_MP_CG" \
       DTXQCD_MP_CG_CLEANUP="$DTXQCD_MP_CG_CLEANUP" \
       DTXQCD_RATFORCE_GPU="$DTXQCD_RATFORCE_GPU" \
+      ${DTXQCD_MULTISHIFT_QUDA:+DTXQCD_MULTISHIFT_QUDA="$DTXQCD_MULTISHIFT_QUDA"} \
       INTEGRATOR="$INTEGRATOR" MDSTEPS="$MDSTEPS" TRAJL="$TRAJL" \
       GAUGE_MULT="$GAUGE_MULT" AUX_MULT="$AUX_MULT" \
       TRAJ="$TRAJ" N_SKIP="$N_SKIP" CG_TOL="$CG_TOL" \
