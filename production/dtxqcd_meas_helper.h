@@ -19,12 +19,16 @@
 //     anti_periodic_t=true.  So both operators agree with the sea action.
 //   * Aux fields σ,π,d,n,s,p referenced as-is from the DTXQCDField.
 //
-// Solve path — full-volume single-shift CG on M†M (per CLAUDE.md: measurement
-// inversions use full-volume MdagM CG, not EO):
+// Solve path:
 //
-//   DTXQCD_MEAS_QUDA=1 (default under GRID_HAVE_QUDA): route M/Mdag through
-//     DTXQCDMpcOpQUDA — the exact full-volume operator the non-EO HMC drives
-//     (QUDA-offloaded Wilson hop + device aux).
+//   DTXQCD_MEAS_EO=1 (default under GRID_HAVE_QUDA, 2026-07-02): EO/Schur-
+//     preconditioned solve — odd-block Mpc CG on the device (the same EO
+//     Style C CG the HMC uses), even block back-substituted through the
+//     site-local M_ee^{-1} caches.  ~10× per solve vs full-volume at λ=10
+//     (fewer iterations × half the volume); validated correlator-identical.
+//   DTXQCD_MEAS_EO=0 + DTXQCD_MEAS_QUDA=1: full-volume single-shift CG on
+//     M†M through DTXQCDMpcOpQUDA — the exact full-volume operator the
+//     non-EO HMC drives (QUDA-offloaded Wilson hop + device aux).
 //   DTXQCD_MEAS_QUDA=0 (or non-QUDA build): pure-Grid CPU reference
 //     (DTXQCDMOp on DTXQCDWilsonCloverFermionEO).  Bit-parity check target.
 //
@@ -40,6 +44,7 @@
 #ifdef GRID_HAVE_QUDA
 #include <Grid/util/QudaInit.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA_EO.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC.h>
 #endif
 #include <memory>
@@ -77,12 +82,19 @@ class DtxqcdMeasSolver {
                 U.sigma, U.pi, U.d, U.n, U.s, U.p),
         Mop_cpu_(cpu_op_) {
     use_quda_ = ResolveUseQuda();
+    use_eo_   = ResolveUseEO();
 #ifdef GRID_HAVE_QUDA
     if (use_quda_) {
       Grid::Quda::initialize();  // idempotent
-      quda_op_.reset(new Grid::DTXQCDMpcOpQUDA(
-          U_inv_, grid, rbgrid, mass, csw_val,
-          U.sigma, U.pi, U.d, U.n, U.s, U.p));
+      if (use_eo_) {
+        eo_quda_op_.reset(new Grid::DTXQCDMpcOpQUDA_EO(
+            cpu_op_, U_inv_, grid, rbgrid, mass, csw_val,
+            U.sigma, U.pi, U.d, U.n, U.s, U.p));
+      } else {
+        quda_op_.reset(new Grid::DTXQCDMpcOpQUDA(
+            U_inv_, grid, rbgrid, mass, csw_val,
+            U.sigma, U.pi, U.d, U.n, U.s, U.p));
+      }
     }
 #endif
     std::cout << Grid::GridLogMessage
@@ -90,7 +102,8 @@ class DtxqcdMeasSolver {
               << " stout(nsmear=" << stout_nsmear_inv
               << ", rho=" << stout_rho_inv << ")"
               << " tol=" << tol_ << " maxit=" << maxit_
-              << " backend=" << (use_quda_ ? "QUDA" : "Grid-CPU")
+              << " backend=" << (use_quda_ ? (use_eo_ ? "QUDA-EO" : "QUDA")
+                                           : "Grid-CPU")
               << std::endl;
   }
 
@@ -99,10 +112,92 @@ class DtxqcdMeasSolver {
   void Solve(const Grid::DTXQCDFermionDoubled &source,
              Grid::DTXQCDFermionDoubled &x) {
 #ifdef GRID_HAVE_QUDA
+    if (use_eo_ && use_quda_) { SolveEO(source, x); return; }
     if (use_quda_ && quda_op_) { SolveQuda(source, x); return; }
 #endif
     SolveWith(Mop_cpu_, source, x);
   }
+
+#ifdef GRID_HAVE_QUDA
+  // EO-preconditioned solve (DTXQCD_MEAS_EO=1, 2026-07-02, rides the EO
+  // Style C port): Schur-decompose M x = b,
+  //   b'_o = b_o - M_oe M_ee^{-1} b_e
+  //   Mpc x_o = b'_o   solved as (Mpc†Mpc) x_o = Mpc† b'_o  on the odd
+  //                    half-volume via the device-resident EO Style C CG
+  //   x_e  = M_ee^{-1} (b_e - M_eo x_o)
+  // Half the volume per iteration vs the full-M path; site-local pieces ride
+  // the existing per-site inverse caches.  Reliable update cross-checks
+  // against the Grid Mpc, so the device solution is self-validated.
+  void SolveEO(const Grid::DTXQCDFermionDoubled &source,
+               Grid::DTXQCDFermionDoubled &x) {
+    using namespace Grid;
+    auto pick = [&](int cb, DTXQCDFermionDoubled &half,
+                    const DTXQCDFermionDoubled &full) {
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        pickCheckerboard(cb, half.upper.f[a], full.upper.f[a]);
+        pickCheckerboard(cb, half.lower.f[a], full.lower.f[a]);
+      }
+    };
+    auto setcb = [&](DTXQCDFermionDoubled &full,
+                     const DTXQCDFermionDoubled &half) {
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        setCheckerboard(full.upper.f[a], half.upper.f[a]);
+        setCheckerboard(full.lower.f[a], half.lower.f[a]);
+      }
+    };
+    auto stamp = [&](DTXQCDFermionDoubled &f, int cb) {
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        f.upper.f[a].Checkerboard() = cb;
+        f.lower.f[a].Checkerboard() = cb;
+      }
+    };
+    auto sub = [&](DTXQCDFermionDoubled &y,
+                   const DTXQCDFermionDoubled &a_, int cb) {
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        y.upper.f[a] = y.upper.f[a] - a_.upper.f[a];
+        y.lower.f[a] = y.lower.f[a] - a_.lower.f[a];
+      }
+      stamp(y, cb);
+    };
+
+    DTXQCDFermionDoubled b_e(&rbgrid_), b_o(&rbgrid_);
+    pick(Even, b_e, source);
+    pick(Odd,  b_o, source);
+
+    // b'_o = b_o - Meooe(MooeeInv(b_e))
+    DTXQCDFermionDoubled t_e(&rbgrid_), t_o(&rbgrid_);
+    cpu_op_.MooeeInv(b_e, t_e);
+    stamp(t_e, Even);
+    cpu_op_.Meooe(t_e, t_o);
+    stamp(t_o, Odd);
+    sub(b_o, t_o, Odd);  // b_o -= t_o
+
+    // rhs = Mpc† b'_o ; device single-zero-shift CG on Mpc†Mpc.
+    DTXQCDMpcOp mpc(cpu_op_);
+    DTXQCDFermionDoubled rhs(&rbgrid_);
+    mpc.Mdag(b_o, rhs);
+    stamp(rhs, Odd);
+    std::vector<Grid::DTXQCDFermionDoubled> psi;
+    psi.emplace_back(&rbgrid_);
+    stamp(psi[0], Odd);
+    std::vector<RealD> poles = {0.0};
+    std::vector<RealD> tols = {tol_};
+    DTXQCDMultiShiftCGQUDA_StyleC(mpc, *eo_quda_op_, poles, tols, rhs, psi,
+                                  maxit_);
+    stamp(psi[0], Odd);
+
+    // x_e = MooeeInv(b_e - Meooe(x_o))
+    DTXQCDFermionDoubled t_e2(&rbgrid_), x_e(&rbgrid_);
+    cpu_op_.Meooe(psi[0], t_e2);
+    stamp(t_e2, Even);
+    sub(b_e, t_e2, Even);  // b_e -= Meooe x_o
+    cpu_op_.MooeeInv(b_e, x_e);
+    stamp(x_e, Even);
+
+    setcb(x, x_e);
+    setcb(x, psi[0]);
+  }
+#endif
 
 #ifdef GRID_HAVE_QUDA
   // Device-resident single-shift CG: x = (M†M)^{-1} M† source = M^{-1} source,
@@ -139,6 +234,20 @@ class DtxqcdMeasSolver {
     return false;
 #else
     const char *e = std::getenv("DTXQCD_MEAS_QUDA");
+    if (!e || !*e) return true;  // default ON under QUDA
+    return std::atoi(e) != 0;
+#endif
+  }
+
+  // DTXQCD_MEAS_EO: EO-preconditioned (Schur) measurement solve on the
+  // device path.  Default ON under QUDA (validated correlator-identical vs
+  // the full-volume solve on the λ=10 thermal-aux config, ~10× per solve);
+  // =0 restores the full-volume Style C solve.
+  static bool ResolveUseEO() {
+#ifndef GRID_HAVE_QUDA
+    return false;
+#else
+    const char *e = std::getenv("DTXQCD_MEAS_EO");
     if (!e || !*e) return true;  // default ON under QUDA
     return std::atoi(e) != 0;
 #endif
@@ -197,11 +306,13 @@ class DtxqcdMeasSolver {
   Grid::RealD mass_, csw_, tol_;
   int maxit_;
   bool use_quda_ = false;
+  bool use_eo_ = false;
   Grid::LatticeGaugeField U_inv_;
   Grid::DTXQCDWilsonCloverFermionEO cpu_op_;
   Grid::DTXQCDMOp Mop_cpu_;
 #ifdef GRID_HAVE_QUDA
   std::unique_ptr<Grid::DTXQCDMpcOpQUDA> quda_op_;
+  std::unique_ptr<Grid::DTXQCDMpcOpQUDA_EO> eo_quda_op_;
 #endif
 };
 

@@ -80,7 +80,7 @@ Almost all TXQCD code lives under `Grid/qcd/action/txqcd/` (hub: `Txqcd.h`). Two
 - **Smearing.** `TXQCDSmearedConfiguration` wraps Grid's `SmearedConfiguration<PeriodicGimplR>`: gauge component goes through the stout chain; aux components pass through unchanged. All fermion/gauge actions in `production/` run with `is_smeared = true`.
 - **Checkpoint format.** Gauge is standard NERSC (interoperable). TXQCD aux fields are a packed-Hermitian binary sidecar `ckpoint_lat_aux.<traj>` (magic `TXQA`, IEEE64BIG). Multi-rank writes use MPI-IO collective at rank-major offsets (format v3); single-rank v2 is still readable. Don't invent a new format — extend the existing one.
 - **HMC driver pattern.** TXQCD/DTXQCD drivers bypass `HMCResourceManager` (which assumes a gauge-only field) and wire `HybridMonteCarlo + Integrator + RNGs` by hand. See `HMC/TXQCD_Wilson_small.cc` or `production/gen_txqcd_cfgs.cc` as templates.
-- **Measurement inversions** (`meas_conn_*`, `meas_disco_*`): use full-volume `MdagM` CG, *not* EO. This is intentional — measurement inversions are one-shot; HMC forces are what benefit from EO.
+- **Measurement inversions** (`meas_conn_*`, `meas_disco_*`): TXQCD measurements use full-volume `MdagM` CG. DTXQCD measurements are EO/Schur-preconditioned by default since 2026-07-02 (`DTXQCD_MEAS_EO=1` default under QUDA in `production/dtxqcd_meas_helper.h`, ~10× per solve; `=0` restores the full-volume solve).
 
 ## DTXQCD architecture — the active construction
 

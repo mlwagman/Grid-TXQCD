@@ -1,11 +1,30 @@
 # DTXQCD EO fast-GPU-path port — handoff to fresh fork
 
-## ═══ PROGRESS 2026-07-02 (same day) ═══
+## ═══ PROGRESS 2026-07-02 (same day) ═══ — ALL GATES GREEN, IN PRODUCTION
 - **Gate 1 PASSED** (machine precision 4e-16, piecewise: hop / MooeeInv /
   Mooee / full Mpc / Mpc†, 10 random vectors — `production/Test_dtxqcd_mpc_op_quda_eo`).
 - **Gate 2 PASSED** (10-shift Style C EO vs Grid-DP: |dpsi| 1e-11..1e-15,
   true residuals < tol — `production/Test_dtxqcd_multishift_quda_eo`).
-- **Gate 3 in flight** (gen_dtxqcd_cfgs 4⁴ λ=4 TEST_FORCE_FD, =0 vs =1).
+- **Gate 3 PASSED** (4⁴ λ=4 A/B: dH agrees to 10-15 digits, =0 vs =1).
+- **Gate 4 PASSED** (16³×48 4-GPU multishift 2.0× vs pure-DP, ~1.2× vs the
+  MP-CG incumbent per solve).
+- **Gate 5 PASSED** (λ=6 MDS=10 stream forked at ckpt 10, trajs 11-20 full
+  Metropolis: dH envelope statistically identical to the MP-CG incumbent's
+  own trajs 11-18 — both ~+2 with the same sticky-patch config, Style C even
+  escaped it (accepts at 17-18); plaq continuity exact; rc=134 = benign QUDA
+  teardown.  **Production per-traj: 573 s (Style C, job 1296217) vs 1040 s
+  (MP-CG incumbent) at λ=6 16³×48 1.1.1.4 — 1.8×, clears the 1.5× bar.**)
+- Production cycled onto the fast path 2026-07-02: jobs 1296215/16/17
+  (λ=4/5/6 `_eo_fromchroma_cw_mds10` continuations, `DTXQCD_MULTISHIFT_QUDA=1`
+  via the patched launcher).  λ=5/6 healthy; λ=4 unstable at MDS=10 (LogDet
+  Fdt max ~59, all trajs rejected — pre-cycle incumbent identically sick ⇒
+  small-λ EO-Schur pathology, NOT a Style C regression; non-EO λ=3-6
+  comparison streams launched, jobs 1296276-79).
+- **EO measurements**: `dtxqcd_meas_helper.h` gained `DTXQCD_MEAS_EO=1`
+  (Schur solve on odd CB via `DTXQCDMpcOpQUDA_EO` + Style C single-zero-shift
+  CG, even block back-substituted through the site caches).  λ=10 thermal-aux
+  A/B: EO ~8.5 s/solve (380-400 iters) vs full-volume ~82 s/solve — ~10×.
+  h5 cross-validation + λ=6/4/3 A/Bs in flight.
 - Implementation deltas vs the plan below:
   * `DTXQCDMpcOpQUDA_EO` SUBCLASSES `DTXQCDMpcOpQUDA` (non-virtual shadowing;
     solvers templated on the concrete type → static binding, full reuse of

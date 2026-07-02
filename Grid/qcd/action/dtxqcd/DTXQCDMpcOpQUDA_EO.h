@@ -41,6 +41,7 @@
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOp.h>
 
 NAMESPACE_BEGIN(Grid);
 

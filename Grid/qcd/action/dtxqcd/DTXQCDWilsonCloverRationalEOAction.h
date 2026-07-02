@@ -636,15 +636,18 @@ class DTXQCDWilsonCloverRationalEOAction : public Action<DTXQCDField> {
   // EO Style C gate: DTXQCD_MULTISHIFT_QUDA=1 routes the EO multishift through
   // the device-resident Schur wrapper + templated Style C solver.  Read per
   // call (no static cache) so gate tests can toggle within one process.
-  // Default OFF for EO (explicit opt-in; the non-EO default-ON precedent
-  // applies only after Gate 5 signs off — HANDOFF_EO_STYLE_C_PORT.md rollback
-  // contract).
+  // Default ON under QUDA since Gate 5 sign-off (2026-07-02: dH envelope
+  // identical to the MP-CG incumbent, 1.8×/traj at λ=6 16³×48 1.1.1.4).
+  // DTXQCD_MULTISHIFT_QUDA=0 is the rollback to the MP-CG/Grid-DP path.
+  // Callers do Quda::initialize() before building the Mop; the generator's
+  // default DTXQCD_QUDA_HYBRID=1 initializes QUDA early anyway.
   static bool EOStyleCEnabled() {
 #ifndef GRID_HAVE_QUDA
     return false;
 #else
     const char *e = std::getenv("DTXQCD_MULTISHIFT_QUDA");
-    return (e && *e && std::atoi(e) != 0);
+    if (!e || !*e) return true;  // default ON under QUDA
+    return std::atoi(e) != 0;
 #endif
   }
 
