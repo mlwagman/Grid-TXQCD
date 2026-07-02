@@ -671,6 +671,20 @@ int main(int argc, char **argv) {
   CPp.format        = "IEEE64BIG";
   DTXQCDCheckpointer ckpt(CPp);
 
+  // SAVE_INIT_CKPT=1: write the traj-0 (post-init, pre-evolution) state as a
+  // regular checkpoint.  With TRAJ=0 this turns the driver into a
+  // "thermal-aux-on-imported-gauge" config factory: IMPORT_CFG=<chroma lime>
+  // + AUX_INIT_AUTO=1 + SAVE_INIT_CKPT=1 + TRAJ=0 produces ckpoint_lat{,_daux,
+  // _rng}.0 = exactly the traj-0 of a fromchroma start, measurable by the
+  // meas_* binaries with no HMC evolution (2026-07-02, measurement-cleanliness
+  // sweep: chroma-thermalized gauge + saddle aux at each lambda).
+  if (start_traj == 0 &&
+      TXQCDProduction::detail::env_int("SAVE_INIT_CKPT", 0) != 0) {
+    std::cout << GridLogMessage
+              << "[SAVE_INIT_CKPT] writing traj-0 init checkpoint" << std::endl;
+    ckpt.TrajectoryComplete(0, U, sRNG, pRNG);
+  }
+
   // ---- signed-Pfaffian + aux diagnostics observer (the sign-reweighting
   //      observable: per-traj gamma5.M48 low eigenvalues -> n_neg -> signPf,
   //      plus aux VEVs / Tr M^-1 / per-action Fdt / aux correlators).  Writes

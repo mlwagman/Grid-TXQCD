@@ -1,5 +1,72 @@
 # DTXQCD non-EO Tr[π] vs p asymmetry — handoff to next session
 
+## ═══ RESOLVED 2026-07-01 (same day, follow-up session) — NO CODE BUG ═══
+
+**The asymmetry is a frozen initial condition of the fermion-blind soft mode,
+not a force or action defect.**  Full chain of evidence:
+
+1. **π and p enter M only through Y = π + p·I₆** (identical γ5 coupling, both
+   blocks).  The orthogonal per-site mode w ∝ p − Tr[π]/… (volume-averaged
+   w̄ = ⟨p⟩ − ⟨Trπ⟩) couples to NOTHING: not the fermions, not the gauge — only
+   the aux Gaussian with mass λ².  Exact equilibrium identity: ⟨Trπ⟩ = ⟨p⟩
+   (constrained-Gaussian split of the 6π₀² + p² metric).  Same for (σ, s).
+2. **The w force is algebraically zero in the code**: Σ_diag F_pi = F_p is an
+   identity of the site kernel for ANY bilinear input (γ5 diagonal), preserved
+   by the Wirtinger transpose, Hermitize, accumulation, and integrator.  So w̄
+   can only diffuse (SD ≈ 0.003/traj at 16³×48) — verified against the h5
+   traj-to-traj steps.
+3. **The "traj-1 kick" was a reconstruction artifact.**  gen_dtxqcd_cfgs
+   RE-SEEDS pRNG to {6,7,8,9,10} right before the final FillAuxFields
+   (line 268), so the production aux draw starts at stream position 0.  The
+   Test_dtxqcd_aux_drive_symmetry reconstruction drew the weak-field gauge
+   first (consuming stream) → different Gaussian sample → w̄_init = −0.081
+   instead of the chain's true −0.134.  Verified by
+   production/Test_dtxqcd_init_repro: driver order gives ⟨Trπ⟩=+0.1334,
+   w̄=−0.1342; chain h5 traj 1 = +0.1317, −0.1323 (one traj of diffusion away).
+4. **The mode is frozen**: per-entry aux frequency ω = λ√2 → per-traj mean
+   decay cos(ωτ) → relaxation ~800 trajs at λ=0.1 (τ=√2/4).  110–140 trajs
+   ≪ that.  The λ=0.25 / λ=0.5 chains decay at the predicted faster rates ✓.
+5. **λ-scaling + common sign across chains**: all chains share seed
+   {6,7,8,9,10}; init width ∝ 1/λ ⇒ w̄_init ∝ 1/λ with the same normalized
+   draw ⇒ ⟨Trπ⟩ ≈ −6w̄/7 ∝ 1/λ, same sign everywhere.  Matches 0.15 / 0.05 /
+   0.02 at λ = 0.1 / 0.25 / 0.5.  The quantitative split
+   ⟨Trπ⟩ = 6(ū−w̄)/7, ⟨p⟩ = (6ū+w̄)/7 reproduces the observed values with
+   ū ≈ 0.03.  The "270σ" claim assumed independent samples; with τ_w ~ 800
+   trajs the chain holds ~one sample of a Gaussian with SD ≈ 0.06 → ~2σ.
+6. **The P-even sector shows the same frozen mode** (s − Trσ = −0.025 at init
+   → −0.044 by traj 140, hidden by the large common condensate 44) — same
+   mechanism, same explanation.
+7. **Every code probe is green** (Test_dtxqcd_aux_force_aggregate +
+   Test_dtxqcd_ratforce_gpu multi-rank): host M u-equivalence M(π+cI,p) ≡
+   M(π,p+c) at 1e-16 (4⁴ + 16³×48); LogDet & Rational S u-equivalence exact,
+   incl. QUDA Style C; deriv-vs-FD = 1.000000 for all four actions on all
+   four singlet slots, CPU and production-GPU paths; GPU force kernel
+   bit-comparable multi-rank.
+
+**Physics impact: none on fermionic observables.**  w does not enter M, so
+plaq / correlators / Fierz / signPf are exactly w-independent.  Only the raw
+aux VEVs ⟨Trπ⟩ vs ⟨p⟩ (and ⟨Trσ⟩ vs ⟨s⟩) display the frozen split.  The
+λ=0.1 plaq 0.454-vs-0.514 question is a SEPARATE (thermalization) issue —
+the σ condensate is still visibly relaxing (44.3 → 42.3 over 140 trajs, no
+plateau), so that chain simply is not equilibrated yet.
+
+**Recommended fixes (not yet implemented):**
+- Exact per-site Gibbs resample of the two fermion-blind directions each
+  trajectory: given Y = π + pI, draw p' ~ N(Tr Y_ct/7·…, 1/(7λ²)) and set
+  π = Y − p'I (and the σ/s analogue).  Site-local, analytic, zero cost —
+  removes the frozen modes entirely.  Until then, either init with the
+  conditional draw (w typical instead of 2σ) or simply don't interpret
+  ⟨Trπ⟩−⟨p⟩ as physics.
+- Reconstructions of the production init MUST mimic the driver RNG order:
+  seed → weak-field gauge → RESEED {6,7,8,9,10} → FillAuxFields.
+
+Diagnostics added: tests/dtxqcd/Test_dtxqcd_aux_force_aggregate.cc,
+production/Test_dtxqcd_init_repro.cc, scratch analyzer of h5 aux VEV series.
+The remainder of this document is the ORIGINAL (superseded) bug-hunt handoff,
+kept for the record.
+
+## ═══ original handoff below (superseded) ═══
+
 **Date:** 2026-07-01
 **Status:** localized to something between the aux force kernels (verified symmetric) and the field observables (evolve asymmetrically).  Ready for targeted deriv() diagnostic.
 **Branch:** `dtxqcd-v2` (Grid-DTXQCD repo)
