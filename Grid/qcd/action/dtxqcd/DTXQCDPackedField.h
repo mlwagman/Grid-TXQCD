@@ -122,6 +122,8 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
         tmp_in_(rbgrid), tmp_mid_(rbgrid), tmp_out_(rbgrid) {
     if (const char *e = std::getenv("DTXQCD_GRIDMG_QUDA_FINE"))
       if (std::atoi(e) == 0) Mq_ = nullptr;
+    if (const char *e = std::getenv("DTXQCD_GRIDMG_SKIP_ZERO"))
+      skip_zero_ = std::atoi(e) != 0;
   }
 
   ~DtxqcdPackedMpcHermOp() {
@@ -136,17 +138,23 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
     double t0 = usecond();
     DtxqcdUnpackDoubled(in, tmp_in_);
     StampCb_(tmp_in_);
+    double t1 = usecond();
+    t_unpack_us += t1 - t0;
 #ifdef GRID_HAVE_QUDA
     if (Mq_) {
       HermOpDevice_();
     } else
 #endif
     {
+      double tm = usecond();
       mpc_.M(tmp_in_, tmp_mid_);
       mpc_.Mdag(tmp_mid_, tmp_out_);
+      t_matvec_us += usecond() - tm;
     }
+    double t2 = usecond();
     DtxqcdPackDoubled(tmp_out_, out);
     out.Checkerboard() = in.Checkerboard();  // flag pass-through (see header)
+    t_pack_us += usecond() - t2;
     ncalls++;
     t_herm_us += usecond() - t0;
   }
@@ -162,9 +170,36 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
   void OpDir(const Field &in, Field &out, int dir, int disp) { GRID_ASSERT(0); }
   void OpDirAll(const Field &in, std::vector<Field> &out) { GRID_ASSERT(0); }
 
-  // Fine-matvec accounting for the coarsening/solve experiments.
+  // Fine-matvec accounting for the coarsening/solve experiments.  Phase
+  // accumulators (us): unpack = packed->struct Grid kernel (+cb stamps),
+  // h2d/d2h = the host-mode copy_{from,to}_grid CSF crossings, zero = the
+  // per-call CSF zeroing (skippable via DTXQCD_GRIDMG_SKIP_ZERO=1: zero only
+  // once after allocation — measures whether the halo-padding guard is
+  // load-bearing here), matvec = M_device_csf + Mdag_device_csf (or the
+  // Grid-path M+Mdag), pack = struct->packed Grid kernel.
   size_t ncalls = 0;
   double t_herm_us = 0.0;
+  double t_unpack_us = 0.0, t_pack_us = 0.0;
+  double t_h2d_us = 0.0, t_d2h_us = 0.0;
+  double t_zero_us = 0.0, t_matvec_us = 0.0;
+
+  void ResetCounters() {
+    ncalls = 0;
+    t_herm_us = t_unpack_us = t_pack_us = 0.0;
+    t_h2d_us = t_d2h_us = t_zero_us = t_matvec_us = 0.0;
+  }
+  void ReportCounters(const std::string &tag) const {
+    if (!ncalls) return;
+    double n = (double)ncalls;
+    std::cout << GridLogMessage << "[packedop " << tag << "] " << ncalls
+              << " HermOps, per-call ms: total " << t_herm_us / n * 1e-3
+              << " = unpack " << t_unpack_us / n * 1e-3
+              << " + h2d " << t_h2d_us / n * 1e-3
+              << " + zero " << t_zero_us / n * 1e-3
+              << " + matvec " << t_matvec_us / n * 1e-3
+              << " + d2h " << t_d2h_us / n * 1e-3
+              << " + pack " << t_pack_us / n * 1e-3 << std::endl;
+  }
 
  private:
   void StampCb_(DTXQCDFermionDoubled &v) const {
@@ -185,13 +220,22 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
       for (int d = 0; d < 4; ++d) X_full_[d] = Mq_->GaugeParam().X[d];
       csf_ready_ = true;
     }
+    double t0 = usecond();
     in_q_.copy_from_grid(tmp_in_, Mq_->InvertParam(), X_full_);
+    double t1 = usecond();
+    t_h2d_us += t1 - t0;
     // Zero output/intermediate buffers including halo padding: QUDA's dirac
     // gather can read uninitialised padded slots after NULL_FIELD_CREATE
-    // (same guard as DtxqcdHermOpQUDA_StyleC).
-    mid_q_.zero();
-    out_q_.zero();
-    scr_q_.zero();
+    // (same guard as DtxqcdHermOpQUDA_StyleC).  DTXQCD_GRIDMG_SKIP_ZERO=1
+    // zeroes only the first call after allocation (overhead probe).
+    if (!skip_zero_ || !zeroed_once_) {
+      mid_q_.zero();
+      out_q_.zero();
+      scr_q_.zero();
+      zeroed_once_ = true;
+    }
+    double t2 = usecond();
+    t_zero_us += t2 - t1;
     quda::ColorSpinorField *iu[DtxqcdNf] = {in_q_.csf[0].get(), in_q_.csf[1].get()};
     quda::ColorSpinorField *il[DtxqcdNf] = {in_q_.csf[2].get(), in_q_.csf[3].get()};
     quda::ColorSpinorField *mu[DtxqcdNf] = {mid_q_.csf[0].get(), mid_q_.csf[1].get()};
@@ -199,10 +243,14 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
     quda::ColorSpinorField *ou[DtxqcdNf] = {out_q_.csf[0].get(), out_q_.csf[1].get()};
     quda::ColorSpinorField *ol[DtxqcdNf] = {out_q_.csf[2].get(), out_q_.csf[3].get()};
     quda::ColorSpinorField *sl[DtxqcdNf] = {scr_q_.csf[0].get(), scr_q_.csf[1].get()};
+    double t3 = usecond();
     Mq_->M_device_csf(iu, il, mu, ml, sl);
     Mq_->Mdag_device_csf(mu, ml, ou, ol, sl);
+    double t4 = usecond();
+    t_matvec_us += t4 - t3;
     out_q_.copy_to_grid(tmp_out_, Mq_->InvertParam(), X_full_);
     StampCb_(tmp_out_);
+    t_d2h_us += usecond() - t4;
   }
 #endif
 
@@ -213,6 +261,8 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
   DtxqcdQudaStyleC::DoubledStateCSF in_q_, mid_q_, out_q_, scr_q_;
   int X_full_[4];
   bool csf_ready_ = false;
+  bool skip_zero_ = false;
+  bool zeroed_once_ = false;
 #endif
   DTXQCDFermionDoubled tmp_in_, tmp_mid_, tmp_out_;
 };

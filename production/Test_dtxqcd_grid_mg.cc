@@ -26,7 +26,10 @@
 //
 // Env knobs: LAMBDA(4) MASS(-0.245) CSW(1.24930970916466) GAUGE_KIND(tepid)
 //   AUX_SIGMA(0) CFG_DIR TRAJ NBASIS(32) BLOCK(4.4.4.4) GEOM(nnn|nearest)
-//   SUBSPACE(cheby|inverse|multishift) CHEBY_ORD(300) CHEBY_LO(lmax*1e-3)
+//   SUBSPACE(cheby|powerlaw|inverse|multishift) — NB "cheby" carries a
+//   hardwired ord-1000 refinement pass (Aggregates.h), "powerlaw" costs
+//   exactly nbasis*CHEBY_ORD — CHEBY_ORD(300) CHEBY_LO(lmax*1e-3)
+//   BENCH_HERMOP(20) DTXQCD_GRIDMG_SKIP_ZERO(0)
 //   CHEBY_HI(lmax*1.1) MSHIFT_LO(lmax*1e-3) MSHIFT_TOL(1e-5) MSHIFT_MAXIT(2000)
 //   SMOOTH_IT(8) MIRS_SHIFT(lmax*0.02) COARSE_TOL(1e-10) COARSE_TOL_SLOPPY(0.04)
 //   CG_TOL(1e-8) CG_MAX(100000) MG_TOL(=CG_TOL) MG_MAXIT(700)
@@ -164,6 +167,14 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
     double mlo = (P.mshift_lo > 0) ? P.mshift_lo : 1.0e-3 * lmax;
     Aggregates.CreateSubspaceMultishift(pRNG, FineHermOp, mlo, P.mshift_tol,
                                         P.mshift_maxit);
+  } else if (P.subspace == "powerlaw") {
+    // Single power-law Chebyshev pass: cost = nbasis * CHEBY_ORD, no
+    // hardwired ord-1000 refinement (which dominates the "cheby" variant:
+    // Aggregates.h:398 — CHEBY_ORD barely moves that one's cost).
+    std::cout << GridLogMessage << "[gridmg] PowerLaw subspace: ord="
+              << P.cheby_ord << " hi=" << cheby_hi << std::endl;
+    Aggregates.CreateSubspaceChebyshevPowerLaw(pRNG, FineHermOp, nbasis,
+                                               cheby_hi, P.cheby_ord);
   } else {
     std::cout << GridLogMessage << "[gridmg] Chebyshev subspace: ord="
               << P.cheby_ord << " [" << cheby_lo << "," << cheby_hi << "]"
@@ -378,6 +389,21 @@ int main(int argc, char **argv) {
         gateb_tol);
 
   //////////////////////////////////////////////////////////////////////
+  // Adapter-overhead micro-benchmark: N repeated HermOps, per-phase ms
+  // (unpack / h2d / zero / matvec / d2h / pack).  Raw Style C CG iteration
+  // is ~22 ms at 16^3x48 1 GPU — the matvec phase should approach that;
+  // everything else is adapter overhead.  DTXQCD_GRIDMG_SKIP_ZERO=1 probes
+  // the zeroing cost (gates B/C/D validate correctness under it).
+  //////////////////////////////////////////////////////////////////////
+  const int nbench = env_int("BENCH_HERMOP", 20);
+  if (nbench > 0) {
+    FineHermOp.ResetCounters();
+    for (int i = 0; i < nbench; ++i) FineHermOp.HermOp(P, hop_out);
+    FineHermOp.ReportCounters("bench");
+    FineHermOp.ResetCounters();
+  }
+
+  //////////////////////////////////////////////////////////////////////
   // Spectrum scale for Chebyshev / smoother windows
   //////////////////////////////////////////////////////////////////////
   LatticeDtxqcdPacked src(&RBGrid);
@@ -463,6 +489,7 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage << "[gridmg] total fine HermOps this run: "
             << FineHermOp.ncalls << " (" << FineHermOp.t_herm_us * 1e-6
             << " s)" << std::endl;
+  FineHermOp.ReportCounters("run-aggregate");
   Grid_finalize();
   return fails ? 1 : 0;
 }
