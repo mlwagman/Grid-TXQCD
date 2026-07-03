@@ -215,12 +215,30 @@ Test_dtxqcd_mpc_op_quda_eo: Test_dtxqcd_mpc_op_quda_eo.o $(DTXQCD_NATIVE_IMPL_OB
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_mpc_op_quda_eo.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
+# TRACELESS_AUX projector unit test (ET broadcast semantics guard).
+Test_dtxqcd_traceless_projector.o: Test_dtxqcd_traceless_projector.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_traceless_projector: Test_dtxqcd_traceless_projector.o
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_traceless_projector.o \
+	  $(LDFLAGS) $(LIBS)
+
 # EO Style C port Gate 2: multishift Grid-DP vs Style C on the EO Mop.
 Test_dtxqcd_multishift_quda_eo.o: Test_dtxqcd_multishift_quda_eo.cc
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 Test_dtxqcd_multishift_quda_eo: Test_dtxqcd_multishift_quda_eo.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_multishift_quda_eo.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+# Grid algebraic multigrid (HDCG/ADEF2) on the EO Schur op via the packed
+# adapter (DTXQCDPackedField.h) — route-(b) coarsening experiment.  Pulls
+# dtxqcd_meas_helper.h -> DTXQCDMpcOpQUDA(_EO) -> native kernel symbols.
+Test_dtxqcd_grid_mg.o: Test_dtxqcd_grid_mg.cc params.h dtxqcd_meas_helper.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_grid_mg: Test_dtxqcd_grid_mg.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_grid_mg.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
 # TXQCD Wilson-vs-Mobius(naive Delta) sign probe -- same dense cuSOLVER

@@ -292,6 +292,12 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
     tr_p_.push_back(tr_p.real() / V);
     tr_d_.push_back(tr_d.real() / V);
     tr_n_.push_back(tr_n.real() / V);
+    // Per-sample series for thermalization/autocorrelation diagnosis (the
+    // means±SE alone hid a slow zero-mode wander, 2026-07-03).
+    std::cout << GridLogMessage << "[FierzAvg series] traj=" << traj
+              << "  s=" << tr_s.real() / V
+              << "  Trsig=" << tr_sigma.real() / V
+              << "  p=" << tr_p.real() / V << std::endl;
     n_sigma_sq_.push_back(norm2(U.sigma) / V);
     n_s_sq_.push_back(norm2(U.s) / V);
     n_d_sq_.push_back(norm2(U.d) / V);
@@ -362,7 +368,13 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
     //     ⟨Tr σ⟩ = 0,   ⟨s⟩ = 2 · Nf · Σ_W / λ²   (singlet absorbs σ trace)
     RealD lam2 = lambda_ * lambda_;
     RealD pred_tr_sigma, pred_tr_s;
-    if (DtxqcdDnComplexSymmetric()) {
+    if (DtxqcdTracelessAux()) {
+      // TRACELESS_AUX: σ traceless by construction; s carries the whole
+      // u-saddle at the marginalized stiffness (6/7)λ²:
+      //   ⟨s⟩ = (7/6)·Nf·Σ_W/λ²  (same u as the legacy σ₀/s split).
+      pred_tr_sigma = 0.0;
+      pred_tr_s     = (7.0 / 6.0) * (RealD)DtxqcdNf * mean_sigma_w / lam2;
+    } else if (DtxqcdDnComplexSymmetric()) {
       pred_tr_sigma = (RealD)DtxqcdNf * mean_sigma_w / lam2;
       pred_tr_s     = (RealD)DtxqcdNf * mean_sigma_w / lam2;
     } else {
@@ -427,8 +439,12 @@ class DtxqcdFierzAveragingObserver : public HmcObservable<DTXQCDField> {
               << "   abs=" << (pass_abs ? "PASS" : "FAIL")
               << "   3σ=" << (pass_3sig ? "PASS" : "FAIL")
               << std::endl;
-    const char *pred_sigma_str = DtxqcdDnComplexSymmetric() ? "Nf·Σ/λ²" : "0 (traceless)";
-    const char *pred_s_str     = DtxqcdDnComplexSymmetric() ? "Nf·Σ/λ²" : "2·Nf·Σ/λ²";
+    const char *pred_sigma_str =
+        DtxqcdTracelessAux() ? "0 (TRACELESS_AUX)"
+        : DtxqcdDnComplexSymmetric() ? "Nf·Σ/λ²" : "0 (traceless)";
+    const char *pred_s_str =
+        DtxqcdTracelessAux() ? "(7/6)·Nf·Σ/λ²"
+        : DtxqcdDnComplexSymmetric() ? "Nf·Σ/λ²" : "2·Nf·Σ/λ²";
     std::cout << GridLogMessage
               << "⟨Tr σ⟩ saddle: obs=" << mean_tr_sigma
               << " ± " << se_tr_sigma << " (SE)  pred=" << pred_sigma_str

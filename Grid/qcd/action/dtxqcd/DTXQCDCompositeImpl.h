@@ -165,6 +165,42 @@ static inline bool DtxqcdDnColorTraceless() {
   return b;
 }
 
+// DTXQCD_TRACELESS_AUX=1: integrate out the fermion-blind trace mode
+// analytically — σ, π projected CF-traceless throughout HMC (field, momentum,
+// force) and the s, p Gaussian coefficient rescaled λ²/2 → (3/7)λ² in
+// DTXQCDAuxiliaryFieldGaussianAction.  Derivation (2026-07-03): the fermion
+// matrix depends on (π, p) only through u = Trπ/6 + p with UNIT relative
+// weight (the u-equivalence gate M(π+cI,p)==M(π,p+c) pins this); the prior
+// (λ²/2)Trπ² + (λ²/2)p² = (λ²/2)Trπ̃² + ½(6λ²)π₀² + ½(λ²)p² marginalizes over
+// the blind direction to S_eff(u) = ½·(6λ²·λ²)/(6λ²+λ²)·u² = (3/7)λ²u².
+// Saddle check: ⟨s⟩_new = 7/6·⟨s⟩_old = ⟨Trσ/6 + s⟩_old exactly.  NOTE the
+// reverted 2026-06-15 redesign (ef6039d8) used λ²/4 — that over-widens
+// Var(u) by 7/12→1, i.e. +71%, and was empirically falsified by the 4-mass
+// Fierz scan (23962b9e).  Default OFF = byte-identical legacy action.
+static inline bool DtxqcdTracelessAux() {
+  static const bool b = []() {
+    if (const char *v = std::getenv("DTXQCD_TRACELESS_AUX"); v && *v) {
+      bool on = std::atoi(v) != 0;
+      std::cout << GridLogMessage
+                << "[DTXQCD] TRACELESS_AUX = " << (on ? "ON" : "OFF")
+                << "  (traceless sigma/pi + (3/7) lambda^2 s,p prior)"
+                << std::endl;
+      return on;
+    }
+    return false;
+  }();
+  return b;
+}
+
+// Fast CF-traceless projection X → X − (Tr X / 6)·I via Grid ETs (the SU(N)
+// Ta idiom: subtracting an iScalar from an iMatrix broadcasts onto the
+// diagonal).  Device-resident, safe on the per-step force path — unlike the
+// peek/poke DtxqcdMakeColorTracelessCFInPlace diagnostic helper above.
+inline void DtxqcdMakeTracelessCFFastInPlace(LatticeDtxqcdSigma &X) {
+  const RealD invN = 1.0 / RealD(DtxqcdNf * Nc);
+  X = X - invN * trace(X);
+}
+
 // Gaussian sample for CF matrix: complex Gaussian fill of all NfNc^2 entries,
 // then Hermitian + traceless project.  Variance of the resulting Hermitian
 // matrix entries: off-diagonal ~ N(0, 1/2) in re/im each; diagonal ~ N(0, 1)
@@ -246,6 +282,10 @@ class DTXQCDCompositeImpl {
       DtxqcdMakeColorTracelessCFInPlace(P.d);
       DtxqcdMakeColorTracelessCFInPlace(P.n);
     }
+    if (DtxqcdTracelessAux()) {
+      DtxqcdMakeTracelessCFFastInPlace(P.sigma);
+      DtxqcdMakeTracelessCFFastInPlace(P.pi);
+    }
     if (DtxqcdDnRealSymmetric()) {
       DtxqcdRealSymmetricCFInPlace(P.d);
       DtxqcdRealSymmetricCFInPlace(P.n);
@@ -271,6 +311,10 @@ class DTXQCDCompositeImpl {
     out.U = PeriodicGimplR::projectForce(Fforce.U);
     out.sigma = Fforce.sigma;  DtxqcdHermitizeAndTracelessCFInPlace(out.sigma);
     out.pi    = Fforce.pi;     DtxqcdHermitizeAndTracelessCFInPlace(out.pi);
+    if (DtxqcdTracelessAux()) {
+      DtxqcdMakeTracelessCFFastInPlace(out.sigma);
+      DtxqcdMakeTracelessCFFastInPlace(out.pi);
+    }
     // Under DN_COMPLEX_SYMMETRIC: skip Hermitize for d, n (Hermitize +
     // then complex-symm collapses to real-symm, losing imag DOFs).
     out.d     = Fforce.d;
@@ -333,6 +377,10 @@ class DTXQCDCompositeImpl {
     PeriodicGimplR::Project(U.U);
     DtxqcdHermitizeAndTracelessCFInPlace(U.sigma);
     DtxqcdHermitizeAndTracelessCFInPlace(U.pi);
+    if (DtxqcdTracelessAux()) {
+      DtxqcdMakeTracelessCFFastInPlace(U.sigma);
+      DtxqcdMakeTracelessCFFastInPlace(U.pi);
+    }
     if (!DtxqcdDnComplexSymmetric()) {
       DtxqcdHermitizeAndTracelessCFInPlace(U.d);
       DtxqcdHermitizeAndTracelessCFInPlace(U.n);
@@ -452,8 +500,15 @@ class DTXQCDCompositeImpl {
     }
     U.d = scale * U.d;
     U.n = scale * U.n;
-    DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale * U.s;
-    DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale * U.p;
+    // TRACELESS_AUX: s, p prior is (3/7)λ² (s²+p²) → draw width sqrt(7/6)/λ;
+    // σ, π drawn traceless (projected below).
+    RealD scale_sp = DtxqcdTracelessAux() ? scale * ::sqrt(7.0 / 6.0) : scale;
+    DtxqcdRealScalarGaussian(pRNG, U.s);       U.s     = scale_sp * U.s;
+    DtxqcdRealScalarGaussian(pRNG, U.p);       U.p     = scale_sp * U.p;
+    if (DtxqcdTracelessAux()) {
+      DtxqcdMakeTracelessCFFastInPlace(U.sigma);
+      DtxqcdMakeTracelessCFFastInPlace(U.pi);
+    }
     if (DtxqcdDnColorTraceless()) {
       DtxqcdMakeColorTracelessCFInPlace(U.d);
       DtxqcdMakeColorTracelessCFInPlace(U.n);
@@ -473,9 +528,14 @@ class DTXQCDCompositeImpl {
 
     if (Sigma != 0.0) {
       // σ per-entry shift = Σ/(N_C λ²)  → ⟨Trσ⟩ = N_F · Σ/λ²
-      const RealD sigma_shift = Sigma / (Nc * lambda * lambda);
-      // s shift = N_F · Σ/λ²
-      const RealD s_shift = DtxqcdNf * Sigma / (lambda * lambda);
+      // TRACELESS_AUX: the diagonal σ shift IS the trace mode — dropped; s
+      // carries the whole u-saddle, u = J/λ²_eff = (7/6)·N_F·Σ/λ² (same u
+      // as the legacy split σ₀ = Σ/(3λ²), s = N_F Σ/λ² — exact equivalence).
+      const RealD sigma_shift =
+          DtxqcdTracelessAux() ? 0.0 : Sigma / (Nc * lambda * lambda);
+      // s shift = N_F · Σ/λ²  (× 7/6 under TRACELESS_AUX)
+      const RealD s_shift = (DtxqcdTracelessAux() ? 7.0 / 6.0 : 1.0) *
+                            DtxqcdNf * Sigma / (lambda * lambda);
       // σ diagonal shift
       typedef typename LatticeDtxqcdSigma::vector_object::scalar_object SigSobj;
       SigSobj sigma_id;  sigma_id = Zero();

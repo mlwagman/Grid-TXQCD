@@ -47,15 +47,21 @@ class DTXQCDAuxiliaryFieldGaussianAction : public Action<DTXQCDField> {
   void refresh(const DTXQCDField &, GridSerialRNG &,
                GridParallelRNG &) override {}
 
+  // Under DTXQCD_TRACELESS_AUX (see DTXQCDCompositeImpl.h for the
+  // derivation): σ, π are traceless and s, p carry the marginalized u-mode
+  // prior S_sp = (3/7)λ²(s² + p²) — coefficient factor 6/7 on the λ²/2,
+  // NOT the falsified ¼ of the reverted 2026-06-15 redesign.
+  static RealD SpCoeffFactor() { return DtxqcdTracelessAux() ? 6.0 / 7.0 : 1.0; }
+
   RealD S(const DTXQCDField &U) override {
     DTXQCDField &Unc = const_cast<DTXQCDField &>(U);
-    RealD n2 = norm2(Unc.sigma)
-             + norm2(Unc.pi)
-             + norm2(Unc.d)
-             + norm2(Unc.n)
-             + norm2(Unc.s)
-             + norm2(Unc.p);
-    return 0.5 * lambda * lambda * n2;
+    RealD n2_matrix = norm2(Unc.sigma)
+                    + norm2(Unc.pi)
+                    + norm2(Unc.d)
+                    + norm2(Unc.n);
+    RealD n2_singlet = norm2(Unc.s)
+                     + norm2(Unc.p);
+    return 0.5 * lambda * lambda * (n2_matrix + SpCoeffFactor() * n2_singlet);
   }
 
   void deriv(const DTXQCDField &U, DTXQCDField &dSdU) override {
@@ -78,8 +84,8 @@ class DTXQCDAuxiliaryFieldGaussianAction : public Action<DTXQCDField> {
     dSdU.pi    = c * U.pi;
     dSdU.d     = c * U.d;
     dSdU.n     = c * U.n;
-    dSdU.s     = c * U.s;
-    dSdU.p     = c * U.p;
+    dSdU.s     = (c * SpCoeffFactor()) * U.s;
+    dSdU.p     = (c * SpCoeffFactor()) * U.p;
   }
 
  private:
