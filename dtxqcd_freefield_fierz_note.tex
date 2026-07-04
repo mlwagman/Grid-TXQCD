@@ -108,15 +108,41 @@ $\langle s\rangle=\tfrac76 N_{f}\Sig/\lambda^{2}$.
 
 \subsection{Dynamical equivalence validation}
 
-Free-field HMC (Sec.~\ref{sec:fierz} settings, correct rational bracket),
-knob ON vs OFF at $\lambda=10$:
-$\Sig_{\rm DTX}/\Sig_{W}$ agrees between the two actions within
-$\sim\!1\sigma$ at every mass tested ($m=10,1,0.1$), with
-$\langle\Tr\sigma\rangle=\mathcal{O}(10^{-19})$ dynamically under the knob
+Free-field HMC (Sec.~\ref{sec:fierz} settings, auto-sized rational
+bracket), knob ON vs OFF at $\lambda=10$:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+$\Sig_{\rm DTX}/\Sig_{W}$ & traceless-aux (ON) & legacy (OFF)\\
+\midrule
+$m=0.1$ & $1.00126(81)$ & $1.00207(83)$\\
+$m=1$   & $1.00120(75)$ & $1.00157(72)$\\
+\bottomrule
+\end{tabular}
+\end{center}
+The two actions agree with each other ($\le0.7\sigma$ per mass) and each
+run is consistent with unity by the test's criteria;
+$\langle\Tr\sigma\rangle=\mathcal{O}(10^{-19})$ dynamically under the knob,
 and all analytic-vs-finite-difference force ratios $=1.000000$ per action
-and per aux slot.
-% TODO: replace with the corrected-bracket revalidation table when the
-% ON/OFF pairs at lambda=10, m={0.1,1} complete (in flight 2026-07-03 pm).
+and per aux slot.  (Pooling the four corrected-bracket runs leaves a
+common $+0.15(4)\%$ offset --- $\sim\!10\times$ below the wrong-bracket
+signal and action-independent; plausible residuals at this level include
+the $10^{-8}$ rational tolerance and numerator--denominator noise
+correlations in the ratio estimator.  A high-statistics run with a
+deliberately over-wide bracket would pin it down if sub-per-mille
+exactness verification is ever needed.)
+
+The production streams provide the same verification in situ: the
+$\lambda=6,5,4$ traceless-aux chains reproduce the legacy saddle map
+$\langle s\rangle_{\rm TLA}=\tfrac76\langle s\rangle_{\rm legacy}
+=\langle \Tr\sigma/6+s\rangle_{\rm legacy}$ to $0.02$--$0.04\%$, hold
+$\langle\Tr\sigma\rangle=\langle\Tr\pi\rangle\equiv0$ to $10^{-16}$
+through live HMC, and collapse the blind-mode autocorrelation
+($\tau_{\rm int}(p)$: $1.8\to0.4$ at $\lambda=6$; legacy $\lambda=4$ had
+$\tau_{\rm int}(p)=6.7$, the fleet's worst).  (The wrong-bracket runs of
+Sec.~\ref{sec:fierz} also satisfied ON$\,=\,$OFF at every mass --- both
+actions sample the same distribution whatever the rational weight is ---
+so the equivalence conclusion never depended on the bracket.)
 
 \section{Dynamical free-field verification of Fierz exactness}
 \label{sec:fierz}
