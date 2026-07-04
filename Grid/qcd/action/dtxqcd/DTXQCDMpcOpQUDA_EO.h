@@ -67,15 +67,23 @@ class DTXQCDMpcOpQUDA_EO : public DTXQCDMpcOpQUDA {
         Dw_(Dw) {}
 
   ~DTXQCDMpcOpQUDA_EO() {
-    // Mirror the base: QUDA teardown order makes destructors unsafe at exit;
-    // drop ownership of persistent QUDA handles without destroying.
+    // 2026-07-03 leak fix (killed jobs 1296216/217 at ~19h): this class is
+    // constructed PER SOLVE by the EO action, so the old release-without-
+    // destroying pattern (task #223, right for program-lifetime singletons)
+    // leaked ~10 parity CSFs + the stage buffer + a Dirac per solve.  Mid-
+    // program destruction is safe — QUDA is alive — so free everything.
+    // The #223 exit-teardown hazard does not apply: per-solve instances are
+    // destroyed at scope end, never alive at program exit (gate tests that
+    // do hold one to the end exit via std::_Exit, skipping destructors).
+    delete eo_state_.dirac_dag;
     eo_state_.dirac_dag = nullptr;
-    for (auto &u : eo_state_.even_a) (void)u.release();
-    for (auto &u : eo_state_.even_b) (void)u.release();
-    for (auto &u : eo_state_.even_scratch) (void)u.release();
+    for (auto &u : eo_state_.even_a) u.reset();
+    for (auto &u : eo_state_.even_b) u.reset();
+    for (auto &u : eo_state_.even_scratch) u.reset();
     eo_state_.initialized = false;
     if (eo_state_.flat_in)  { acceleratorFreeDevice(eo_state_.flat_in);  eo_state_.flat_in  = nullptr; }
     if (eo_state_.flat_out) { acceleratorFreeDevice(eo_state_.flat_out); eo_state_.flat_out = nullptr; }
+    if (eo_state_.stage)    { acceleratorFreeDevice(eo_state_.stage);    eo_state_.stage    = nullptr; }
   }
 
   // ---- parity-CSF allocation templates (shadow the base's full-volume ones)

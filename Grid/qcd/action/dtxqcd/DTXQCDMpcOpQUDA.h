@@ -629,17 +629,21 @@ class DTXQCDMpcOpQUDA {
 
   ~DTXQCDMpcOpQUDA() {
     ResetAuxCache();
-    // Task #223: skip QUDA persistent-handle teardown.  QUDA's atexit cleanup
-    // tears down its global state before our destructor runs at program exit;
-    // calling delete on Dirac* or .reset() on a ColorSpinorField unique_ptr
-    // at this point crashes inside QUDA's destructor (it accesses already-
-    // freed internal state).  Persistent QUDA handles are program-lifetime
-    // objects; the OS reclaims their memory at exit cleanly.  Drop ownership
-    // without invoking destructors.
+    // 2026-07-03 leak fix: both HMC actions construct this wrapper PER SOLVE,
+    // so the old task-#223 release-without-destroying pattern (correct for
+    // program-lifetime singletons, where QUDA's atexit teardown races our
+    // destructors) leaked the persistent Dirac + 2 full-volume native CSFs
+    // per solve — the slow managed-memory exhaustion that killed the EO
+    // Style C streams at ~19h and was masked in non-EO only by 2-deep job
+    // chaining.  Per-solve instances are destroyed mid-program (QUDA alive),
+    // where full cleanup is safe; nothing holds an instance to program exit
+    // (gate tests exit via std::_Exit, skipping destructors).
+    delete style_b_state_.dirac;
     style_b_state_.dirac = nullptr;
-    (void)style_b_state_.in_native.release();
-    (void)style_b_state_.out_native.release();
+    style_b_state_.in_native.reset();
+    style_b_state_.out_native.reset();
     style_b_state_.initialized = false;
+    delete style_c_sp_state_.dirac;
     style_c_sp_state_.dirac = nullptr;
     style_c_sp_state_.initialized = false;
     if (aux_perm_d_) {
