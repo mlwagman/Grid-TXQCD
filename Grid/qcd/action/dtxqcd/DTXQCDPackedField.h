@@ -148,7 +148,8 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
   ~DtxqcdPackedHermOpT() {
     // Mirror DTXQCDMpcOpQUDA_EO::~: QUDA teardown order makes CSF
     // destructors unsafe at exit — drop ownership without destroying.
-    for (auto *s : {&in_q_, &mid_q_, &out_q_, &scr_q_})
+    for (auto *s : {&in_q_, &mid_q_, &out_q_, &scr_q_,
+                    &in_sp_, &mid_sp_, &out_sp_, &scr_sp_})
       for (auto &u : s->csf) (void)u.release();
     for (auto &u : stage_csf_) (void)u.release();
     if (lex_tbl_d_) { acceleratorFreeDevice(lex_tbl_d_); lex_tbl_d_ = nullptr; }
@@ -212,27 +213,38 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
   // load-bearing here), matvec = M_device_csf + Mdag_device_csf (or the
   // Grid-path M+Mdag), pack = struct->packed Grid kernel.
   size_t ncalls = 0;
+  size_t ncalls_sp = 0;
   double t_herm_us = 0.0;
+  double t_herm_sp_us = 0.0;
   double t_unpack_us = 0.0, t_pack_us = 0.0;
   double t_h2d_us = 0.0, t_d2h_us = 0.0;
   double t_zero_us = 0.0, t_matvec_us = 0.0;
 
   void ResetCounters() {
     ncalls = 0;
-    t_herm_us = t_unpack_us = t_pack_us = 0.0;
+    ncalls_sp = 0;
+    t_herm_us = t_herm_sp_us = 0.0;
+    t_unpack_us = t_pack_us = 0.0;
     t_h2d_us = t_d2h_us = t_zero_us = t_matvec_us = 0.0;
   }
   void ReportCounters(const std::string &tag) const {
-    if (!ncalls) return;
-    double n = (double)ncalls;
-    std::cout << GridLogMessage << "[packedop " << tag << "] " << ncalls
-              << " HermOps, per-call ms: total " << t_herm_us / n * 1e-3
-              << " = unpack " << t_unpack_us / n * 1e-3
-              << " + h2d " << t_h2d_us / n * 1e-3
-              << " + zero " << t_zero_us / n * 1e-3
-              << " + matvec " << t_matvec_us / n * 1e-3
-              << " + d2h " << t_d2h_us / n * 1e-3
-              << " + pack " << t_pack_us / n * 1e-3 << std::endl;
+    if (ncalls) {
+      double n = (double)ncalls;
+      std::cout << GridLogMessage << "[packedop " << tag << "] " << ncalls
+                << " HermOps, per-call ms: total " << t_herm_us / n * 1e-3
+                << " = unpack " << t_unpack_us / n * 1e-3
+                << " + h2d " << t_h2d_us / n * 1e-3
+                << " + zero " << t_zero_us / n * 1e-3
+                << " + matvec " << t_matvec_us / n * 1e-3
+                << " + d2h " << t_d2h_us / n * 1e-3
+                << " + pack " << t_pack_us / n * 1e-3 << std::endl;
+    }
+    if (ncalls_sp) {
+      double n = (double)ncalls_sp;
+      std::cout << GridLogMessage << "[packedop " << tag << "] " << ncalls_sp
+                << " SP HermOps, per-call ms: " << t_herm_sp_us / n * 1e-3
+                << std::endl;
+    }
   }
 
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
@@ -345,6 +357,98 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
     });
   }
 
+  // SP-precision HermOp for smoother use (full-volume instantiation only —
+  // the EO wrapper's SP path is unported and asserts).  Same device staging
+  // as the DP path; QUDA's CopyColorSpinor converts DP staging <-> SP native.
+  // The ADEF2 outer iteration stays DP; only the smoother's approximate
+  // matvecs run SP, so solution accuracy is untouched (validated by the
+  // in-run ADEF2-vs-CG gate).
+  void HermOpSp(const Field &in, Field &out) {
+    GRID_ASSERT(Mq_ && device_copy_);
+    double t0 = usecond();
+    if (!csf_ready_) {
+      quda::ColorSpinorParam ptmpl = Mq_->MakeNativeCsfParam();
+      in_q_.allocate(ptmpl);
+      mid_q_.allocate(ptmpl);
+      out_q_.allocate(ptmpl);
+      scr_q_.allocate_lower_only(ptmpl);
+      for (int d = 0; d < 4; ++d) X_full_[d] = Mq_->GaugeParam().X[d];
+      csf_ready_ = true;
+    }
+    InitDeviceCopy_(in.Grid());
+    if (!sp_ready_) {
+      quda::ColorSpinorParam sp_tmpl = Mq_->MakeNativeCsfParamSp();
+      in_sp_.allocate(sp_tmpl);
+      mid_sp_.allocate(sp_tmpl);
+      out_sp_.allocate(sp_tmpl);
+      scr_sp_.allocate_lower_only(sp_tmpl);
+      in_sp_.zero();
+      mid_sp_.zero();
+      out_sp_.zero();
+      scr_sp_.zero();
+      sp_ready_ = true;
+    }
+    // packed -> DP staging -> SP native
+    {
+      autoView(iv, in, AcceleratorRead);
+      const int *tbl = lex_tbl_d_;
+      double *s0 = stage_d_[0], *s1 = stage_d_[1];
+      double *s2 = stage_d_[2], *s3 = stage_d_[3];
+      const uint64_t ns = nsimd_;
+      accelerator_for(n, osites_ * nsimd_, 1, {
+        uint64_t o = n / ns;
+        int lane = (int)(n % ns);
+        auto sobj = extractLane(lane, iv[o]);
+        const double *src = (const double *)&sobj;
+        const std::size_t lex24 = (std::size_t)tbl[n] * 24;
+        for (int j = 0; j < 24; ++j) {
+          s0[lex24 + j] = src[0 * 24 + j];
+          s1[lex24 + j] = src[1 * 24 + j];
+          s2[lex24 + j] = src[2 * 24 + j];
+          s3[lex24 + j] = src[3 * 24 + j];
+        }
+      });
+      for (int k = 0; k < 4; ++k) in_sp_.csf[k]->copy(*stage_csf_[k]);
+      cudaDeviceSynchronize();
+    }
+    quda::ColorSpinorField *iu[DtxqcdNf] = {in_sp_.csf[0].get(), in_sp_.csf[1].get()};
+    quda::ColorSpinorField *il[DtxqcdNf] = {in_sp_.csf[2].get(), in_sp_.csf[3].get()};
+    quda::ColorSpinorField *mu[DtxqcdNf] = {mid_sp_.csf[0].get(), mid_sp_.csf[1].get()};
+    quda::ColorSpinorField *ml[DtxqcdNf] = {mid_sp_.csf[2].get(), mid_sp_.csf[3].get()};
+    quda::ColorSpinorField *ou[DtxqcdNf] = {out_sp_.csf[0].get(), out_sp_.csf[1].get()};
+    quda::ColorSpinorField *ol[DtxqcdNf] = {out_sp_.csf[2].get(), out_sp_.csf[3].get()};
+    quda::ColorSpinorField *sl[DtxqcdNf] = {scr_sp_.csf[0].get(), scr_sp_.csf[1].get()};
+    Mq_->M_device_csf_sp(iu, il, mu, ml, sl);
+    Mq_->Mdag_device_csf_sp(mu, ml, ou, ol, sl);
+    // SP native -> DP staging -> packed
+    for (int k = 0; k < 4; ++k) stage_csf_[k]->copy(*out_sp_.csf[k]);
+    cudaDeviceSynchronize();
+    {
+      autoView(ov, out, AcceleratorWrite);
+      const int *tbl = lex_tbl_d_;
+      const double *s0 = stage_d_[0], *s1 = stage_d_[1];
+      const double *s2 = stage_d_[2], *s3 = stage_d_[3];
+      const uint64_t ns = nsimd_;
+      accelerator_for(n, osites_ * nsimd_, 1, {
+        uint64_t o = n / ns;
+        int lane = (int)(n % ns);
+        typename Field::vector_object::scalar_object sobj;
+        double *dstp = (double *)&sobj;
+        const std::size_t lex24 = (std::size_t)tbl[n] * 24;
+        for (int j = 0; j < 24; ++j) {
+          dstp[0 * 24 + j] = s0[lex24 + j];
+          dstp[1 * 24 + j] = s1[lex24 + j];
+          dstp[2 * 24 + j] = s2[lex24 + j];
+          dstp[3 * 24 + j] = s3[lex24 + j];
+        }
+        insertLane(lane, ov[o], sobj);
+      });
+    }
+    out.Checkerboard() = in.Checkerboard();
+    ncalls_sp++;
+    t_herm_sp_us += usecond() - t0;
+  }
+
   void HermOpDeviceDirect_(const Field &in, Field &out) {
     if (!csf_ready_) {
       quda::ColorSpinorParam ptmpl = Mq_->MakeNativeCsfParam();
@@ -442,8 +546,10 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
 #ifdef GRID_HAVE_QUDA
   MopQudaT *Mq_ = nullptr;
   DtxqcdQudaStyleC::DoubledStateCSF in_q_, mid_q_, out_q_, scr_q_;
+  DtxqcdQudaStyleC::DoubledStateCSF in_sp_, mid_sp_, out_sp_, scr_sp_;
   int X_full_[4];
   bool csf_ready_ = false;
+  bool sp_ready_ = false;
   bool skip_zero_ = false;
   bool zeroed_once_ = false;
   bool device_copy_ = false;

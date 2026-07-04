@@ -35,6 +35,10 @@
 //   M_ee amplification; lam=4 full CG ~2100 iters vs EO 4005)
 //   REFINE(0) REFINE_TOL(1e-3) REFINE_MAXIT(400) — inverse-iteration basis
 //   polish after the filter (cost ~ nbasis*min(maxit, iters-to-tol))
+//   COARSE_NEV(0) COARSE_IRL_LO(clmax*1e-3) COARSE_IRL_ORD(201) — deflate
+//   the coarse solves with IRL evecs of the coarse operator
+//   SMOOTH_SP(0) — run the smoother's matvecs in single precision via the
+//   adapter's SP chain (FULLVOL substrate only; outer stays DP)
 //   SETUP_PREFIX(unset) — cache basis+coarse op via LIME per
 //   (nbasis, geom, block); existing files -> load and skip setup entirely
 //   (knob scans of smoother/coarse params then cost only the solve)
@@ -193,6 +197,35 @@ struct MGParams {
   double coarse_tol, coarse_tol_sloppy;
   double mg_tol;
   int mg_maxit;
+  int coarse_nev;                // >0: deflate coarse solves with IRL evecs
+  double coarse_irl_lo;          // <=0 -> 1e-3 * coarse lmax
+  int coarse_irl_ord;
+  double coarse_irl_tol;         // deflation-grade default 1e-3
+  bool smooth_sp;                // SP smoother matvecs (FULLVOL only)
+};
+
+// SP-matvec shim for the smoother: LinearOperatorBase whose HermOp routes
+// through the adapter's single-precision chain.  Outer ADEF2 stays DP.
+template <class AdapterT>
+class SpHermOpShim : public LinearOperatorBase<LatticeDtxqcdPacked> {
+ public:
+  typedef LatticeDtxqcdPacked Field;
+  explicit SpHermOpShim(AdapterT &a) : a_(a) {}
+  void HermOp(const Field &in, Field &out) { a_.HermOpSp(in, out); }
+  void Op(const Field &in, Field &out) { a_.HermOpSp(in, out); }
+  void AdjOp(const Field &in, Field &out) { a_.HermOpSp(in, out); }
+  void HermOpAndNorm(const Field &in, Field &out, RealD &n1, RealD &n2) {
+    a_.HermOpSp(in, out);
+    ComplexD dot = innerProduct(in, out);
+    n1 = real(dot);
+    n2 = norm2(out);
+  }
+  void OpDiag(const Field &in, Field &out) { GRID_ASSERT(0); }
+  void OpDir(const Field &in, Field &out, int dir, int disp) { GRID_ASSERT(0); }
+  void OpDirAll(const Field &in, std::vector<Field> &out) { GRID_ASSERT(0); }
+
+ private:
+  AdapterT &a_;
 };
 
 template <int nbasis, class HermOpT>
@@ -332,22 +365,86 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
       HermMatrix;
   HermMatrix CoarseOp(LittleDiracOp);
 
+  // Coarse deflation (COARSE_NEV>0): IRL on the coarse operator once per
+  // setup, DeflatedGuesser feeds both coarse solvers.  Kills the dominant
+  // non-matvec cost (sloppy coarse CG was ~135 its/outer on the lam4 EO
+  // spectrum) at a one-time coarse-Lanczos cost.
   ZeroGuesser<CoarseVector> CoarseZeroGuesser;
+  std::vector<RealD> c_eval;
+  std::vector<CoarseVector> c_evec;
+  std::unique_ptr<DeflatedGuesser<CoarseVector>> CoarseDeflGuesser;
+  LinearFunction<CoarseVector> *CoarseGuess = &CoarseZeroGuesser;
+  if (P.coarse_nev > 0) {
+    double t_irl0 = usecond();
+    GridParallelRNG CRNG(&Coarse4d);
+    CRNG.SeedFixedIntegers({21, 22, 23, 24});
+    CoarseVector c_src(&Coarse4d);
+    gaussian(CRNG, c_src);
+    PowerMethod<CoarseVector> cPM;
+    RealD clmax = cPM(CoarseOp, c_src);
+    double irl_lo =
+        (P.coarse_irl_lo > 0) ? P.coarse_irl_lo : 1.0e-3 * clmax;
+    const int Nstop = P.coarse_nev;
+    const int Nk = P.coarse_nev;
+    // 2x Krylov headroom (the phys-test ratio); deflation-guesser evecs only
+    // need ~1e-3 residuals (IRL's internal target is eresid^2) — demanding
+    // measurement-grade 1e-5 ground restarts to 0/N converged (o1 failure).
+    // Chebyshev hi MUST clear the true coarse lmax: T_ord grows exponentially
+    // outside the window, and a PowerMethod ESTIMATE undershooting by >10%
+    // NaN'd the whole Lanczos (p2/p3 failure) — 1.5x margin, env-overridable
+    // via COARSE_IRL_HI.  Note deflation presumes the coarse op HAS low
+    // modes; at toy volumes (4^3x8: lowest coarse eval O(1)) there is
+    // nothing below lo and IRL grinds — leave COARSE_NEV=0 there.
+    const int Nm = P.coarse_nev + std::max(64, P.coarse_nev);
+    double irl_hi = env_real("COARSE_IRL_HI", 1.5 * clmax);
+    Chebyshev<CoarseVector> IRLCheby(irl_lo, irl_hi, P.coarse_irl_ord);
+    FunctionHermOp<CoarseVector> IRLOpCheby(IRLCheby, CoarseOp);
+    PlainHermOp<CoarseVector> IRLOp(CoarseOp);
+    ImplicitlyRestartedLanczos<CoarseVector> IRL(IRLOpCheby, IRLOp, Nstop, Nk,
+                                                 Nm, P.coarse_irl_tol, 10);
+    c_eval.resize(Nm);
+    c_evec.resize(Nm, &Coarse4d);
+    int Nconv = 0;
+    IRL.calc(c_eval, c_evec, c_src, Nconv);
+    // IRL returns exactly Nstop entries but its (inclusive, j<=Nk) final
+    // test can report Nconv = Nstop+1 — resizing UP appends a zero
+    // eval/evec pair and the DeflatedGuesser divides by it (NaN guess).
+    const int nuse = std::min(Nconv, (int)c_eval.size());
+    c_eval.resize(nuse);
+    c_evec.resize(nuse, &Coarse4d);
+    CoarseDeflGuesser.reset(
+        new DeflatedGuesser<CoarseVector>(c_evec, c_eval));
+    CoarseGuess = CoarseDeflGuesser.get();
+    std::cout << GridLogMessage << "[gridmg] coarse IRL: " << Nconv
+              << " evecs (lmax_c=" << clmax << ", lo=" << irl_lo << ") in "
+              << (usecond() - t_irl0) * 1e-6 << " s" << std::endl;
+  }
   ConjugateGradient<CoarseVector> CGcoarse(P.coarse_tol, 30000, false);
   ConjugateGradient<CoarseVector> CGcoarseSloppy(P.coarse_tol_sloppy, 30000,
                                                  false);
-  HPDSolver<CoarseVector> HPDSolve(CoarseOp, CGcoarse, CoarseZeroGuesser);
+  HPDSolver<CoarseVector> HPDSolve(CoarseOp, CGcoarse, *CoarseGuess);
   HPDSolver<CoarseVector> HPDSolveSloppy(CoarseOp, CGcoarseSloppy,
-                                         CoarseZeroGuesser);
+                                         *CoarseGuess);
 
   double mirs = (P.mirs_shift > 0) ? P.mirs_shift : 0.02 * lmax;
   ShiftedHermOpLinearOperator<Field> ShiftedFineHermOp(FineHermOp, mirs);
   CGSmoother<Field> CGsmooth(P.smooth_it, ShiftedFineHermOp);
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  SpHermOpShim<HermOpT> SpShim(FineHermOp);
+  ShiftedHermOpLinearOperator<Field> ShiftedSpHermOp(SpShim, mirs);
+  CGSmoother<Field> CGsmoothSp(P.smooth_it, ShiftedSpHermOp);
+  LinearFunction<Field> &Smoother =
+      P.smooth_sp ? static_cast<LinearFunction<Field> &>(CGsmoothSp)
+                  : static_cast<LinearFunction<Field> &>(CGsmooth);
+#else
+  LinearFunction<Field> &Smoother = CGsmooth;
+#endif
   std::cout << GridLogMessage << "[gridmg] smoother: CG(" << P.smooth_it
-            << ") shift=" << mirs << std::endl;
+            << ") shift=" << mirs << (P.smooth_sp ? " [SP matvec]" : "")
+            << std::endl;
 
   TwoLevelADEF2<Field, CoarseVector, Subspace> HDCG(
-      P.mg_tol, P.mg_maxit, FineHermOp, CGsmooth, HPDSolveSloppy, HPDSolve,
+      P.mg_tol, P.mg_maxit, FineHermOp, Smoother, HPDSolveSloppy, HPDSolve,
       Aggregates);
 
   Field result(FineGrid);
@@ -519,6 +616,11 @@ int run_suite(GridCartesian &Grid_, GridBase *FineGrid, int cb,
     Pmg.coarse_tol_sloppy = env_real("COARSE_TOL_SLOPPY", 0.04);
     Pmg.mg_tol = env_real("MG_TOL", cg_tol);
     Pmg.mg_maxit = env_int("MG_MAXIT", 700);
+    Pmg.coarse_nev = env_int("COARSE_NEV", 0);
+    Pmg.coarse_irl_lo = env_real("COARSE_IRL_LO", -1.0);
+    Pmg.coarse_irl_ord = env_int("COARSE_IRL_ORD", 201);
+    Pmg.coarse_irl_tol = env_real("COARSE_IRL_TOL", 1e-3);
+    Pmg.smooth_sp = env_int("SMOOTH_SP", 0) != 0;
 
     const LatticeDtxqcdPacked *ref = have_baseline ? &sol_cg : nullptr;
     const int nb = env_int("NBASIS", 32);
