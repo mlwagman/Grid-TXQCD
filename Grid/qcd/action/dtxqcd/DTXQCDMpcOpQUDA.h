@@ -290,8 +290,11 @@ class DTXQCDMpcOpQUDA {
       if (!aux_cache_.allocated()) {
         DtxqcdQudaAuxKernelDevice::allocate_aux_cache(aux_cache_, (std::size_t)V);
       }
-      DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_, p_,
-                                                    aux_cache_);
+      if (!aux_static_ || !aux_packed_) {
+        DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_,
+                                                      p_, aux_cache_);
+        aux_packed_ = true;
+      }
       DtxqcdQudaAuxKernelDevice::ApplyAuxKernel(
           aux_cache_,
           in_upper_d[0], in_upper_d[1], in_lower_d[0], in_lower_d[1],
@@ -469,8 +472,11 @@ class DTXQCDMpcOpQUDA {
     if (!aux_cache_.allocated()) {
       DtxqcdQudaAuxKernelDevice::allocate_aux_cache(aux_cache_, (std::size_t)V);
     }
-    DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_, p_,
-                                                   aux_cache_);
+    if (!aux_static_ || !aux_packed_) {
+      DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_,
+                                                    p_, aux_cache_);
+      aux_packed_ = true;
+    }
     DtxqcdQudaAuxKernelNativeV2::ApplyAuxKernelNative(
         aux_cache_, aux_perm_d_,
         *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
@@ -564,8 +570,11 @@ class DTXQCDMpcOpQUDA {
     if (!aux_cache_.allocated()) {
       DtxqcdQudaAuxKernelDevice::allocate_aux_cache(aux_cache_, (std::size_t)V);
     }
-    DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_, p_,
-                                                   aux_cache_);
+    if (!aux_static_ || !aux_packed_) {
+      DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_,
+                                                    p_, aux_cache_);
+      aux_packed_ = true;
+    }
     DtxqcdQudaAuxKernelNativeV2Sp::ApplyAuxKernelNativeSp(
         aux_cache_, aux_perm_d_,
         *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
@@ -625,6 +634,18 @@ class DTXQCDMpcOpQUDA {
     if (aux_cache_.allocated()) {
       DtxqcdQudaAuxKernelDevice::free_aux_cache(aux_cache_);
     }
+    aux_packed_ = false;
+  }
+
+  // Measurement-style callers whose aux fields are FIXED for the lifetime of
+  // the solve can hoist the per-call aux re-pack (host unvectorize + H2D,
+  // tens of ms at 16^3x48 full volume, hit TWICE per M†M through
+  // M/Mdag_device_csf): pack once on the next apply, then reuse until
+  // ResetAuxCache() or SetAuxStatic(false).  Default OFF — HMC evolves the
+  // aux fields between applies and must re-pack every call.
+  void SetAuxStatic(bool v) {
+    aux_static_ = v;
+    if (!v) aux_packed_ = false;
   }
 
   ~DTXQCDMpcOpQUDA() {
@@ -1019,6 +1040,8 @@ class DTXQCDMpcOpQUDA {
   // Option β device aux cache (lazily allocated on first M_device call when
   // DTXQCD_STAGEB_AUX_OPTION=B).  See aux_option_b_() / ResetAuxCache().
   DtxqcdQudaAuxKernelDevice::DeviceAuxCache aux_cache_;
+  bool aux_static_ = false;  // SetAuxStatic: hoist the per-call aux re-pack
+  bool aux_packed_ = false;
 
   // Style C aux perm table (lazy-built on first M_device_csf call).  Maps
   // QUDA's native (parity, x_cb) → production EO order so the native aux

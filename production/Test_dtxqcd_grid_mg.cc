@@ -618,6 +618,9 @@ int main(int argc, char **argv) {
     Grid::Quda::initialize();
     DTXQCDMpcOpQUDA Mq(U_inv, Grid_, RBGrid, mass, csw_v, U.sigma, U.pi,
                        U.d, U.n, U.s, U.p);
+    // Aux fields are fixed for the whole run: hoist the per-apply aux
+    // re-pack (it was ~85 of the 119 ms full-volume HermOp).
+    Mq.SetAuxStatic(true);
     DtxqcdPackedFullHermOp FineHermOp(mop, Mq, &Grid_, Even);
 #else
     DtxqcdPackedFullHermOp FineHermOp(mop, &Grid_, Even);
