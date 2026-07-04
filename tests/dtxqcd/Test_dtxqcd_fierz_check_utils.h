@@ -236,8 +236,10 @@ inline RealD DtxqcdSelfConsistentAuxInit(GridParallelRNG &pRNG,
   DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_star);
   std::cout << GridLogMessage
             << "[AUX_INIT_AUTO converged] Σ* = " << Sigma_star
-            << "  → ⟨s⟩* = 2·Nf·Σ*/λ² = "
-            << (2.0 * DtxqcdNf * Sigma_star / (lambda * lambda)) << std::endl;
+            << "  → ⟨s⟩* = " << (DtxqcdTracelessAux() ? "(7/6)·" : "")
+            << "Nf·Σ*/λ² = "
+            << ((DtxqcdTracelessAux() ? 7.0 / 6.0 : 1.0) * DtxqcdNf *
+                Sigma_star / (lambda * lambda)) << std::endl;
   return Sigma_star;
 }
 

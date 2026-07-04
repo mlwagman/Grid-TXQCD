@@ -63,6 +63,15 @@ int main(int argc, char **argv) {
             << "  predicted Σ = 24/(4+m) = " << (24.0/(4.0+mass_run)) << std::endl;
 
   std::vector<int> latt_dims{4,4,4,8};
+  // LATT=X.Y.Z.T overrides (production convention; --grid is NOT read —
+  // found the hard way by a volume scan that silently reran 4^3x8 twice).
+  if (const char *lv = std::getenv("LATT"); lv && *lv) {
+    latt_dims.clear();
+    std::stringstream ls(lv);
+    std::string tok;
+    while (std::getline(ls, tok, '.')) latt_dims.push_back(std::atoi(tok.c_str()));
+    GRID_ASSERT(latt_dims.size() == 4);
+  }
   Coordinate latt(latt_dims);
   Coordinate simd = GridDefaultSimd(Nd, vComplex::Nsimd());
   Coordinate mpi  = GridDefaultMpi();
@@ -81,10 +90,18 @@ int main(int argc, char **argv) {
   DTXQCDGaugeActionAdapter<WilsonGaugeActionR> GaugeAction(beta_dummy);
   DTXQCDAuxiliaryFieldGaussianAction           AuxAction(lambda_run);
 
-  // Rational bracket sized for M48 spectrum at m=1000: eigenvalues ~ (m+4)² = 1e6.
-  RealD rat_lo     = 1e4;
-  RealD rat_hi     = 1e7;
-  int   rat_degree = 8;
+  // Rational bracket auto-sized from the run mass.  The old hardcoded
+  // [1e4, 1e7] (sized for m=1000) silently invalidated every light-mass run:
+  // at m=0.1 the M48 spectrum sits ~6 decades below the bracket, and a
+  // rational used self-consistently outside its window samples a wrong-but-
+  // Metropolis-consistent distribution — measured as a spurious +7.5%
+  // "Fierz violation" at lambda=5 (2026-07-03; ratio -> 0.9995(11) with a
+  // correct bracket).  Free M48 eigenvalues span ~[mtil^2, (m+8)^2] with
+  // mtil the light-shifted mass; aux fluctuations (width 1/lambda) widen
+  // both ends, so take generous safety margins and a high degree.
+  RealD rat_lo     = std::max(1e-4, 0.05 * mass_run * mass_run);
+  RealD rat_hi     = 10.0 * (mass_run + 8.0) * (mass_run + 8.0);
+  int   rat_degree = 24;
   if (const char *v = std::getenv("RAT_LO");     v && *v) rat_lo     = std::atof(v);
   if (const char *v = std::getenv("RAT_HI");     v && *v) rat_hi     = std::atof(v);
   if (const char *v = std::getenv("RAT_DEGREE"); v && *v) rat_degree = std::atoi(v);

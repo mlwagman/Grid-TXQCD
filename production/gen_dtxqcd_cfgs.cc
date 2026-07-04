@@ -267,9 +267,14 @@ static void InitFreshDtxqcdField(Grid::GridCartesian &Grid_,
     }
     pRNG.SeedFixedIntegers({6, 7, 8, 9, 10});
     DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, Sigma_init);
+    // NB the old "2 N_F Sigma/lambda^2" label was a leftover of the reverted
+    // 2026-06-15 quarter-coefficient convention and matched neither action.
+    const RealD s_star = (DtxqcdTracelessAux() ? 7.0 / 6.0 : 1.0) *
+                         DtxqcdNf * Sigma_init / (lambda * lambda);
     std::cout << GridLogMessage << "[AUX_INIT_AUTO converged] Sigma* = "
-              << Sigma_init << "  -> <s>* = 2 N_F Sigma*/lambda^2 = "
-              << (2.0 * DtxqcdNf * Sigma_init / (lambda * lambda)) << std::endl;
+              << Sigma_init << "  -> <s>* = "
+              << (DtxqcdTracelessAux() ? "(7/6)" : "") << " N_F Sigma*/lambda^2 = "
+              << s_star << std::endl;
   }
 
   if (const char *z = std::getenv("ZERO_DN_INIT"); z && std::atoi(z) != 0) {

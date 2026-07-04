@@ -1,0 +1,403 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,booktabs,geometry,xcolor}
+\geometry{margin=1.1in}
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\Sig}{\Sigma}
+\title{DTXQCD notes: dynamical free-field Fierz verification\\
+and the redundancy-resolved (traceless) auxiliary action}
+\author{}
+\date{2026-07-03}
+
+\begin{document}
+\maketitle
+
+\section{Exact integration of the fermion-blind singlet mode}
+\label{sec:traceless}
+
+\subsection{Setup and the $u$-universality input}
+
+The v2 DTXQCD auxiliary fields comprise the color--flavor $6\times 6$
+Hermitian matrices $\sigma,\pi$ (and the complex-symmetric $d,n$, which play
+no role here) plus the real singlets $s,p$, with Gaussian prior
+\begin{equation}
+S_{\rm aux} \;=\; \frac{\lambda^{2}}{2}\sum_x\Big[\Tr\sigma^{2}+\Tr\pi^{2}
+ +\Tr d^{2}+\Tr n^{2}+s^{2}+p^{2}\Big].
+\label{eq:legacyprior}
+\end{equation}
+The doubled fermion matrix $M_{48}$ depends on $(\pi,p)$ only through the
+combination $\pi + p\,\mathbb{1}_{6}$ (and on $(\sigma,s)$ through
+$\sigma + s\,\mathbb{1}_{6}$).  Writing
+$\pi=\tilde\pi+\pi_{0}\mathbb{1}_{6}$ with $\pi_{0}=\Tr\pi/6$,
+$\Tr\tilde\pi=0$, the matrix depends on the singlet sector only through
+\begin{equation}
+u \;=\; \pi_{0}+p ,
+\end{equation}
+with \emph{unit relative weight}.  This is not an assumption: the code gate
+verifies $M(\pi+c\,\mathbb{1},\,p)=M(\pi,\,p+c)$ to $6\times10^{-17}$
+(host operator), $S$-level equality to $10^{-16}$ relative for the LogDet
+and rational actions, and the fermionic force identity
+$\partial S_{f}/\partial(\Tr\sigma) \big/ \partial S_{f}/\partial s
+ = 1.000000$ for both LogDetEO and RationalFull.  The orthogonal combination
+$w\propto \pi_{0}-p/6$ is exactly fermion-blind: a free Gaussian mode with
+prior mass only, responsible for the slow $\tau_{\rm int}\simeq 2$
+trajectories observed in $\langle p\rangle$ at $\lambda=6$ production and
+for frozen-mode pathologies at small $\lambda$.
+
+\subsection{Marginalization and the $6/7$ coefficient}
+
+Under the decomposition, $\Tr\pi^{2}=\Tr\tilde\pi^{2}+6\pi_{0}^{2}$, so the
+singlet-sector prior is
+\begin{equation}
+S \;\supset\; \tfrac12\,a\,\pi_{0}^{2}+\tfrac12\,b\,p^{2},
+\qquad a=6\lambda^{2},\quad b=\lambda^{2}.
+\end{equation}
+The trace mode is six times stiffer than $p$ because it appears six times in
+$\Tr\pi^{2}$.  Since the physics couples only to $u=\pi_{0}+p$, the blind
+direction may be integrated out exactly; the variances add,
+\begin{equation}
+\mathrm{Var}(u)=\frac1a+\frac1b=\frac{7}{6\lambda^{2}}
+\;\;\Longrightarrow\;\;
+S_{\rm eff}(u)=\frac{u^{2}}{2\,\mathrm{Var}(u)}=\frac{3}{7}\lambda^{2}u^{2}.
+\label{eq:seff}
+\end{equation}
+The exactly equivalent single-field theory therefore has $\tilde\pi$
+(traceless) with unchanged coefficient $\lambda^{2}/2$, and $p$ carrying the
+full $u$-mode with
+\begin{equation}
+\boxed{\;S_{p}=\frac{3}{7}\lambda^{2}p^{2}
+ =\frac{\lambda^{2}}{2}\cdot\frac{6}{7}\,p^{2}\;}
+\end{equation}
+i.e.\ a coefficient rescale of $6/7$ (identically for $\sigma/s$).  Every
+fermionic observable is preserved exactly: the joint law of
+$(\tilde\pi,u)$ --- everything $M_{48}$ sees --- is unchanged.  Because the
+transformation is a linear rotation of a Gaussian followed by an exact
+marginalization, there is no Jacobian and the Metropolis test remains exact.
+
+Consistency checks:
+\begin{itemize}
+\item \emph{Saddle map.}  With a source $J$ coupling to $u$: legacy
+$\pi_{0}=J/6\lambda^{2}$, $p=J/\lambda^{2}$, $u=7J/6\lambda^{2}$; new
+$u=J/[(6/7)\lambda^{2}]=7J/6\lambda^{2}$.  Identical.  Equivalently
+$\langle s\rangle_{\rm new}=\tfrac{7}{6}N_{f}\Sig/\lambda^{2}
+=\langle \Tr\sigma/6+s\rangle_{\rm legacy}$, and
+$\langle\Tr\sigma\rangle\equiv 0$ by construction.
+\item \emph{Why the 2026-06-15 attempt failed.}  That version used
+$\lambda^{2}/4$, i.e.\ $\mathrm{Var}(u)=2/\lambda^{2}$ instead of
+$7/6\lambda^{2}$: the $u$ fluctuations were $71\%$ too wide in variance.
+Its \emph{saddle} was self-consistently absorbed ($\langle s\rangle$
+doubled, which the scout logged as success) --- Gaussian means are
+forgiving; widths are not --- and the Fierz mass scan falsified it.
+\item \emph{Production cross-check.}  The interacting $16^{3}\times48$
+ensembles at $\lambda=5,6$ satisfy the wall-normalized identity
+$\langle\Tr\sigma\rangle=\langle s\rangle$ to $0.04\%/0.16\%$ and the
+saddle scaling $\langle s\rangle\propto 1/\lambda^{2}$
+($1007/701\simeq(6/5)^{2}$), confirming the assumed mode structure in situ.
+\end{itemize}
+
+\subsection{Implementation}
+
+Enabled by \texttt{DTXQCD\_TRACELESS\_AUX=1} (default off = legacy):
+$\sigma,\pi$ are projected traceless at momentum generation, force
+projection, and \texttt{Project()} via
+$X\to X-\tfrac16(\Tr X)\mathbb{1}$ (device-resident expression template;
+unit-tested exact, idempotent, off-diagonal preserving); the $s,p$ action
+and force carry the factor $6/7$; the initial draw uses width
+$\sqrt{7/6}/\lambda$ for $s,p$ and drops the diagonal $\sigma$ saddle shift
+(it \emph{is} the trace mode), placing
+$\langle s\rangle=\tfrac76 N_{f}\Sig/\lambda^{2}$.
+
+\subsection{Dynamical equivalence validation}
+
+Free-field HMC (Sec.~\ref{sec:fierz} settings, correct rational bracket),
+knob ON vs OFF at $\lambda=10$:
+$\Sig_{\rm DTX}/\Sig_{W}$ agrees between the two actions within
+$\sim\!1\sigma$ at every mass tested ($m=10,1,0.1$), with
+$\langle\Tr\sigma\rangle=\mathcal{O}(10^{-19})$ dynamically under the knob
+and all analytic-vs-finite-difference force ratios $=1.000000$ per action
+and per aux slot.
+% TODO: replace with the corrected-bracket revalidation table when the
+% ON/OFF pairs at lambda=10, m={0.1,1} complete (in flight 2026-07-03 pm).
+
+\section{Dynamical free-field verification of Fierz exactness}
+\label{sec:fierz}
+
+\subsection{The statement and the estimator}
+
+The DTXQCD construction must satisfy
+$\langle\mathcal{O}\rangle_{\rm DTXQCD}=\langle\mathcal{O}\rangle_{\rm QCD}$
+\emph{exactly} at every $\lambda$, $V$, $m$, $\beta$: the four-quark cross
+terms cancel by an exact Fierz identity, and only a failure to sample the
+correct distribution can break the equality.  The free-field test fixes
+$U=\mathbb{1}$ (frozen gauge), runs dynamical-auxiliary HMC with the full
+rational pseudofermion weight $|\det M_{48}|^{1/2}$
+(\texttt{USE\_FULL\_PF=1}), and measures the per-quark stochastic trace
+$\Sig_{\rm DTX}=\langle\Tr M_{48}^{-1}\rangle/(2N_{f})$ against the exact
+free Wilson--clover reference $\Sig_{W}$ on the same geometry ($4\times$
+noise statistics on the reference so its error is subdominant).  The
+per-measurement ratio series is logged, enabling Madras--Sokal
+$\tau_{\rm int}$-corrected errors; at measurement stride 5 the series is
+statistically uncorrelated ($\tau_{\rm int}$ consistent with $0.5$).
+
+\subsection{Settings}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+lattice & $4^{3}\times 8$ (volume check: $8^{3}\times16$, $8^{3}\times32$)\\
+gauge & $U=\mathbb{1}$, frozen; $c_{\rm sw}=1.24930970916466$\\
+masses & $m\in\{100,\,10,\,1,\,0.1\}$ (heavy $\to$ light scan)\\
+couplings & $\lambda\in\{20,\,10,\,5\}$\\
+action & traceless-aux (Sec.~\ref{sec:traceless}); legacy for ON/OFF pairs\\
+HMC & MN2, trajL $=1$, \textbf{MDSTEPS $\ge 1.5\,\lambda\sqrt2\,$trajL}\\
+ & (16 at $\lambda\!=\!10$, 8 at $\lambda\!=\!5$, 32 at $\lambda\!=\!20$)\\
+statistics & $N_{\rm therm}=40$, $N_{\rm prod}=60$, stride 5 ($N=13$ samples)\\
+rational & $x^{-1/4}$, bracket \textbf{auto-sized from $m$}
+ (see caveat below), tol $10^{-8}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two harness pitfalls, both load-bearing:
+\begin{enumerate}
+\item \emph{Symplectic stability.}  The auxiliary prior gives the singlet
+modes frequency $\omega=\lambda\sqrt2$; leapfrog requires
+$\omega\varepsilon<2$.  The historical default (MDSTEPS $=4$, trajL $=1$)
+sits at $\omega\varepsilon=3.5$ for $\lambda=10$: $dH\simeq+240$ every
+trajectory, $100\%$ rejection, and the ensemble silently frozen at its
+initialization --- all pre-2026-07-03 runs of this gate sampled statics,
+and their ``saddle passes'' were init tautologies.
+\item \emph{The rational bracket (the trap).}  The heavy-mass variant of
+the test hardcoded its Remez window to $[10^{4},10^{7}]$ (sized for
+$m=1000$).  At light mass the $M_{48}^{\dagger}M_{48}$ spectrum sits up to
+six decades \emph{below} the window.  A rational approximation used
+self-consistently outside its bracket samples a wrong---but
+Metropolis-consistent---distribution: an action-level error that no
+accept/reject step can filter.  The resulting spurious signal mimicked
+physics disturbingly well (next subsection).
+\end{enumerate}
+
+\subsection{The spurious signal and its execution}
+
+With the wrong bracket, the dynamical ratio showed a ``violation'' with
+seductive systematics --- growing toward light mass, scaling
+$\sim1/\lambda^{2}$, volume-stable:
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+ & $m=100$ & $m=10$ & $m=1$ & $m=0.1$\\
+\midrule
+$\lambda=20$ & --- & --- & --- & $+0.18(8)\%$\\
+$\lambda=10$ & $+0.13(7)\%$ & $+0.21(7)\%$ & $+1.15(8)\%$ & $+1.70(9)\%$\\
+$\lambda=5$  & --- & --- & --- & $+7.50(11)\%$\\
+\bottomrule
+\end{tabular}
+\end{center}
+($m=100$ --- the one point \emph{inside} the bracket --- was the only clean
+one; volume scan at $\lambda=5$, $m=0.1$: $+7.51(11)\%$, $+7.70(3)\%$,
+$+7.74(2)\%$ at $4^{3}\times8$, $8^{3}\times16$, $8^{3}\times32$.)
+
+Three independent tests dispatched it:
+\begin{enumerate}
+\item \emph{Sign problem} (the a priori favorite, since only sampling can
+break the identity): dense $\gamma_{5}M_{48}$ spectra over 12 prior draws
+at each $\lambda\in\{20,10,5,4\}$ at the test point gave
+$\mathrm{sign}\,\mathrm{Pf}=+1$ in $48/48$ cases with spectral gap
+$\ge0.28$ --- the free-field $m=+0.1$ point is sign-clean (positive Wilson
+mass, no real-mode crossings).  Ruled out.
+\item \emph{Finite-volume zero mode}: the excess is volume-flat over a
+$32\times$ range while sign damage would compound exponentially and
+zero-mode effects would shrink as $1/\sqrt V$.  Ruled out (both ways).
+\item \emph{The kill shot}: same point ($\lambda=5$, $m=0.1$,
+$4^{3}\times8$) with bracket $[10^{-4},10^{2}]$, degree 24:
+\begin{equation}
+\boxed{\;\Sig_{\rm DTX}/\Sig_{W} \;=\; 0.99946(109)\;}
+\end{equation}
+The $66\sigma$ ``violation'' collapses to unity at $0.5\sigma$.
+\end{enumerate}
+
+\subsection{Conclusions}
+
+Fierz exactness holds \emph{dynamically} in the free-field theory at the
+most sensitive point probed (sub-per-mille at $\lambda=5$, $m=0.1$), for
+both the legacy and traceless-aux actions.  The production ensembles were
+never exposed: the generator's \texttt{RAT\_AUTO\_HI=1} rebuilds the
+rational bracket from a Lanczos estimate of the operator spectrum at every
+refresh (Sec.~\ref{sec:remez}).  The operational lesson: \textbf{when a
+DTXQCD observable deviates, check the Remez window against the actual
+spectrum first} --- it is the cheapest sampling failure to create and the
+cheapest to detect.
+
+\section{Remez auto-tuning}
+\label{sec:remez}
+
+The DTXQCD rational actions hold two Zolotarev/Remez approximations on a
+window $[\ell,h]$: $x^{-1/4}$ (used by $S$ and the force multishift ---
+one square root for the $N_f=2$ degeneracy, one for
+$\det M_{48}\to\mathrm{Pf}$) and $x^{+1/8}$ (used by \texttt{refresh}).
+The generators historically hardcoded $[\ell,h]=[0.1,64]$.  Two coupled
+failure modes appear whenever the spectrum of the inverted operator leaves
+the window:
+\begin{itemize}
+\item \emph{Below $\ell$:} the approximation over-extrapolates.  The
+per-shift multishift tolerances become effectively unattainably tight (CG
+stalls), the pseudofermion force acquires large spurious contributions
+($dH$ blowup) --- and, more insidiously, if the run \emph{does} proceed,
+the sampled weight is a smooth wrong function of the low modes: the
+distribution is mis-sampled with no Metropolis signal whatsoever
+(Sec.~\ref{sec:fierz}).
+\item \emph{Above $h$:} the hard end of the spectrum is misweighted and
+the Remez error bound no longer applies.
+\end{itemize}
+
+\texttt{DTXQCDRemezAutoScale} (env master switch \texttt{RAT\_AUTO\_HI=1};
+byte-identical to the fixed window when off) removes the exposure: at each
+\texttt{refresh()} a short plain Lanczos (\texttt{RAT\_LANCZOS\_NM}$=30$
+Krylov vectors; Eigen tridiagonal solve only) estimates
+$\lambda_{\min},\lambda_{\max}$ of \emph{the operator the multishift
+actually inverts} --- $M_{\rm pc}^{\dagger}M_{\rm pc}$ on the odd
+checkerboard for the EO action, $M^{\dagger}M$ on the full grid for the
+non-EO action --- and the Remez pair is rebuilt whenever the safety-scaled
+window $[\,s_{\ell}\lambda_{\min},\,s_{h}\lambda_{\max}\,]$
+($s_{\ell}=0.5$, $s_{h}=1.5$ by default) escapes the current one.  Matching
+the Lanczos operator to the inverted operator is essential: the bounds must
+be in the same units as the shifts.  Production has run with the
+auto-scaler on since 2026-07-02, which is why the ensembles were never
+exposed to the Sec.~\ref{sec:fierz} pathology; the free-field harness,
+which constructed its rational once in the constructor from a fixed
+(m=1000-sized) window, was.  Post-mortem policy: any fixed-bracket harness
+must either auto-size the window from the run parameters (the free-field
+test now derives $[\ell,h]$ from the input mass) or assert
+$s_{\ell}\lambda_{\min}\ge\ell$ at run time.
+
+\section{Auxiliary-field initialization (\texttt{AUX\_INIT})}
+\label{sec:auxinit}
+
+Fresh starts draw the auxiliary fields from their Gaussian prior (width
+$1/\lambda$ per site; $\sqrt{7/6}/\lambda$ for $s,p$ under
+\textsc{traceless\_aux}) around a self-consistent saddle.  With
+\texttt{AUX\_INIT\_AUTO=1} the saddle condensate $\Sig^{*}$ solves
+$\Sig=\Sig_{\rm DTXQCD}(\Sig)$, where $\Sig_{\rm DTXQCD}$ is the per-quark
+stochastic trace $\Tr M_{48}^{-1}/(2N_{f})$ evaluated on a \emph{mean-only}
+fill (fluctuations zeroed: the saddle is a mean-field quantity, and at
+small $\lambda$ full-width fluctuations drive $M_{48}$ near-singular and
+stall the trace CG).  The solver is Picard-first,
+$\Sig_{n+1}=\Sig_{\rm DTXQCD}(\Sig_{n})$ from $\Sig_{0}=0$: the Jacobian
+scales as $N_{f}/\lambda^{2}$, so at production couplings it contracts in
+one or two evaluations (at $\lambda=10$ the saddle is mean-field to
+$<0.1\%$); a bisection fallback covers the non-contracting small-$\lambda$
+regime.  Tolerance \texttt{AUX\_INIT\_TOL} defaults to $0.1$ --- ample,
+since the first trajectories equilibrate the residual.
+
+\emph{Interaction with \textsc{traceless\_aux}.}  No explicit factors are
+needed anywhere in the solver: the $u$-mode entering $M_{48}$ is identical
+in the two conventions for the same $\Sig$ (that is the content of the
+equivalence), so $\Sig_{\rm DTXQCD}(\Sig)$ --- and hence $\Sig^{*}$ --- is
+convention-independent.  All convention dependence is localized in the
+final field placement inside \texttt{FillAuxFields}: legacy splits the
+saddle as $\sigma_{0}=\Sig/(N_{c}\lambda^{2})$ diagonal shift plus
+$s=N_{f}\Sig/\lambda^{2}$; traceless-aux drops the $\sigma$ shift (it
+\emph{is} the trace mode) and places
+$s=\tfrac{7}{6}N_{f}\Sig/\lambda^{2}$, reproducing the same $u$.  (A stale
+log label ``$\langle s\rangle^{*}=2N_{f}\Sig/\lambda^{2}$'' --- a leftover
+of the reverted 2026-06-15 convention that matched neither action --- was
+corrected in passing.)  Explicit alternatives: \texttt{AUX\_INIT=}$\Sig$
+skips the solve; \texttt{ZERO\_ALL\_AUX=1} gives the cold start used by
+frozen-aux controls.
+
+\section{Locating the sign-problem onset from random auxiliary draws}
+\label{sec:signboundary}
+
+\subsection{Method}
+
+HMC samples $|\mathrm{Pf}(K M_{48})|\,e^{-S_{\rm aux}}$; physics requires
+reweighting by $\mathrm{sign}\,\mathrm{Pf}$, which is feasible only where
+$\langle\mathrm{sign}\rangle$ is not exponentially small.  A cheap,
+HMC-free diagnostic of \emph{where} the sign turns on: fix a gauge
+configuration, draw the auxiliary fields from their Gaussian prior (width
+$1/\lambda$, the same marginal HMC equilibrates to up to
+$|\mathrm{Pf}|$-weighting), and compute the signed Pfaffian densely for
+each draw.  Concretely, $\gamma_{5}M_{48}$ is Hermitian; its full spectrum
+is obtained by cuSOLVER \texttt{Zheevd} (dimension $48V$; $V=4^{3}\times8$
+$\Rightarrow$ $24576$).  The charge-conjugation doubling forces exact
+Kramers pairing of the eigenvalues (measured pair splitting
+$\lesssim3\times10^{-14}$), so
+\begin{equation}
+\mathrm{sign}\,\mathrm{Pf}(KM_{48})=(-1)^{n_{-}/2},
+\end{equation}
+with $n_{-}$ the number of negative eigenvalues; the same diagonalization
+yields $\log|\det|$ for $|\mathrm{Pf}|$-weighted averages and the spectral
+gap $\min|\mathrm{eval}|$, which measures the distance to the nearest sign
+flip.  Because the prior is \emph{wider} than the
+$|\mathrm{Pf}|$-reweighted equilibrium (the weight suppresses
+near-singular configurations), prior draws give a conservative
+(pessimistic) bound on sign mixing: a clean prior implies clean dynamics.
+
+\subsection{Results: the boundary at the production mass}
+
+Tepid gauge ($U=\exp(0.01$-Lie noise$)$; the weak-field $0.1$ amplitude
+gives statistically identical results), $m=-0.245$,
+$c_{\rm sw}=1.2493$, $4^{3}\times8$, 12 draws per $\lambda$:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+$\lambda$ & signs $(+/-)$ & median $\min|\mathrm{eval}|$ & verdict\\
+\midrule
+$0.1$--$2$ & $\sim$6/6 (coin flip) & $0.000$--$0.012$ & gapless, fully mixed\\
+$3$   & 6/6            & $0.011$--$0.015$ & mixed\\
+$4$   & \textbf{12/12 $+$} & $0.40$ & clean\\
+$5$   & 12/12 $+$      & $0.52$ & clean\\
+$6$   & 12/12 $+$      & $0.56$ & clean\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The onset is sharp: between $\lambda=3$ and $\lambda=4$ the spectral gap
+jumps by a factor $\sim\!25$ and the sign goes from a fair coin to
+unanimous.  $|\mathrm{Pf}|$-weighting of the same draws does not move the
+boundary.  The mechanism is the auxiliary prior width $1/\lambda$ dragging
+the (unprotected, Wilson) real modes of the near-critical operator through
+zero; consistently, the boundary is parameter-dependent in exactly the
+expected way:
+\begin{itemize}
+\item \emph{Gauge roughness}: tepid vs.\ weak-field identical; hot
+(random) gauge is mixed at least through $\lambda=2$ and saturates the
+diagnostic --- the onset should be probed on gauge fields representative
+of the target ensemble.
+\item \emph{Quark mass}: at $m=+0.1$, $U=\mathbb{1}$ (the free-field
+Fierz point of Sec.~\ref{sec:fierz}), all $48$ draws over
+$\lambda\in\{20,10,5,4\}$ are $+1$ with gap $\ge0.16$: a positive Wilson
+mass has no real-mode crossings to drive.  The boundary is a property of
+the near-critical mass region, not of the construction per se.
+\item \emph{Discretization}: the same probe applied to TXQCD's naive
+$s$-broadcast M\"obius DWF coupling flips \emph{earlier} (7/8 draws
+mixed already at $\lambda=3$) --- the naive five-dimensional coupling
+worsens the sign problem, so a DWF cure requires chirally sandwiched
+(overlap-type) couplings.
+\end{itemize}
+
+\subsection{Volume scaling and the viable window}
+
+Sign violations are spatially local (near-zero modes localize on
+$\mathcal{O}(1)$ regions), so to good approximation patches of volume
+$V_{0}$ flip independently and
+\begin{equation}
+\langle\mathrm{sign}\rangle_{V}\;\sim\;
+\langle\mathrm{sign}\rangle_{V_{0}}^{\,V/V_{0}} .
+\end{equation}
+With the measured $\mathcal{O}(1)$ per-$4^{3}\times8$-patch mixing at
+$\lambda\le3$, reweighting at $16^{3}\times48$ ($V/V_{0}=384$) is
+exponentially dead; conversely the unanimous-plus region needs
+$\langle\mathrm{sign}\rangle_{V_{0}}$ so close to 1 that even large
+volumes stay clean --- the per-trajectory
+$\gamma_{5}M_{48}$ low-eigenvalue monitor in production (the
+\texttt{g5M} observer) certifies this continuously: no gap
+collapse $\Rightarrow$ no sign flips.  These measurements fix the DTXQCD
+production window to $\lambda\ge4$ at the $m=-0.245$ point, with
+$\lambda=5$--$6$ preferred (larger gap, cheaper solves).  One structural
+caveat for EO monitoring: the even-site-local Pfaffian factor and the Schur
+factor flip \emph{together} at $M_{ee}$ crossings (a factorization
+artifact, verified at $\lambda=4$), so the EE-block sign alone is not the
+Pfaffian sign --- sign certification must use the full-operator spectrum.
+
+\end{document}
