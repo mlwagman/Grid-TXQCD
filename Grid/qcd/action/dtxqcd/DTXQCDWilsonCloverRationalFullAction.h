@@ -392,6 +392,21 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
     return v;
   }
 
+  // Per-solve aux-pack hoist (43c4d0ad SetAuxStatic).  The wrapper below is
+  // constructed per solve and the aux fields are fixed for its lifetime
+  // (they evolve only between MD steps), so the device aux cache can be
+  // packed once per solve instead of once per M†M apply (2 host packs +
+  // H2D per CG iteration otherwise).  The pack is idempotent within a
+  // solve, so results are byte-identical; DTXQCD_AUX_STATIC=0 restores the
+  // per-apply repack for forensics.
+  static bool AuxStaticEnabled() {
+    static bool v = []() {
+      const char *e = std::getenv("DTXQCD_AUX_STATIC");
+      return !(e && *e && *e == '0');
+    }();
+    return v;
+  }
+
   void RunMultiShift(const DTXQCDField &U, DTXQCDMOp &Mop,
                      const std::vector<RealD> &poles,
                      const std::vector<RealD> &tol,
@@ -404,6 +419,7 @@ class DTXQCDWilsonCloverRationalFullAction : public Action<DTXQCDField> {
       DTXQCDMpcOpQUDA Mop_quda(Unc.U, grid_, rbgrid_, mass_, csw_,
                                Unc.sigma, Unc.pi, Unc.d, Unc.n,
                                Unc.s,     Unc.p);
+      Mop_quda.SetAuxStatic(AuxStaticEnabled());  // see AuxStaticEnabled()
       if (MultishiftQudaStage() == 'B') {
         // Style C: native-CSF CG state + M_device_csf inner mat-vec.  Gated
         // by env DTXQCD_STAGEB_STYLE=C (the same env that flips M_device

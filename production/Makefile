@@ -165,7 +165,9 @@ dtxqcd_quda_aux_kernel_native_v2_sp_impl.o: \
 # Specific rule for gen_dtxqcd_cfgs: split compile + link so nvcc receives only
 # .cu/.cc sources during compile and only .o objects during link (nvcc gets
 # confused if .o appears alongside .cc on the same invocation).
-gen_dtxqcd_cfgs.o: gen_dtxqcd_cfgs.cc params.h eig_diag.h meas_helper.h
+gen_dtxqcd_cfgs.o: gen_dtxqcd_cfgs.cc params.h eig_diag.h meas_helper.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverRationalFullAction.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # Use nvcc-link by stripping -x cu from CXX (the nvcc wrapper otherwise tries

@@ -94,6 +94,10 @@ class DtxqcdMeasSolver {
         quda_op_.reset(new Grid::DTXQCDMpcOpQUDA(
             U_inv_, grid, rbgrid, mass, csw_val,
             U.sigma, U.pi, U.d, U.n, U.s, U.p));
+        // Aux fields are fixed for the whole measurement program: pack the
+        // device aux cache once instead of twice per M†M CG iteration
+        // (43c4d0ad SetAuxStatic; ~5x on the full-volume matvec at 16^3x48).
+        quda_op_->SetAuxStatic(true);
       }
     }
 #endif
