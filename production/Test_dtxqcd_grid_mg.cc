@@ -30,6 +30,14 @@
 //   hardwired ord-1000 refinement pass (Aggregates.h), "powerlaw" costs
 //   exactly nbasis*CHEBY_ORD — CHEBY_ORD(300) CHEBY_LO(lmax*1e-3)
 //   BENCH_HERMOP(20) DTXQCD_GRIDMG_SKIP_ZERO(0)
+//   FULLVOL(0) — coarsen/solve the full-volume M†M instead of the odd-CB
+//   Schur Mpc†Mpc (the better-conditioned substrate at small lambda: no
+//   M_ee amplification; lam=4 full CG ~2100 iters vs EO 4005)
+//   REFINE(0) REFINE_TOL(1e-3) REFINE_MAXIT(400) — inverse-iteration basis
+//   polish after the filter (cost ~ nbasis*min(maxit, iters-to-tol))
+//   SETUP_PREFIX(unset) — cache basis+coarse op via LIME per
+//   (nbasis, geom, block); existing files -> load and skip setup entirely
+//   (knob scans of smoother/coarse params then cost only the solve)
 //   CHEBY_HI(lmax*1.1) MSHIFT_LO(lmax*1e-3) MSHIFT_TOL(1e-5) MSHIFT_MAXIT(2000)
 //   SMOOTH_IT(8) MIRS_SHIFT(lmax*0.02) COARSE_TOL(1e-10) COARSE_TOL_SLOPPY(0.04)
 //   CG_TOL(1e-8) CG_MAX(100000) MG_TOL(=CG_TOL) MG_MAXIT(700)
@@ -51,11 +59,70 @@
 #include "dtxqcd_meas_helper.h"
 
 #include <cstdlib>
+#include <fstream>
 #include <string>
 
 using namespace Grid;
 
 namespace {
+
+// ---- setup save/load (from tests/debug/Test_general_coarse_hdcg_phys.cc) --
+// SETUP_PREFIX=<path> caches the null-space basis + coarsened operator per
+// (nbasis, geom, block) so smoother/coarse-solver knob scans skip the
+// expensive setup.  Files: <prefix>.basis.<tag> / <prefix>.ldop.<tag>.
+bool file_exists(const std::string &f) { return std::ifstream(f).good(); }
+
+template <class aggregation>
+void SaveBasis(aggregation &Agg, const std::string &file) {
+#ifdef HAVE_LIME
+  emptyUserRecord record;
+  ScidacWriter WR(Agg.FineGrid->IsBoss());
+  WR.open(file);
+  for (int b = 0; b < (int)Agg.subspace.size(); b++)
+    WR.writeScidacFieldRecord(Agg.subspace[b], record, 0, 0);
+  WR.close();
+#endif
+}
+template <class aggregation>
+void LoadBasis(aggregation &Agg, const std::string &file) {
+#ifdef HAVE_LIME
+  emptyUserRecord record;
+  ScidacReader RD;
+  RD.open(file);
+  for (int b = 0; b < (int)Agg.subspace.size(); b++)
+    RD.readScidacFieldRecord(Agg.subspace[b], record, 0);
+  RD.close();
+#endif
+}
+template <class Coarsened>
+void SaveOperator(Coarsened &Operator, const std::string &file) {
+#ifdef HAVE_LIME
+  emptyUserRecord record;
+  ScidacWriter WR(Operator.Grid()->IsBoss());
+  GRID_ASSERT(Operator._A.size() == Operator.geom.npoint);
+  WR.open(file);
+  for (int p = 0; p < (int)Operator._A.size(); p++) {
+    auto tmp = Operator.Cell.Extract(Operator._A[p]);
+    WR.writeScidacFieldRecord(tmp, record, 0, 0);
+  }
+  WR.close();
+#endif
+}
+template <class Coarsened>
+void LoadOperator(Coarsened &Operator, const std::string &file) {
+#ifdef HAVE_LIME
+  emptyUserRecord record;
+  ScidacReader RD;
+  RD.open(file);
+  GRID_ASSERT(Operator._A.size() == Operator.geom.npoint);
+  for (int p = 0; p < (int)Operator.geom.npoint; p++) {
+    conformable(Operator._A[p].Grid(), Operator.CoarseGrid());
+    RD.readScidacFieldRecord(Operator._A[p], record, 0);
+  }
+  RD.close();
+  Operator.ExchangeCoarseLinks();
+#endif
+}
 
 double env_real(const char *n, double d) {
   const char *e = std::getenv(n);
@@ -128,9 +195,9 @@ struct MGParams {
   int mg_maxit;
 };
 
-template <int nbasis>
-int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
-           DtxqcdPackedMpcHermOp &FineHermOp, GridParallelRNG &pRNG,
+template <int nbasis, class HermOpT>
+int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
+           HermOpT &FineHermOp, GridParallelRNG &pRNG,
            const LatticeDtxqcdPacked &src, const LatticeDtxqcdPacked *ref_sol,
            RealD lmax, const MGParams &P) {
   typedef LatticeDtxqcdPacked Field;
@@ -153,15 +220,53 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
             << std::endl;
 
   //////////////////////////////////////////////////////////////////////
-  // Subspace (null vectors)
+  // Geometry + coarse operator shell (constructed before the subspace so
+  // a cached setup can be loaded into it)
   //////////////////////////////////////////////////////////////////////
-  Subspace Aggregates(&Coarse4d, &RBGrid, Odd);
+  std::unique_ptr<NonLocalStencilGeometry> geom;
+  if (P.geom == "nearest")
+    geom.reset(new NearestStencilGeometry4D(&Coarse4d));
+  else
+    geom.reset(new NextToNextToNextToNearestStencilGeometry4D(&Coarse4d));
+  LittleDiracOperator LittleDiracOp(*geom, FineGrid, &Coarse4d);
+
+  Subspace Aggregates(&Coarse4d, FineGrid, cb);
   double cheby_hi = (P.cheby_hi > 0) ? P.cheby_hi : 1.1 * lmax;
   double cheby_lo = (P.cheby_lo > 0) ? P.cheby_lo : 1.0e-3 * lmax;
 
+  // Cached-setup path: SETUP_PREFIX + existing files -> skip subspace+coarsen.
+  std::string setup_prefix = env_str("SETUP_PREFIX", "");
+  std::string setup_tag;
+  bool setup_loaded = false;
+#ifdef HAVE_LIME
+  if (!setup_prefix.empty()) {
+    std::ostringstream tag;
+    tag << nbasis << "." << P.geom << ".b" << P.block[0] << P.block[1]
+        << P.block[2] << P.block[3];
+    setup_tag = tag.str();
+    std::string bf = setup_prefix + ".basis." + setup_tag;
+    std::string of = setup_prefix + ".ldop." + setup_tag;
+    if (file_exists(bf) && file_exists(of)) {
+      double tl = usecond();
+      LoadBasis(Aggregates, bf);
+      Aggregates.Orthogonalise();  // idempotent on a saved-orthonormal basis
+      LoadOperator(LittleDiracOp, of);
+      setup_loaded = true;
+      std::cout << GridLogMessage << "[gridmg] setup LOADED from "
+                << setup_prefix << ".{basis,ldop}." << setup_tag << " in "
+                << (usecond() - tl) * 1e-6 << " s" << std::endl;
+    }
+  }
+#endif
+
+  //////////////////////////////////////////////////////////////////////
+  // Subspace (null vectors)
+  //////////////////////////////////////////////////////////////////////
   size_t nc0 = FineHermOp.ncalls;
   double t0 = usecond();
-  if (P.subspace == "inverse") {
+  if (setup_loaded) {
+    // nothing to do
+  } else if (P.subspace == "inverse") {
     Aggregates.CreateSubspace(pRNG, FineHermOp, nbasis);
   } else if (P.subspace == "multishift") {
     double mlo = (P.mshift_lo > 0) ? P.mshift_lo : 1.0e-3 * lmax;
@@ -182,7 +287,18 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
     Aggregates.CreateSubspaceChebyshev(pRNG, FineHermOp, nbasis, cheby_hi,
                                        cheby_lo, P.cheby_ord);
   }
-  Aggregates.Orthogonalise();
+  // Optional inverse-iteration polish (REFINE=1): per-vector maxit-capped
+  // sloppy CG on M†M — amplifies the low-mode content the filter can't reach
+  // at large kappa (the HDCG-paper refinement).  Included in the saved setup.
+  if (!setup_loaded && env_int("REFINE", 0) != 0) {
+    double rtol = env_real("REFINE_TOL", 1e-3);
+    int rmaxit = env_int("REFINE_MAXIT", 400);
+    std::cout << GridLogMessage << "[gridmg] RefineSubspace: tol=" << rtol
+              << " maxit=" << rmaxit << std::endl;
+    Aggregates.RefineSubspace(FineHermOp, /*Lo (unused upstream)=*/0.0, rtol,
+                              rmaxit);
+  }
+  if (!setup_loaded) Aggregates.Orthogonalise();
   double t_sub = (usecond() - t0) * 1e-6;
   size_t nc_sub = FineHermOp.ncalls - nc0;
   std::cout << GridLogMessage << "[gridmg] subspace done: " << nc_sub
@@ -191,16 +307,19 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
   //////////////////////////////////////////////////////////////////////
   // Coarsen (algebraic, Op-probe only)
   //////////////////////////////////////////////////////////////////////
-  std::unique_ptr<NonLocalStencilGeometry> geom;
-  if (P.geom == "nearest")
-    geom.reset(new NearestStencilGeometry4D(&Coarse4d));
-  else
-    geom.reset(new NextToNextToNextToNearestStencilGeometry4D(&Coarse4d));
-  LittleDiracOperator LittleDiracOp(*geom, &RBGrid, &Coarse4d);
-
   nc0 = FineHermOp.ncalls;
   t0 = usecond();
-  LittleDiracOp.CoarsenOperator(FineHermOp, Aggregates);
+  if (!setup_loaded) {
+    LittleDiracOp.CoarsenOperator(FineHermOp, Aggregates);
+#ifdef HAVE_LIME
+    if (!setup_prefix.empty()) {
+      SaveBasis(Aggregates, setup_prefix + ".basis." + setup_tag);
+      SaveOperator(LittleDiracOp, setup_prefix + ".ldop." + setup_tag);
+      std::cout << GridLogMessage << "[gridmg] setup SAVED to "
+                << setup_prefix << ".{basis,ldop}." << setup_tag << std::endl;
+    }
+#endif
+  }
   double t_coarsen = (usecond() - t0) * 1e-6;
   std::cout << GridLogMessage << "[gridmg] CoarsenOperator done: "
             << (FineHermOp.ncalls - nc0) << " fine HermOps, " << t_coarsen
@@ -231,7 +350,7 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
       P.mg_tol, P.mg_maxit, FineHermOp, CGsmooth, HPDSolveSloppy, HPDSolve,
       Aggregates);
 
-  Field result(&RBGrid);
+  Field result(FineGrid);
   result = Zero();
   result.Checkerboard() = src.Checkerboard();
   nc0 = FineHermOp.ncalls;
@@ -243,7 +362,7 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
             << " fine HermOps, " << t_mg << " s" << std::endl;
 
   // True residual through the fine op.
-  Field tmp(&RBGrid);
+  Field tmp(FineGrid);
   tmp.Checkerboard() = src.Checkerboard();
   FineHermOp.HermOp(result, tmp);
   tmp = tmp - src;
@@ -265,6 +384,169 @@ int run_mg(GridCartesian &Grid_, GridRedBlackCartesian &RBGrid,
   std::cout << GridLogMessage << "[gridmg] totals: subspace " << t_sub
             << " s + coarsen " << t_coarsen << " s (setup), solve " << t_mg
             << " s" << std::endl;
+  return fails;
+}
+
+// Gates A-D + benchmark + MG dispatch, templated over the (HermOp, Grid-op)
+// pair so both the odd-CB Schur and full-volume instantiations run the same
+// suite (FULLVOL=1 selects the latter in main).
+template <class HermOpT, class MopT>
+int run_suite(GridCartesian &Grid_, GridBase *FineGrid, int cb,
+              HermOpT &FineHermOp, MopT &mop, GridParallelRNG &pRNG) {
+  int fails = 0;
+  auto check = [&](const char *name, RealD val, RealD tol) {
+    bool ok = val < tol;
+    if (!ok) ++fails;
+    std::cout << GridLogMessage << (ok ? "[ok]   " : "[FAIL] ") << name
+              << " = " << val << " (tol " << tol << ")" << std::endl;
+  };
+
+  //////////////////////////////////////////////////////////////////////
+  // Gate A: pack/unpack round trip
+  //////////////////////////////////////////////////////////////////////
+  DTXQCDFermionDoubled psi_full(&Grid_), psi_o(FineGrid), psi_rt(FineGrid);
+  for (int f = 0; f < DtxqcdNf; ++f) {
+    gaussian(pRNG, psi_full.upper.f[f]);
+    gaussian(pRNG, psi_full.lower.f[f]);
+  }
+  if (FineGrid->_isCheckerBoarded)
+    pick_cb(cb, psi_o, psi_full);
+  else
+    psi_o = psi_full;
+
+  LatticeDtxqcdPacked P(FineGrid);
+  DtxqcdPackDoubled(psi_o, P);
+  DtxqcdUnpackDoubled(P, psi_rt);
+  RealD rt = 0, den = 0;
+  for (int f = 0; f < DtxqcdNf; ++f) {
+    LatticeFermion d(FineGrid);
+    d.Checkerboard() = cb;
+    d = psi_rt.upper.f[f] - psi_o.upper.f[f];
+    rt += norm2(d);
+    d = psi_rt.lower.f[f] - psi_o.lower.f[f];
+    rt += norm2(d);
+    den += norm2(psi_o.upper.f[f]) + norm2(psi_o.lower.f[f]);
+  }
+  check("gateA pack/unpack roundtrip rel", std::sqrt(rt / den), 1e-28);
+  check("gateA norm preservation rel", std::abs(norm2(P) - den) / den, 1e-13);
+
+  //////////////////////////////////////////////////////////////////////
+  // Gate B: packed HermOp vs struct-path A†A
+  //////////////////////////////////////////////////////////////////////
+  LatticeDtxqcdPacked hop_out(FineGrid);
+  hop_out.Checkerboard() = P.Checkerboard();
+  FineHermOp.HermOp(P, hop_out);
+
+  DTXQCDFermionDoubled t1(FineGrid), t2(FineGrid);
+  mop.M(psi_o, t1);
+  mop.Mdag(t1, t2);
+  LatticeDtxqcdPacked ref_out(FineGrid);
+  DtxqcdPackDoubled(t2, ref_out);
+#ifdef GRID_HAVE_QUDA
+  const RealD gateb_tol = 1e-9;  // device chain vs Grid reference
+#else
+  const RealD gateb_tol = 1e-13;  // identical arithmetic
+#endif
+  check("gateB packed HermOp vs struct", packed_rel_diff(hop_out, ref_out),
+        gateb_tol);
+
+  //////////////////////////////////////////////////////////////////////
+  // Adapter-overhead micro-benchmark (per-phase ms; see header comment).
+  //////////////////////////////////////////////////////////////////////
+  const int nbench = env_int("BENCH_HERMOP", 20);
+  if (nbench > 0) {
+    FineHermOp.ResetCounters();
+    for (int i = 0; i < nbench; ++i) FineHermOp.HermOp(P, hop_out);
+    FineHermOp.ReportCounters("bench");
+    FineHermOp.ResetCounters();
+  }
+
+  //////////////////////////////////////////////////////////////////////
+  // Spectrum scale for Chebyshev / smoother windows
+  //////////////////////////////////////////////////////////////////////
+  LatticeDtxqcdPacked src(FineGrid);
+  gaussian(pRNG, src);  // content-random; cb interpretation is the adapter's
+  PowerMethod<LatticeDtxqcdPacked> PM;
+  RealD lmax = PM(FineHermOp, src);
+  std::cout << GridLogMessage << "[gridmg] PowerMethod lambda_max ~ " << lmax
+            << std::endl;
+
+  //////////////////////////////////////////////////////////////////////
+  // Gate C: baseline CG through the adapter
+  //////////////////////////////////////////////////////////////////////
+  const RealD cg_tol = env_real("CG_TOL", 1e-8);
+  const int cg_max = env_int("CG_MAX", 100000);
+  LatticeDtxqcdPacked sol_cg(FineGrid);
+  sol_cg = Zero();
+  sol_cg.Checkerboard() = src.Checkerboard();
+  bool have_baseline = env_int("RUN_BASELINE", 1) != 0;
+  if (have_baseline) {
+    size_t nc0 = FineHermOp.ncalls;
+    double t0 = usecond();
+    ConjugateGradient<LatticeDtxqcdPacked> CG(cg_tol, cg_max, false);
+    CG(FineHermOp, src, sol_cg);
+    double t_cg = (usecond() - t0) * 1e-6;
+    std::cout << GridLogMessage << "[gridmg] baseline CG: "
+              << (FineHermOp.ncalls - nc0) << " fine HermOps, " << t_cg
+              << " s (" << t_cg / std::max<size_t>(FineHermOp.ncalls - nc0, 1)
+              << " s/HermOp)" << std::endl;
+    LatticeDtxqcdPacked tmp(FineGrid);
+    tmp.Checkerboard() = src.Checkerboard();
+    FineHermOp.HermOp(sol_cg, tmp);
+    tmp = tmp - src;
+    check("gateC baseline CG true residual",
+          std::sqrt(norm2(tmp) / norm2(src)), 10.0 * cg_tol);
+  }
+
+  //////////////////////////////////////////////////////////////////////
+  // Gate D: the MG experiment
+  //////////////////////////////////////////////////////////////////////
+  if (env_int("RUN_MG", 1) != 0) {
+    MGParams Pmg;
+    Pmg.block = parse_dotted(env_str("BLOCK", "4.4.4.4"),
+                             Coordinate(std::vector<int>{4, 4, 4, 4}));
+    Pmg.geom = env_str("GEOM", "nnn");
+    Pmg.subspace = env_str("SUBSPACE", "cheby");
+    Pmg.cheby_ord = env_int("CHEBY_ORD", 300);
+    Pmg.cheby_lo = env_real("CHEBY_LO", -1.0);
+    Pmg.cheby_hi = env_real("CHEBY_HI", -1.0);
+    Pmg.mshift_lo = env_real("MSHIFT_LO", -1.0);
+    Pmg.mshift_tol = env_real("MSHIFT_TOL", 1e-5);
+    Pmg.mshift_maxit = env_int("MSHIFT_MAXIT", 2000);
+    Pmg.smooth_it = env_int("SMOOTH_IT", 8);
+    Pmg.mirs_shift = env_real("MIRS_SHIFT", -1.0);
+    Pmg.coarse_tol = env_real("COARSE_TOL", 1e-10);
+    Pmg.coarse_tol_sloppy = env_real("COARSE_TOL_SLOPPY", 0.04);
+    Pmg.mg_tol = env_real("MG_TOL", cg_tol);
+    Pmg.mg_maxit = env_int("MG_MAXIT", 700);
+
+    const LatticeDtxqcdPacked *ref = have_baseline ? &sol_cg : nullptr;
+    const int nb = env_int("NBASIS", 32);
+    switch (nb) {
+      case 24:
+        fails += run_mg<24>(Grid_, FineGrid, cb, FineHermOp, pRNG, src, ref,
+                            lmax, Pmg);
+        break;
+      case 32:
+        fails += run_mg<32>(Grid_, FineGrid, cb, FineHermOp, pRNG, src, ref,
+                            lmax, Pmg);
+        break;
+      case 48:
+        fails += run_mg<48>(Grid_, FineGrid, cb, FineHermOp, pRNG, src, ref,
+                            lmax, Pmg);
+        break;
+      default:
+        std::cout << GridLogMessage
+                  << "[gridmg] NBASIS must be one of 24/32/48 (compiled "
+                     "instantiations); got "
+                  << nb << std::endl;
+        ++fails;
+    }
+  }
+  std::cout << GridLogMessage << "[gridmg] total fine HermOps this run: "
+            << FineHermOp.ncalls << " (" << FineHermOp.t_herm_us * 1e-6
+            << " s)" << std::endl;
+  FineHermOp.ReportCounters("run-aggregate");
   return fails;
 }
 
@@ -322,174 +604,43 @@ int main(int argc, char **argv) {
 
   DTXQCDWilsonCloverFermionEO Dw(U_inv, Grid_, RBGrid, mass, csw_v, U.sigma,
                                  U.pi, U.d, U.n, U.s, U.p);
-  DTXQCDMpcOp mpc(Dw);
 
-#ifdef GRID_HAVE_QUDA
-  Grid::Quda::initialize();
-  DTXQCDMpcOpQUDA_EO Mq(Dw, U_inv, Grid_, RBGrid, mass, csw_v, U.sigma, U.pi,
-                        U.d, U.n, U.s, U.p);
-  DtxqcdPackedMpcHermOp FineHermOp(mpc, Mq, &RBGrid, Odd);
-#else
-  DtxqcdPackedMpcHermOp FineHermOp(mpc, &RBGrid, Odd);
-#endif
-
+  // FULLVOL=1: run the suite on the full-volume operator M†M instead of the
+  // odd-CB Schur Mpc†Mpc.  The M6 probe (2026-07-03) showed the full
+  // operator is far better conditioned at small lambda (no M_ee
+  // amplification): lam=4 traj 120 full CG ~2100 iters vs EO CG 4005 (EO
+  // lambda_max 9846).
+  const bool fullvol = env_int("FULLVOL", 0) != 0;
   int fails = 0;
-  auto check = [&](const char *name, RealD val, RealD tol) {
-    bool ok = val < tol;
-    if (!ok) ++fails;
-    std::cout << GridLogMessage << (ok ? "[ok]   " : "[FAIL] ") << name
-              << " = " << val << " (tol " << tol << ")" << std::endl;
-  };
-
-  //////////////////////////////////////////////////////////////////////
-  // Gate A: pack/unpack round trip
-  //////////////////////////////////////////////////////////////////////
-  DTXQCDFermionDoubled psi_full(&Grid_), psi_o(&RBGrid), psi_rt(&RBGrid);
-  for (int f = 0; f < DtxqcdNf; ++f) {
-    gaussian(pRNG, psi_full.upper.f[f]);
-    gaussian(pRNG, psi_full.lower.f[f]);
-  }
-  pick_cb(Odd, psi_o, psi_full);
-
-  LatticeDtxqcdPacked P(&RBGrid);
-  DtxqcdPackDoubled(psi_o, P);
-  DtxqcdUnpackDoubled(P, psi_rt);
-  RealD rt = 0, den = 0;
-  for (int f = 0; f < DtxqcdNf; ++f) {
-    LatticeFermion d(&RBGrid);
-    d.Checkerboard() = Odd;
-    d = psi_rt.upper.f[f] - psi_o.upper.f[f];
-    rt += norm2(d);
-    d = psi_rt.lower.f[f] - psi_o.lower.f[f];
-    rt += norm2(d);
-    den += norm2(psi_o.upper.f[f]) + norm2(psi_o.lower.f[f]);
-  }
-  check("gateA pack/unpack roundtrip rel", std::sqrt(rt / den), 1e-28);
-  check("gateA norm preservation rel",
-        std::abs(norm2(P) - den) / den, 1e-13);
-
-  //////////////////////////////////////////////////////////////////////
-  // Gate B: packed HermOp vs struct-path Mpc†Mpc
-  //////////////////////////////////////////////////////////////////////
-  LatticeDtxqcdPacked hop_out(&RBGrid);
-  hop_out.Checkerboard() = P.Checkerboard();
-  FineHermOp.HermOp(P, hop_out);
-
-  DTXQCDFermionDoubled t1(&RBGrid), t2(&RBGrid);
-  mpc.M(psi_o, t1);
-  mpc.Mdag(t1, t2);
-  LatticeDtxqcdPacked ref_out(&RBGrid);
-  DtxqcdPackDoubled(t2, ref_out);
+  if (fullvol) {
+    DTXQCDMOp mop(Dw);
 #ifdef GRID_HAVE_QUDA
-  const RealD gateb_tol = 1e-9;  // device chain vs Grid reference
+    Grid::Quda::initialize();
+    DTXQCDMpcOpQUDA Mq(U_inv, Grid_, RBGrid, mass, csw_v, U.sigma, U.pi,
+                       U.d, U.n, U.s, U.p);
+    DtxqcdPackedFullHermOp FineHermOp(mop, Mq, &Grid_, Even);
 #else
-  const RealD gateb_tol = 1e-13;  // identical arithmetic
+    DtxqcdPackedFullHermOp FineHermOp(mop, &Grid_, Even);
 #endif
-  check("gateB packed HermOp vs struct", packed_rel_diff(hop_out, ref_out),
-        gateb_tol);
-
-  //////////////////////////////////////////////////////////////////////
-  // Adapter-overhead micro-benchmark: N repeated HermOps, per-phase ms
-  // (unpack / h2d / zero / matvec / d2h / pack).  Raw Style C CG iteration
-  // is ~22 ms at 16^3x48 1 GPU — the matvec phase should approach that;
-  // everything else is adapter overhead.  DTXQCD_GRIDMG_SKIP_ZERO=1 probes
-  // the zeroing cost (gates B/C/D validate correctness under it).
-  //////////////////////////////////////////////////////////////////////
-  const int nbench = env_int("BENCH_HERMOP", 20);
-  if (nbench > 0) {
-    FineHermOp.ResetCounters();
-    for (int i = 0; i < nbench; ++i) FineHermOp.HermOp(P, hop_out);
-    FineHermOp.ReportCounters("bench");
-    FineHermOp.ResetCounters();
-  }
-
-  //////////////////////////////////////////////////////////////////////
-  // Spectrum scale for Chebyshev / smoother windows
-  //////////////////////////////////////////////////////////////////////
-  LatticeDtxqcdPacked src(&RBGrid);
-  gaussian(pRNG, src);  // content-random; interpreted as odd-CB (see adapter)
-  PowerMethod<LatticeDtxqcdPacked> PM;
-  RealD lmax = PM(FineHermOp, src);
-  std::cout << GridLogMessage << "[gridmg] PowerMethod lambda_max ~ " << lmax
-            << std::endl;
-
-  //////////////////////////////////////////////////////////////////////
-  // Gate C: baseline CG through the adapter
-  //////////////////////////////////////////////////////////////////////
-  const RealD cg_tol = env_real("CG_TOL", 1e-8);
-  const int cg_max = env_int("CG_MAX", 100000);
-  LatticeDtxqcdPacked sol_cg(&RBGrid);
-  sol_cg = Zero();
-  sol_cg.Checkerboard() = src.Checkerboard();
-  bool have_baseline = env_int("RUN_BASELINE", 1) != 0;
-  if (have_baseline) {
-    size_t nc0 = FineHermOp.ncalls;
-    double t0 = usecond();
-    ConjugateGradient<LatticeDtxqcdPacked> CG(cg_tol, cg_max, false);
-    CG(FineHermOp, src, sol_cg);
-    double t_cg = (usecond() - t0) * 1e-6;
-    std::cout << GridLogMessage << "[gridmg] baseline CG: "
-              << (FineHermOp.ncalls - nc0) << " fine HermOps, " << t_cg
-              << " s (" << t_cg / std::max<size_t>(FineHermOp.ncalls - nc0, 1)
-              << " s/HermOp)" << std::endl;
-    LatticeDtxqcdPacked tmp(&RBGrid);
-    tmp.Checkerboard() = src.Checkerboard();
-    FineHermOp.HermOp(sol_cg, tmp);
-    tmp = tmp - src;
-    check("gateC baseline CG true residual",
-          std::sqrt(norm2(tmp) / norm2(src)), 10.0 * cg_tol);
-  }
-
-  //////////////////////////////////////////////////////////////////////
-  // Gate D: the MG experiment
-  //////////////////////////////////////////////////////////////////////
-  if (env_int("RUN_MG", 1) != 0) {
-    MGParams Pmg;
-    Pmg.block = parse_dotted(env_str("BLOCK", "4.4.4.4"),
-                             Coordinate(std::vector<int>{4, 4, 4, 4}));
-    Pmg.geom = env_str("GEOM", "nnn");
-    Pmg.subspace = env_str("SUBSPACE", "cheby");
-    Pmg.cheby_ord = env_int("CHEBY_ORD", 300);
-    Pmg.cheby_lo = env_real("CHEBY_LO", -1.0);
-    Pmg.cheby_hi = env_real("CHEBY_HI", -1.0);
-    Pmg.mshift_lo = env_real("MSHIFT_LO", -1.0);
-    Pmg.mshift_tol = env_real("MSHIFT_TOL", 1e-5);
-    Pmg.mshift_maxit = env_int("MSHIFT_MAXIT", 2000);
-    Pmg.smooth_it = env_int("SMOOTH_IT", 8);
-    Pmg.mirs_shift = env_real("MIRS_SHIFT", -1.0);
-    Pmg.coarse_tol = env_real("COARSE_TOL", 1e-10);
-    Pmg.coarse_tol_sloppy = env_real("COARSE_TOL_SLOPPY", 0.04);
-    Pmg.mg_tol = env_real("MG_TOL", cg_tol);
-    Pmg.mg_maxit = env_int("MG_MAXIT", 700);
-
-    const LatticeDtxqcdPacked *ref = have_baseline ? &sol_cg : nullptr;
-    const int nb = env_int("NBASIS", 32);
-    switch (nb) {
-      case 24:
-        fails += run_mg<24>(Grid_, RBGrid, FineHermOp, pRNG, src, ref, lmax, Pmg);
-        break;
-      case 32:
-        fails += run_mg<32>(Grid_, RBGrid, FineHermOp, pRNG, src, ref, lmax, Pmg);
-        break;
-      case 48:
-        fails += run_mg<48>(Grid_, RBGrid, FineHermOp, pRNG, src, ref, lmax, Pmg);
-        break;
-      default:
-        std::cout << GridLogMessage
-                  << "[gridmg] NBASIS must be one of 24/32/48 (compiled "
-                     "instantiations); got "
-                  << nb << std::endl;
-        ++fails;
-    }
+    std::cout << GridLogMessage << "[gridmg] FULLVOL mode: fine grid = full "
+              << "volume, operator = M†M" << std::endl;
+    fails = run_suite(Grid_, (GridBase *)&Grid_, Even, FineHermOp, mop, pRNG);
+  } else {
+    DTXQCDMpcOp mpc(Dw);
+#ifdef GRID_HAVE_QUDA
+    Grid::Quda::initialize();
+    DTXQCDMpcOpQUDA_EO Mq(Dw, U_inv, Grid_, RBGrid, mass, csw_v, U.sigma,
+                          U.pi, U.d, U.n, U.s, U.p);
+    DtxqcdPackedMpcHermOp FineHermOp(mpc, Mq, &RBGrid, Odd);
+#else
+    DtxqcdPackedMpcHermOp FineHermOp(mpc, &RBGrid, Odd);
+#endif
+    fails = run_suite(Grid_, (GridBase *)&RBGrid, Odd, FineHermOp, mpc, pRNG);
   }
 
   std::cout << GridLogMessage << "==== gridmg "
             << (fails ? "FAILED" : "PASSED") << " (" << fails
             << " failures) ====" << std::endl;
-  std::cout << GridLogMessage << "[gridmg] total fine HermOps this run: "
-            << FineHermOp.ncalls << " (" << FineHermOp.t_herm_us * 1e-6
-            << " s)" << std::endl;
-  FineHermOp.ReportCounters("run-aggregate");
   Grid_finalize();
   return fails ? 1 : 0;
 }

@@ -37,6 +37,7 @@
 #include <cstdlib>
 
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #ifdef GRID_HAVE_QUDA
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA_EO.h>
 #include <Grid/qcd/action/dtxqcd/DoubledStateCSF.h>
@@ -102,25 +103,37 @@ inline void DtxqcdUnpackDoubled(const LatticeDtxqcdPacked &in,
   });
 }
 
-// HPD fine operator for Grid MG: Op = AdjOp = HermOp = Mpc^dag Mpc on packed
-// odd-CB doubled fermions.  Mirrors HermOpAdaptor (Test_general_coarse_hdcg_
-// phys.cc) so it plugs into Aggregation null-vector generation, the algebraic
-// CoarsenOperator, TwoLevelADEF2 and plain ConjugateGradient alike.
-class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
+// HPD fine operator for Grid MG: Op = AdjOp = HermOp = A^dag A on packed
+// doubled fermions, templated on the (Grid-op, QUDA-op) pair so both the
+// odd-CB Schur pair (DTXQCDMpcOp, DTXQCDMpcOpQUDA_EO) and the full-volume
+// pair (DTXQCDMOp, DTXQCDMpcOpQUDA) instantiate — the M6 probe showed the
+// full operator is the better-conditioned MG substrate at small lambda
+// (the near-singular M_ee sites amplify only the Schur complement).
+// Mirrors HermOpAdaptor (Test_general_coarse_hdcg_phys.cc) so it plugs into
+// Aggregation null-vector generation, the algebraic CoarsenOperator,
+// TwoLevelADEF2 and plain ConjugateGradient alike.
+//
+// The device-resident conversion table handles both fine-grid types: on a
+// checkerboarded grid the staging index is the local lex site (Grid RB order
+// == QUDA cb_site order); on a full grid it is QUDA's parity-blocked order
+// eo_idx = parity*V/2 + lex/2 (replicating fermion_to_eo_buffer,
+// QudaFieldConvert.h:133-140).
+template <class MopGridT, class MopQudaT>
+class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
  public:
   typedef LatticeDtxqcdPacked Field;
 
-  DtxqcdPackedMpcHermOp(DTXQCDMpcOp &mpc, GridBase *rbgrid, int cb = Odd)
+  DtxqcdPackedHermOpT(MopGridT &mpc, GridBase *finegrid, int cb = Odd)
       : mpc_(mpc), cb_(cb),
-        tmp_in_(rbgrid), tmp_mid_(rbgrid), tmp_out_(rbgrid) {}
+        tmp_in_(finegrid), tmp_mid_(finegrid), tmp_out_(finegrid) {}
 
 #ifdef GRID_HAVE_QUDA
-  // Same, with the device-resident EO chain as the matvec fast path
+  // Same, with the device-resident chain as the matvec fast path
   // (opt-out via env DTXQCD_GRIDMG_QUDA_FINE=0).
-  DtxqcdPackedMpcHermOp(DTXQCDMpcOp &mpc, DTXQCDMpcOpQUDA_EO &Mq,
-                        GridBase *rbgrid, int cb = Odd)
+  DtxqcdPackedHermOpT(MopGridT &mpc, MopQudaT &Mq,
+                      GridBase *finegrid, int cb = Odd)
       : mpc_(mpc), Mq_(&Mq), cb_(cb),
-        tmp_in_(rbgrid), tmp_mid_(rbgrid), tmp_out_(rbgrid) {
+        tmp_in_(finegrid), tmp_mid_(finegrid), tmp_out_(finegrid) {
     if (const char *e = std::getenv("DTXQCD_GRIDMG_QUDA_FINE"))
       if (std::atoi(e) == 0) Mq_ = nullptr;
     if (const char *e = std::getenv("DTXQCD_GRIDMG_SKIP_ZERO"))
@@ -132,7 +145,7 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
 #endif
   }
 
-  ~DtxqcdPackedMpcHermOp() {
+  ~DtxqcdPackedHermOpT() {
     // Mirror DTXQCDMpcOpQUDA_EO::~: QUDA teardown order makes CSF
     // destructors unsafe at exit — drop ownership without destroying.
     for (auto *s : {&in_q_, &mid_q_, &out_q_, &scr_q_})
@@ -243,6 +256,8 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
     nsimd_ = g->Nsimd();
     vhalf_ = g->lSites();
     GRID_ASSERT((uint64_t)in_q_.csf[0]->Volume() == vhalf_);
+    const bool cb_grid = g->_isCheckerBoarded;
+    const int v_eo = (int)(vhalf_ / 2);  // full-grid parity-block size
     std::vector<int> tbl(osites_ * nsimd_);
     std::vector<Coordinate> icoor(nsimd_, Coordinate(g->Nd()));
     for (uint64_t l = 0; l < nsimd_; ++l) g->iCoorFromIindex(icoor[l], l);
@@ -250,11 +265,17 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
     for (uint64_t o = 0; o < osites_; ++o) {
       g->oCoorFromOindex(ocoor, o);
       for (uint64_t l = 0; l < nsimd_; ++l) {
-        for (int mu = 0; mu < g->Nd(); ++mu)
+        int psum = 0;
+        for (int mu = 0; mu < g->Nd(); ++mu) {
           lcoor[mu] = ocoor[mu] + g->_rdimensions[mu] * icoor[l][mu];
+          psum += lcoor[mu];
+        }
         int lex;
         Lexicographic::IndexFromCoor(lcoor, lex, g->_ldimensions);
-        tbl[o * nsimd_ + l] = lex;
+        // CB grid: Grid RB order == QUDA cb_site order (identity on lex).
+        // Full grid: QUDA parity-blocked order (fermion_to_eo_buffer).
+        tbl[o * nsimd_ + l] =
+            cb_grid ? lex : ((psum & 1) * v_eo + (lex >> 1));
       }
     }
     std::size_t tbytes = tbl.size() * sizeof(int);
@@ -270,7 +291,7 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
     for (int k = 0; k < 4; ++k) {
       stage_d_[k] = (double *)acceleratorAllocDevice(sbytes);
       quda::ColorSpinorParam sp(stage_d_[k], inv_dev_, X_full,
-                                /*pc=*/true, QUDA_CUDA_FIELD_LOCATION);
+                                /*pc=*/cb_grid, QUDA_CUDA_FIELD_LOCATION);
       stage_csf_[k] = std::make_unique<quda::ColorSpinorField>(sp);
     }
   }
@@ -416,10 +437,10 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
   }
 #endif
 
-  DTXQCDMpcOp &mpc_;
+  MopGridT &mpc_;
   int cb_ = Odd;
 #ifdef GRID_HAVE_QUDA
-  DTXQCDMpcOpQUDA_EO *Mq_ = nullptr;
+  MopQudaT *Mq_ = nullptr;
   DtxqcdQudaStyleC::DoubledStateCSF in_q_, mid_q_, out_q_, scr_q_;
   int X_full_[4];
   bool csf_ready_ = false;
@@ -434,5 +455,17 @@ class DtxqcdPackedMpcHermOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
 #endif
   DTXQCDFermionDoubled tmp_in_, tmp_mid_, tmp_out_;
 };
+
+#ifdef GRID_HAVE_QUDA
+// Odd-CB Schur pair (the original instantiation) and the full-volume pair.
+typedef DtxqcdPackedHermOpT<DTXQCDMpcOp, DTXQCDMpcOpQUDA_EO>
+    DtxqcdPackedMpcHermOp;
+typedef DtxqcdPackedHermOpT<DTXQCDMOp, DTXQCDMpcOpQUDA>
+    DtxqcdPackedFullHermOp;
+#else
+// Non-QUDA builds: dummy second parameter (never dereferenced).
+typedef DtxqcdPackedHermOpT<DTXQCDMpcOp, void> DtxqcdPackedMpcHermOp;
+typedef DtxqcdPackedHermOpT<DTXQCDMOp, void> DtxqcdPackedFullHermOp;
+#endif
 
 NAMESPACE_END(Grid);
