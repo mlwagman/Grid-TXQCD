@@ -39,6 +39,8 @@
 //   the coarse solves with IRL evecs of the coarse operator
 //   SMOOTH_SP(0) — run the smoother's matvecs in single precision via the
 //   adapter's SP chain (FULLVOL substrate only; outer stays DP)
+//   THREE_LEVEL(0) — nested-ADEF2 coarse solvers (NBASIS=64 only);
+//   BLOCK2(2.2.2.2) L2_ORD(300) L2_SMOOTH_IT(8) L2_MIRS_SHIFT GEOM2(nnn)
 //   SETUP_PREFIX(unset) — cache basis+coarse op via LIME per
 //   (nbasis, geom, block); existing files -> load and skip setup entirely
 //   (knob scans of smoother/coarse params then cost only the solve)
@@ -259,6 +261,12 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
   std::unique_ptr<NonLocalStencilGeometry> geom;
   if (P.geom == "nearest")
     geom.reset(new NearestStencilGeometry4D(&Coarse4d));
+  else if (P.geom == "nn")
+    // 25-point middle ground: the 9-point truncation of the squared-op
+    // Galerkin operator is INDEFINITE at lambda=3 (negative coarse evals,
+    // v6 job 1298092), while the 81-point nnn stencil's depth-4 padded
+    // links are OOM at nbasis=64.
+    geom.reset(new NextToNearestStencilGeometry4D(&Coarse4d));
   else
     geom.reset(new NextToNextToNextToNearestStencilGeometry4D(&Coarse4d));
   LittleDiracOperator LittleDiracOp(*geom, FineGrid, &Coarse4d);
@@ -267,10 +275,13 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
   double cheby_hi = (P.cheby_hi > 0) ? P.cheby_hi : 1.1 * lmax;
   double cheby_lo = (P.cheby_lo > 0) ? P.cheby_lo : 1.0e-3 * lmax;
 
-  // Cached-setup path: SETUP_PREFIX + existing files -> skip subspace+coarsen.
+  // Cached-setup path: SETUP_PREFIX + existing files.  Basis and coarse
+  // operator load INDEPENDENTLY — a coarsen-phase crash (e.g. the nb64 OOM,
+  // 2026-07-04, which cost a 51-min basis) leaves a usable saved basis that
+  // a rerun picks up, recomputing only the coarse links.
   std::string setup_prefix = env_str("SETUP_PREFIX", "");
   std::string setup_tag;
-  bool setup_loaded = false;
+  bool basis_loaded = false, ldop_loaded = false;
 #ifdef HAVE_LIME
   if (!setup_prefix.empty()) {
     std::ostringstream tag;
@@ -279,18 +290,24 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
     setup_tag = tag.str();
     std::string bf = setup_prefix + ".basis." + setup_tag;
     std::string of = setup_prefix + ".ldop." + setup_tag;
-    if (file_exists(bf) && file_exists(of)) {
+    if (file_exists(bf)) {
       double tl = usecond();
       LoadBasis(Aggregates, bf);
       Aggregates.Orthogonalise();  // idempotent on a saved-orthonormal basis
-      LoadOperator(LittleDiracOp, of);
-      setup_loaded = true;
-      std::cout << GridLogMessage << "[gridmg] setup LOADED from "
-                << setup_prefix << ".{basis,ldop}." << setup_tag << " in "
-                << (usecond() - tl) * 1e-6 << " s" << std::endl;
+      basis_loaded = true;
+      std::cout << GridLogMessage << "[gridmg] basis LOADED from " << bf
+                << " in " << (usecond() - tl) * 1e-6 << " s" << std::endl;
+      if (file_exists(of)) {
+        double tl2 = usecond();
+        LoadOperator(LittleDiracOp, of);
+        ldop_loaded = true;
+        std::cout << GridLogMessage << "[gridmg] ldop LOADED from " << of
+                  << " in " << (usecond() - tl2) * 1e-6 << " s" << std::endl;
+      }
     }
   }
 #endif
+  const bool setup_loaded = basis_loaded;  // legacy name for the phases below
 
   //////////////////////////////////////////////////////////////////////
   // Subspace (null vectors)
@@ -331,7 +348,18 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
     Aggregates.RefineSubspace(FineHermOp, /*Lo (unused upstream)=*/0.0, rtol,
                               rmaxit);
   }
-  if (!setup_loaded) Aggregates.Orthogonalise();
+  if (!setup_loaded) {
+    Aggregates.Orthogonalise();
+#ifdef HAVE_LIME
+    // Save the basis BEFORE coarsening: a coarsen OOM/crash must not lose
+    // the (much more expensive) subspace work.
+    if (!setup_prefix.empty()) {
+      SaveBasis(Aggregates, setup_prefix + ".basis." + setup_tag);
+      std::cout << GridLogMessage << "[gridmg] basis SAVED to "
+                << setup_prefix << ".basis." << setup_tag << std::endl;
+    }
+#endif
+  }
   double t_sub = (usecond() - t0) * 1e-6;
   size_t nc_sub = FineHermOp.ncalls - nc0;
   std::cout << GridLogMessage << "[gridmg] subspace done: " << nc_sub
@@ -342,14 +370,13 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
   //////////////////////////////////////////////////////////////////////
   nc0 = FineHermOp.ncalls;
   t0 = usecond();
-  if (!setup_loaded) {
+  if (!ldop_loaded) {
     LittleDiracOp.CoarsenOperator(FineHermOp, Aggregates);
 #ifdef HAVE_LIME
     if (!setup_prefix.empty()) {
-      SaveBasis(Aggregates, setup_prefix + ".basis." + setup_tag);
       SaveOperator(LittleDiracOp, setup_prefix + ".ldop." + setup_tag);
-      std::cout << GridLogMessage << "[gridmg] setup SAVED to "
-                << setup_prefix << ".{basis,ldop}." << setup_tag << std::endl;
+      std::cout << GridLogMessage << "[gridmg] ldop SAVED to "
+                << setup_prefix << ".ldop." << setup_tag << std::endl;
     }
 #endif
   }
@@ -443,45 +470,143 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
             << ") shift=" << mirs << (P.smooth_sp ? " [SP matvec]" : "")
             << std::endl;
 
-  TwoLevelADEF2<Field, CoarseVector, Subspace> HDCG(
-      P.mg_tol, P.mg_maxit, FineHermOp, Smoother, HPDSolveSloppy, HPDSolve,
-      Aggregates);
+  // Shared solve phase, parameterized on the level-2 solvers so the
+  // three-level variant below swaps in nested ADEF2s.
+  auto solve_phase = [&](LinearFunction<CoarseVector> &CSloppy,
+                         LinearFunction<CoarseVector> &CPrecise) -> int {
+    int lfails = 0;
+    TwoLevelADEF2<Field, CoarseVector, Subspace> HDCG(
+        P.mg_tol, P.mg_maxit, FineHermOp, Smoother, CSloppy, CPrecise,
+        Aggregates);
 
-  Field result(FineGrid);
-  result = Zero();
-  result.Checkerboard() = src.Checkerboard();
-  nc0 = FineHermOp.ncalls;
-  t0 = usecond();
-  HDCG(src, result);
-  double t_mg = (usecond() - t0) * 1e-6;
-  size_t nc_mg = FineHermOp.ncalls - nc0;
-  std::cout << GridLogMessage << "[gridmg] ADEF2 solve: " << nc_mg
-            << " fine HermOps, " << t_mg << " s" << std::endl;
+    Field result(FineGrid);
+    result = Zero();
+    result.Checkerboard() = src.Checkerboard();
+    size_t nc1 = FineHermOp.ncalls;
+    double ts = usecond();
+    HDCG(src, result);
+    double t_mg = (usecond() - ts) * 1e-6;
+    size_t nc_mg = FineHermOp.ncalls - nc1;
+    std::cout << GridLogMessage << "[gridmg] ADEF2 solve: " << nc_mg
+              << " fine HermOps, " << t_mg << " s" << std::endl;
 
-  // True residual through the fine op.
-  Field tmp(FineGrid);
-  tmp.Checkerboard() = src.Checkerboard();
-  FineHermOp.HermOp(result, tmp);
-  tmp = tmp - src;
-  RealD true_res = std::sqrt(norm2(tmp) / norm2(src));
-  bool res_ok = true_res < 10.0 * P.mg_tol;
-  if (!res_ok) ++fails;
-  std::cout << GridLogMessage << (res_ok ? "[ok]   " : "[FAIL] ")
-            << "[gridmg] ADEF2 true residual = " << true_res << " (tol "
-            << P.mg_tol << ")" << std::endl;
+    // True residual through the fine op.
+    Field tmp(FineGrid);
+    tmp.Checkerboard() = src.Checkerboard();
+    FineHermOp.HermOp(result, tmp);
+    tmp = tmp - src;
+    RealD true_res = std::sqrt(norm2(tmp) / norm2(src));
+    bool res_ok = true_res < 10.0 * P.mg_tol;
+    if (!res_ok) ++lfails;
+    std::cout << GridLogMessage << (res_ok ? "[ok]   " : "[FAIL] ")
+              << "[gridmg] ADEF2 true residual = " << true_res << " (tol "
+              << P.mg_tol << ")" << std::endl;
 
-  if (ref_sol) {
-    RealD rd = packed_rel_diff(result, *ref_sol);
-    bool ok = rd < 100.0 * P.mg_tol;
-    if (!ok) ++fails;
-    std::cout << GridLogMessage << (ok ? "[ok]   " : "[FAIL] ")
-              << "[gridmg] ADEF2 vs baseline CG solution rel = " << rd
+    if (ref_sol) {
+      RealD rd = packed_rel_diff(result, *ref_sol);
+      bool ok = rd < 100.0 * P.mg_tol;
+      if (!ok) ++lfails;
+      std::cout << GridLogMessage << (ok ? "[ok]   " : "[FAIL] ")
+                << "[gridmg] ADEF2 vs baseline CG solution rel = " << rd
+                << std::endl;
+    }
+    std::cout << GridLogMessage << "[gridmg] totals: subspace " << t_sub
+              << " s + coarsen " << t_coarsen << " s (setup), solve " << t_mg
+              << " s" << std::endl;
+    return lfails;
+  };
+
+  //////////////////////////////////////////////////////////////////////
+  // THREE_LEVEL=1 (compiled for nbasis==64 only): the outer ADEF2's coarse
+  // solvers become nested TwoLevelADEF2s — the level-2 operator (the
+  // 64-color coarse op) is itself aggregated (BLOCK2, nbasis2=32) and
+  // corrected on a third level.  The coarse vector is a proper
+  // Lattice<iVector<vTComplex,64>>, so the same algebraic machinery
+  // composes with no adapter.
+  //////////////////////////////////////////////////////////////////////
+  const bool three_level = env_int("THREE_LEVEL", 0) != 0;
+  if constexpr (nbasis == 64) {
+    if (three_level) {
+      typedef typename LittleDiracOperator::siteVector CoarseSiteVector;
+      constexpr int nbasis2 = 32;
+      // Level-2 CComplex must be iScalar-wrapped (the HDCR 3-level idiom,
+      // tests/solver/Test_dwf_hdcr_48_rb.cc:307,320) or tensor arithmetic
+      // over iVector<vTComplex,64> sites does not close.
+      typedef Aggregation<CoarseSiteVector, iScalar<vTComplex>, nbasis2>
+          Subspace2;
+      typedef GeneralCoarsenedMatrix<CoarseSiteVector, iScalar<vTComplex>,
+                                     nbasis2>
+          LittleDiracOperator2;
+      typedef typename LittleDiracOperator2::CoarseVector CCVector;
+      typedef HermitianLinearOperator<LittleDiracOperator2, CCVector>
+          HermMatrix2;
+
+      Coordinate block2 = parse_dotted(env_str("BLOCK2", "2.2.2.2"),
+                                       Coordinate(std::vector<int>{2, 2, 2, 2}));
+      Coordinate cclatt(Nd);
+      for (int d = 0; d < Nd; ++d) {
+        GRID_ASSERT(clatt[d] % block2[d] == 0);
+        cclatt[d] = clatt[d] / block2[d];
+      }
+      GridCartesian Coarse2(cclatt, GridDefaultSimd(Nd, vComplex::Nsimd()),
+                            GridDefaultMpi());
+      std::cout << GridLogMessage << "[gridmg] THREE_LEVEL: coarse2="
+                << cclatt << " nbasis2=" << nbasis2 << std::endl;
+
+      GridParallelRNG CRNG(&Coarse4d);
+      CRNG.SeedFixedIntegers({31, 32, 33, 34});
+      CoarseVector c_probe(&Coarse4d);
+      gaussian(CRNG, c_probe);
+      PowerMethod<CoarseVector> cPM;
+      RealD clmax2 = cPM(CoarseOp, c_probe);
+
+      double t2_0 = usecond();
+      Subspace2 Aggregates2(&Coarse2, &Coarse4d, 0);
+      Aggregates2.CreateSubspaceChebyshevPowerLaw(
+          CRNG, CoarseOp, nbasis2, 1.5 * clmax2, env_int("L2_ORD", 300));
+      Aggregates2.Orthogonalise();
+      std::unique_ptr<NonLocalStencilGeometry> geom2;
+      std::string g2 = env_str("GEOM2", "nnn");
+      if (g2 == "nearest")
+        geom2.reset(new NearestStencilGeometry4D(&Coarse2));
+      else if (g2 == "nn")
+        geom2.reset(new NextToNearestStencilGeometry4D(&Coarse2));
+      else
+        geom2.reset(new NextToNextToNextToNearestStencilGeometry4D(&Coarse2));
+      LittleDiracOperator2 LittleDiracOp2(*geom2, &Coarse4d, &Coarse2);
+      LittleDiracOp2.CoarsenOperator(CoarseOp, Aggregates2);
+      std::cout << GridLogMessage << "[gridmg] level-2 coarsen done in "
+                << (usecond() - t2_0) * 1e-6 << " s" << std::endl;
+
+      HermMatrix2 CoarseOp2(LittleDiracOp2);
+      ZeroGuesser<CCVector> zg2;
+      ConjugateGradient<CCVector> CGcc(P.coarse_tol, 30000, false);
+      ConjugateGradient<CCVector> CGccSloppy(P.coarse_tol_sloppy, 30000,
+                                             false);
+      HPDSolver<CCVector> L3Solve(CoarseOp2, CGcc, zg2);
+      HPDSolver<CCVector> L3SolveSloppy(CoarseOp2, CGccSloppy, zg2);
+
+      double mirs2 = env_real("L2_MIRS_SHIFT", 0.02 * clmax2);
+      ShiftedHermOpLinearOperator<CoarseVector> ShiftedCoarseOp(CoarseOp,
+                                                                mirs2);
+      CGSmoother<CoarseVector> CGsmooth2(env_int("L2_SMOOTH_IT", 8),
+                                         ShiftedCoarseOp);
+
+      TwoLevelADEF2<CoarseVector, CCVector, Subspace2> InnerSloppy(
+          P.coarse_tol_sloppy, 3000, CoarseOp, CGsmooth2, L3SolveSloppy,
+          L3Solve, Aggregates2);
+      TwoLevelADEF2<CoarseVector, CCVector, Subspace2> InnerPrecise(
+          P.coarse_tol, 3000, CoarseOp, CGsmooth2, L3SolveSloppy, L3Solve,
+          Aggregates2);
+
+      return fails + solve_phase(InnerSloppy, InnerPrecise);
+    }
+  } else if (three_level) {
+    std::cout << GridLogMessage << "[gridmg] THREE_LEVEL is compiled for "
+                                   "NBASIS=64 only — running two-level"
               << std::endl;
   }
-  std::cout << GridLogMessage << "[gridmg] totals: subspace " << t_sub
-            << " s + coarsen " << t_coarsen << " s (setup), solve " << t_mg
-            << " s" << std::endl;
-  return fails;
+  return fails + solve_phase(HPDSolveSloppy, HPDSolve);
 }
 
 // Gates A-D + benchmark + MG dispatch, templated over the (HermOp, Grid-op)
@@ -637,9 +762,13 @@ int run_suite(GridCartesian &Grid_, GridBase *FineGrid, int cb,
         fails += run_mg<48>(Grid_, FineGrid, cb, FineHermOp, pRNG, src, ref,
                             lmax, Pmg);
         break;
+      case 64:
+        fails += run_mg<64>(Grid_, FineGrid, cb, FineHermOp, pRNG, src, ref,
+                            lmax, Pmg);
+        break;
       default:
         std::cout << GridLogMessage
-                  << "[gridmg] NBASIS must be one of 24/32/48 (compiled "
+                  << "[gridmg] NBASIS must be one of 24/32/48/64 (compiled "
                      "instantiations); got "
                   << nb << std::endl;
         ++fails;
@@ -746,6 +875,10 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage << "==== gridmg "
             << (fails ? "FAILED" : "PASSED") << " (" << fails
             << " failures) ====" << std::endl;
-  Grid_finalize();
-  return fails ? 1 : 0;
+  // House pattern for QUDA-linked drivers (see the meas programs): skip
+  // Grid/QUDA teardown entirely — the finalize path can abort (rc 134,
+  // benign but ugly) or DEADLOCK (a smoke gate hung a batch chain for 5 h
+  // on 2026-07-04).  All results are printed and flushed by now.
+  std::cout.flush();
+  std::_Exit(fails ? 1 : 0);
 }
