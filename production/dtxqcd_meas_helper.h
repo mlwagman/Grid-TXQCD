@@ -21,11 +21,20 @@
 //
 // Solve path:
 //
+//   DTXQCD_MEAS_GRIDMG=1 (default OFF): full-volume Grid-MG solve —
+//     HDCG/TwoLevelADEF2 + coarse deflation through the packed adapter on
+//     the device M†M (dtxqcd_gridmg_solver.h).  The λ<=4 frontier path:
+//     EO-Schur is sick there (M_ee cliff) and MG beats full CG (λ=4: MG
+//     ~250 outers vs CG 3188 iters; λ=3: 2804 outers/724 s vs 70612
+//     iters/1711 s).  Per-config setup (basis+coarsen+IRL) amortizes over
+//     the solve count; cache with DTXQCD_MEAS_MG_SETUP_PREFIX.  Knobs:
+//     DTXQCD_MEAS_MG_{NBASIS,BLOCK,GEOM,ORD,NEV,...} — see the header.
 //   DTXQCD_MEAS_EO=1 (default under GRID_HAVE_QUDA, 2026-07-02): EO/Schur-
 //     preconditioned solve — odd-block Mpc CG on the device (the same EO
 //     Style C CG the HMC uses), even block back-substituted through the
 //     site-local M_ee^{-1} caches.  ~10× per solve vs full-volume at λ=10
 //     (fewer iterations × half the volume); validated correlator-identical.
+//     The right default at λ>=4 (at λ=4: EO CG 68.9 s vs full CG 77 s).
 //   DTXQCD_MEAS_EO=0 + DTXQCD_MEAS_QUDA=1: full-volume single-shift CG on
 //     M†M through DTXQCDMpcOpQUDA — the exact full-volume operator the
 //     non-EO HMC drives (QUDA-offloaded Wilson hop + device aux).
@@ -46,6 +55,7 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA_EO.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMultiShiftCGQUDA_StyleC.h>
+#include "dtxqcd_gridmg_solver.h"
 #endif
 #include <memory>
 
@@ -83,10 +93,31 @@ class DtxqcdMeasSolver {
         Mop_cpu_(cpu_op_) {
     use_quda_ = ResolveUseQuda();
     use_eo_   = ResolveUseEO();
+    use_gridmg_ = ResolveUseGridMG();
 #ifdef GRID_HAVE_QUDA
     if (use_quda_) {
       Grid::Quda::initialize();  // idempotent
-      if (use_eo_) {
+      if (use_gridmg_) {
+        // Grid-MG on the full-volume M†M (the λ<=4 frontier path).  Rides
+        // the same device op as the full-volume CG branch; the packed
+        // adapter + MG hierarchy build once per config in the solver ctor.
+        quda_op_.reset(new Grid::DTXQCDMpcOpQUDA(
+            U_inv_, grid, rbgrid, mass, csw_val,
+            U.sigma, U.pi, U.d, U.n, U.s, U.p));
+        quda_op_->SetAuxStatic(true);
+        packed_hop_.reset(new Grid::DtxqcdPackedFullHermOp(
+            Mop_cpu_, *quda_op_, &grid, Grid::Even));
+        Grid::GridParallelRNG mgRNG(&grid);
+        mgRNG.SeedFixedIntegers({987654, 271828, 314159, 665772});
+        const int nb = MgNbasis();
+        if (nb == 64) {
+          mg64_.reset(new Grid::DtxqcdGridMGSolver<64>(
+              *packed_hop_, &grid, mgRNG, tol_, maxit_));
+        } else {
+          mg32_.reset(new Grid::DtxqcdGridMGSolver<32>(
+              *packed_hop_, &grid, mgRNG, tol_, maxit_));
+        }
+      } else if (use_eo_) {
         eo_quda_op_.reset(new Grid::DTXQCDMpcOpQUDA_EO(
             cpu_op_, U_inv_, grid, rbgrid, mass, csw_val,
             U.sigma, U.pi, U.d, U.n, U.s, U.p));
@@ -106,8 +137,10 @@ class DtxqcdMeasSolver {
               << " stout(nsmear=" << stout_nsmear_inv
               << ", rho=" << stout_rho_inv << ")"
               << " tol=" << tol_ << " maxit=" << maxit_
-              << " backend=" << (use_quda_ ? (use_eo_ ? "QUDA-EO" : "QUDA")
-                                           : "Grid-CPU")
+              << " backend="
+              << (use_quda_ ? (use_gridmg_ ? "QUDA-GridMG"
+                                           : (use_eo_ ? "QUDA-EO" : "QUDA"))
+                            : "Grid-CPU")
               << std::endl;
   }
 
@@ -116,11 +149,29 @@ class DtxqcdMeasSolver {
   void Solve(const Grid::DTXQCDFermionDoubled &source,
              Grid::DTXQCDFermionDoubled &x) {
 #ifdef GRID_HAVE_QUDA
+    if (use_gridmg_ && use_quda_) { SolveGridMG(source, x); return; }
     if (use_eo_ && use_quda_) { SolveEO(source, x); return; }
     if (use_quda_ && quda_op_) { SolveQuda(source, x); return; }
 #endif
     SolveWith(Mop_cpu_, source, x);
   }
+
+#ifdef GRID_HAVE_QUDA
+  // Grid-MG solve: x = (M†M)^{-1} M† source through the packed adapter's
+  // deflated ADEF2 (dtxqcd_gridmg_solver.h).  Same M† source prep as
+  // SolveQuda; pack -> MG solve -> unpack.
+  void SolveGridMG(const Grid::DTXQCDFermionDoubled &source,
+                   Grid::DTXQCDFermionDoubled &x) {
+    using namespace Grid;
+    DTXQCDFermionDoubled b(source.Grid());
+    quda_op_->Mdag(source, b);  // one-time M† source (host apply)
+    LatticeDtxqcdPacked bp(source.Grid()), xp(source.Grid());
+    DtxqcdPackDoubled(b, bp);
+    if (mg64_) mg64_->solve(bp, xp);
+    else       mg32_->solve(bp, xp);
+    DtxqcdUnpackDoubled(xp, x);
+  }
+#endif
 
 #ifdef GRID_HAVE_QUDA
   // EO-preconditioned solve (DTXQCD_MEAS_EO=1, 2026-07-02, rides the EO
@@ -257,6 +308,25 @@ class DtxqcdMeasSolver {
 #endif
   }
 
+  // DTXQCD_MEAS_GRIDMG: full-volume Grid-MG measurement solve (default OFF;
+  // the λ<=4 frontier path).  Takes precedence over DTXQCD_MEAS_EO.
+  static bool ResolveUseGridMG() {
+#ifndef GRID_HAVE_QUDA
+    return false;
+#else
+    const char *e = std::getenv("DTXQCD_MEAS_GRIDMG");
+    return e && *e && std::atoi(e) != 0;
+#endif
+  }
+
+  // Compile-time nbasis dispatch: 32 (λ>=4-ish spectra) or 64 (λ=3).
+  static int MgNbasis() {
+    const char *e = std::getenv("DTXQCD_MEAS_MG_NBASIS");
+    int nb = (e && *e) ? std::atoi(e) : 32;
+    GRID_ASSERT(nb == 32 || nb == 64);
+    return nb;
+  }
+
   // b = M† source ; then CG on (M†M) x = b.
   template <class Op>
   void SolveWith(Op &op, const Grid::DTXQCDFermionDoubled &source,
@@ -311,12 +381,16 @@ class DtxqcdMeasSolver {
   int maxit_;
   bool use_quda_ = false;
   bool use_eo_ = false;
+  bool use_gridmg_ = false;
   Grid::LatticeGaugeField U_inv_;
   Grid::DTXQCDWilsonCloverFermionEO cpu_op_;
   Grid::DTXQCDMOp Mop_cpu_;
 #ifdef GRID_HAVE_QUDA
   std::unique_ptr<Grid::DTXQCDMpcOpQUDA> quda_op_;
   std::unique_ptr<Grid::DTXQCDMpcOpQUDA_EO> eo_quda_op_;
+  std::unique_ptr<Grid::DtxqcdPackedFullHermOp> packed_hop_;
+  std::unique_ptr<Grid::DtxqcdGridMGSolver<32>> mg32_;
+  std::unique_ptr<Grid::DtxqcdGridMGSolver<64>> mg64_;
 #endif
 };
 

@@ -276,14 +276,14 @@ Test_txqcd_sign_aux_draws: Test_txqcd_sign_aux_draws.o
 # DTXQCD measurements that build the QUDA full-volume M operator via
 # dtxqcd_meas_helper.h (DTXQCDMpcOpQUDA) must link the SP/DP native-kernel
 # impl objects, exactly like the HMC test above.  The catch-all rule does not.
-meas_baryon_dtxqcd.o: meas_baryon_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helper.h
+meas_baryon_dtxqcd.o: meas_baryon_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helper.h dtxqcd_gridmg_solver.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 meas_baryon_dtxqcd: meas_baryon_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ meas_baryon_dtxqcd.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
-meas_conn_dtxqcd.o: meas_conn_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helper.h
+meas_conn_dtxqcd.o: meas_conn_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helper.h dtxqcd_gridmg_solver.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 meas_conn_dtxqcd: meas_conn_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)

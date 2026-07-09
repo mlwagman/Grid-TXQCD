@@ -550,26 +550,44 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
       std::cout << GridLogMessage << "[gridmg] MRHS: nrhs=" << mrhs_nrhs
                 << " coarse-mrhs grid " << rhLatt << std::endl;
 
-      typedef MultiGeneralCoarsenedMatrix<vDtxqcdPackedVector, vTComplex,
-                                          nbasis>
-          MrhsOp_t;
-      MrhsOp_t mrhsOp(*geom, &CoarseMrhs);
-      size_t ncm0 = FineHermOp.ncalls;
-      double tcm0 = usecond();
-      mrhsOp.CoarsenOperator(FineHermOp, Aggregates, &Coarse4d);
-      std::cout << GridLogMessage << "[gridmg] MRHS CoarsenOperator: "
-                << (FineHermOp.ncalls - ncm0) << " fine HermOps, "
-                << (usecond() - tcm0) * 1e-6 << " s" << std::endl;
-
-      typedef HermitianLinearOperator<MrhsOp_t, CoarseVector> MrhsHermMatrix;
-      MrhsHermMatrix MrhsCoarseOp(mrhsOp);
-      ConjugateGradient<CoarseVector> mrhsCGsloppy(P.coarse_tol_sloppy,
-                                                   30000, false);
-      ConjugateGradient<CoarseVector> mrhsCG(P.coarse_tol, 30000, false);
-      DoNothingGuesser<CoarseVector> DoNothing;
-      HPDSolver<CoarseVector> MrhsSolveSloppy(MrhsCoarseOp, mrhsCGsloppy,
-                                              DoNothing);
-      HPDSolver<CoarseVector> MrhsSolve(MrhsCoarseOp, mrhsCG, DoNothing);
+      // NB no MultiGeneralCoarsenedMatrix / mrhs CoarsenOperator: with the
+      // per-rhs coarse solves below, the batched coarse op is unused —
+      // dropping it saves its ~37 s re-probe and the BLAS_A/B footprint.
+      // Coarse solves loop the deflated single-RHS solve over rhs slices.
+      // Both batched alternatives fail on this layout: plain CG on the 5D
+      // field shares one alpha/beta across rhs (lane-summed inner
+      // products -> lambda=3 outer stalls ~1e-3, job 1299210), and
+      // BlockCGrQ's slice inner products Eigen-assert on the
+      // rhs-in-SIMD-lanes dim-0 (job 1299303; upstream phys48_blockcg
+      // ships ChebyshevInverter with its BCG line commented, same reason).
+      // LAMBDA=3 NEGATIVE (job 1299308): even with these per-rhs-correct
+      // coarse solves the mrhs OUTER stalls ~1e-3 at the 4000 cap while
+      // single-RHS TwoLevelADEF2 converges in 2804 with the identical
+      // setup/deflation/smoother — the TwoLevelCGmrhs recurrence itself
+      // underperforms at lambda=3 conditioning.  lambda=4 converged with
+      // verified true residuals (f03dd41f numbers stand).  lambda=3
+      // production path = single-RHS nev-96 (724 s).  The wrapper zeroes
+      // the guess; deflation is applied inside via the DeflatedGuesser
+      // (the driver's Vstart insert is redundant with it).
+      struct PerRhsCoarseSolve : public LinearFunction<CoarseVector> {
+        using LinearFunction<CoarseVector>::operator();
+        LinearFunction<CoarseVector> &solve;
+        GridBase *c4d;
+        int nrhs;
+        PerRhsCoarseSolve(LinearFunction<CoarseVector> &s, GridBase *g, int n)
+            : solve(s), c4d(g), nrhs(n) {}
+        void operator()(const CoarseVector &src, CoarseVector &sol) {
+          CoarseVector s(c4d), x(c4d);
+          for (int r = 0; r < nrhs; r++) {
+            ExtractSliceFast(s, const_cast<CoarseVector &>(src), r, 0);
+            x = Zero();
+            solve(s, x);
+            InsertSliceFast(x, sol, r, 0);
+          }
+        }
+      };
+      PerRhsCoarseSolve MrhsSolveSloppy(HPDSolveSloppy, &Coarse4d, mrhs_nrhs);
+      PerRhsCoarseSolve MrhsSolve(HPDSolve, &Coarse4d, mrhs_nrhs);
 
       MultiRHSDeflation<CoarseVector> MrhsDeflator;
       MrhsDeflator.Allocate((int)c_eval.size(), &Coarse4d);
@@ -614,10 +632,8 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
                     << std::endl;
       }
       if (bad) fails += bad;
-      std::cout << GridLogMessage << "[gridmg] MRHS totals: coarsen "
-                << (usecond() - tcm0) * 1e-6 << " s incl-solve, solve "
-                << t_mrhs << " s, " << t_mrhs / mrhs_nrhs << " s/rhs"
-                << std::endl;
+      std::cout << GridLogMessage << "[gridmg] MRHS totals: solve " << t_mrhs
+                << " s, " << t_mrhs / mrhs_nrhs << " s/rhs" << std::endl;
       return fails;
     }
   } else if (mrhs_nrhs > 0) {
