@@ -278,7 +278,12 @@ class DtxqcdGridMGSolver {
             *ldop_));
 
     // ---- coarse deflation (IRL with the Nk buffer, deflation-grade tol) --
-    int nev = env_int("DTXQCD_MEAS_MG_NEV", 96);
+    // NEV default 0 (OFF): deflation only pays where a dense low coarse band
+    // exists (lambda=3: nev=96 -> 2.8x).  At lambda>=4 the coarse band is
+    // nearly empty, so an IRL asking for N low modes that do NOT exist grinds
+    // 0/N every restart and ABORTS inside calc() (job 1299370, nev=16 @lam4).
+    // Set DTXQCD_MEAS_MG_NEV=96 explicitly at lambda=3; leave 0 elsewhere.
+    int nev = env_int("DTXQCD_MEAS_MG_NEV", 0);
     if (nev > 0) {
       GridParallelRNG CRNG(coarse_.get());
       CRNG.SeedFixedIntegers({271828, 314159, 161803, 141421});
