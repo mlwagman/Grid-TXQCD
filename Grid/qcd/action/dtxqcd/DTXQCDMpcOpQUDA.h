@@ -70,6 +70,7 @@
 // driver does).  The strong out-of-line definitions live in
 // dtxqcd_quda_<name>_native_impl.cc compiled with a clean include scope.
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_decl.h>
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_decl.h>
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_csf_helpers.h>
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_decl.h>
 #include <Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_decl.h>
@@ -294,6 +295,7 @@ class DTXQCDMpcOpQUDA {
         DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_,
                                                       p_, aux_cache_);
         aux_packed_ = true;
+        aux_v3_packed_ = false;  // V3 SoA copy derives from the AoS pack
       }
       DtxqcdQudaAuxKernelDevice::ApplyAuxKernel(
           aux_cache_,
@@ -409,6 +411,23 @@ class DTXQCDMpcOpQUDA {
     return style_c_sp_state_.cuda_param_tmpl;
   }
 
+  // Env-gated per-step wallclock profile of M_device_csf (aux-fusion scoping,
+  // 2026-07-04): DTXQCD_MDEVICE_PROFILE=1 accumulates seconds per phase and
+  // prints every 100 applies.  Timers wrap the existing device-wide syncs so
+  // no extra synchronization is introduced beyond one final query.
+  static bool mdevice_profile_() {
+    static const bool v = [] {
+      const char *e = std::getenv("DTXQCD_MDEVICE_PROFILE");
+      return e && std::atoi(e) != 0;
+    }();
+    return v;
+  }
+  struct MDeviceProf {
+    double t_pre = 0, t_dirac = 0, t_post = 0, t_aux = 0, t_sync = 0;
+    long n = 0;
+  };
+  MDeviceProf mprof_;
+
   void M_device_csf(quda::ColorSpinorField *in_upper[DtxqcdNf],
                     quda::ColorSpinorField *in_lower[DtxqcdNf],
                     quda::ColorSpinorField *out_upper[DtxqcdNf],
@@ -420,12 +439,16 @@ class DTXQCDMpcOpQUDA {
     init_aux_perm_();
 
     int V = Quda::local_volume(grid_);
+    const bool prof = mdevice_profile_();
+    double tp0 = 0, tp1 = 0;
 
     // SYNC: caller may have just written in_upper / in_lower on Grid's
     // accelerator_for stream (e.g. Gamma5InplaceNative inside Mdag_device_csf
     // wrap).  dirac->M/Mdag below reads them on QUDA's stream — need explicit
     // barrier or the kernels race.
+    if (prof) tp0 = usecond();
     cudaDeviceSynchronize();
+    if (prof) { tp1 = usecond(); mprof_.t_sync += (tp1 - tp0) * 1e-6; }
 
     // Step 1: PreMatLowerNative on in_lower → scratch_lower.
     for (int a = 0; a < DtxqcdNf; ++a) {
@@ -435,7 +458,9 @@ class DTXQCDMpcOpQUDA {
 
     // SYNC: PreMatLowerNative writes scratch_lower on Grid's stream;
     // dirac->Mdag below reads it on QUDA's stream.
+    if (prof) tp0 = usecond();
     cudaDeviceSynchronize();
+    if (prof) { mprof_.t_pre += (usecond() - tp1) * 1e-6; tp1 = usecond(); }
 
     // Step 2: dirac->M/Mdag on persistent Dirac, direct on caller's CSFs.
     // Followed by quda::blas::ax(0.5/kappa) to match MatQuda's implicit
@@ -461,10 +486,16 @@ class DTXQCDMpcOpQUDA {
     // SYNC: dirac->M/Mdag and blas::ax write out_upper/out_lower on QUDA's
     // stream; Step 3/4 native kernels read on Grid's stream.
     cudaDeviceSynchronize();
+    if (prof) { mprof_.t_dirac += (usecond() - tp1) * 1e-6; tp1 = usecond(); }
 
     // Step 3: PostMatLowerNative (in place).
     for (int a = 0; a < DtxqcdNf; ++a) {
       DtxqcdQudaPostMatLowerNative::ApplyPostMatLowerNative(*out_lower[a]);
+    }
+    if (prof) {  // extra sync ONLY in profile mode: separates post from aux
+      cudaDeviceSynchronize();
+      mprof_.t_post += (usecond() - tp1) * 1e-6;
+      tp1 = usecond();
     }
 
     // Step 4: aux contribution.  Re-pack aux to device on every call (cheap),
@@ -476,16 +507,58 @@ class DTXQCDMpcOpQUDA {
       DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_,
                                                     p_, aux_cache_);
       aux_packed_ = true;
+      aux_v3_packed_ = false;  // V3 SoA copy derives from the AoS pack
     }
-    DtxqcdQudaAuxKernelNativeV2::ApplyAuxKernelNative(
-        aux_cache_, aux_perm_d_,
-        *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
-        *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
-        /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    if (aux_kernel_v4_()) {
+      // V4 (DTXQCD_AUX_KERNEL_V4=1): decomposition probe — thread-per-
+      // (site, output-flavor) on the unchanged AoS cache (see the v3 decl
+      // header).  DP call site only.
+      DtxqcdQudaAuxKernelNativeV3::ApplyAuxKernelNativeV4(
+          aux_cache_, aux_perm_d_,
+          *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
+          *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
+          /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    } else if (aux_kernel_v3_()) {
+      // V3 (DTXQCD_AUX_KERNEL_V3=1): SoA repack once per aux pack, then the
+      // bandwidth-fixed kernel — bit-identical arithmetic to V2 (see
+      // dtxqcd_quda_aux_kernel_native_v3_decl.h and the aux-fusion design
+      // doc; V2 was 8.6 ms = 75% of this apply).
+      if (!aux_v3_packed_) {
+        DtxqcdQudaAuxKernelNativeV3::RepackAuxV3(aux_cache_, aux_perm_d_,
+                                                 (std::size_t)V,
+                                                 aux_cache_v3_);
+        aux_v3_packed_ = true;
+      }
+      DtxqcdQudaAuxKernelNativeV3::ApplyAuxKernelNativeV3(
+          aux_cache_v3_,
+          *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
+          *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
+          /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    } else {
+      DtxqcdQudaAuxKernelNativeV2::ApplyAuxKernelNative(
+          aux_cache_, aux_perm_d_,
+          *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
+          *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
+          /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    }
 
     // Final barrier — outputs are now visible to all subsequent callers
     // regardless of which stream they use.
     cudaDeviceSynchronize();
+    if (prof) {
+      mprof_.t_aux += (usecond() - tp1) * 1e-6;
+      if (++mprof_.n % 100 == 0) {
+        double tot = mprof_.t_sync + mprof_.t_pre + mprof_.t_dirac +
+                     mprof_.t_post + mprof_.t_aux;
+        std::cout << GridLogMessage << "[mdevice-prof] " << mprof_.n
+                  << " applies, per-apply ms: total " << tot / mprof_.n * 1e3
+                  << " = entry-sync " << mprof_.t_sync / mprof_.n * 1e3
+                  << " + pre " << mprof_.t_pre / mprof_.n * 1e3
+                  << " + dirac " << mprof_.t_dirac / mprof_.n * 1e3
+                  << " + post " << mprof_.t_post / mprof_.n * 1e3
+                  << " + aux " << mprof_.t_aux / mprof_.n * 1e3 << std::endl;
+      }
+    }
   }
 
   void Mdag_device_csf(quda::ColorSpinorField *in_upper[DtxqcdNf],
@@ -574,12 +647,27 @@ class DTXQCDMpcOpQUDA {
       DtxqcdQudaAuxKernelDevice::pack_aux_to_device(sigma_, pi_, d_, n_, s_,
                                                     p_, aux_cache_);
       aux_packed_ = true;
+      aux_v3_packed_ = false;  // V3 SoA copy derives from the AoS pack
     }
-    DtxqcdQudaAuxKernelNativeV2Sp::ApplyAuxKernelNativeSp(
-        aux_cache_, aux_perm_d_,
-        *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
-        *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
-        /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    if (aux_kernel_v3_()) {
+      if (!aux_v3_packed_) {
+        DtxqcdQudaAuxKernelNativeV3::RepackAuxV3(aux_cache_, aux_perm_d_,
+                                                 (std::size_t)V,
+                                                 aux_cache_v3_);
+        aux_v3_packed_ = true;
+      }
+      DtxqcdQudaAuxKernelNativeV3::ApplyAuxKernelNativeV3Sp(
+          aux_cache_v3_,
+          *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
+          *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
+          /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    } else {
+      DtxqcdQudaAuxKernelNativeV2Sp::ApplyAuxKernelNativeSp(
+          aux_cache_, aux_perm_d_,
+          *in_upper[0], *in_upper[1], *in_lower[0], *in_lower[1],
+          *out_upper[0], *out_upper[1], *out_lower[0], *out_lower[1],
+          /*transpose_aux=*/true, /*use_dn_conj=*/true);
+    }
 
     cudaDeviceSynchronize();
   }
@@ -634,7 +722,38 @@ class DTXQCDMpcOpQUDA {
     if (aux_cache_.allocated()) {
       DtxqcdQudaAuxKernelDevice::free_aux_cache(aux_cache_);
     }
+    if (aux_cache_v3_.allocated()) {
+      DtxqcdQudaAuxKernelNativeV3::free_aux_cache_v3(aux_cache_v3_);
+    }
     aux_packed_ = false;
+    aux_v3_packed_ = false;
+  }
+
+  // Env DTXQCD_AUX_KERNEL_V3=1 → bandwidth-fixed SoA aux kernel (bit-identical
+  // arithmetic; see dtxqcd_quda_aux_kernel_native_v3_decl.h).  Default OFF.
+  static bool aux_kernel_v3_() {
+    static const bool v = [] {
+      const char *e = std::getenv("DTXQCD_AUX_KERNEL_V3");
+      const bool on = e && std::atoi(e) != 0;
+      std::cout << GridLogMessage << "[DTXQCDMpcOpQUDA] aux kernel variant: "
+                << (on ? "V3 (SoA, DTXQCD_AUX_KERNEL_V3=1)" : "V2 (default)")
+                << std::endl;
+      return on;
+    }();
+    return v;
+  }
+
+  // V4 decomposition probe (DP only; takes precedence over V3 when set).
+  static bool aux_kernel_v4_() {
+    static const bool v = [] {
+      const char *e = std::getenv("DTXQCD_AUX_KERNEL_V4");
+      const bool on = e && std::atoi(e) != 0;
+      if (on)
+        std::cout << GridLogMessage << "[DTXQCDMpcOpQUDA] aux kernel variant: "
+                  << "V4 (thread-per-(site,flavor) probe)" << std::endl;
+      return on;
+    }();
+    return v;
   }
 
   // Measurement-style callers whose aux fields are FIXED for the lifetime of
@@ -1040,8 +1159,10 @@ class DTXQCDMpcOpQUDA {
   // Option β device aux cache (lazily allocated on first M_device call when
   // DTXQCD_STAGEB_AUX_OPTION=B).  See aux_option_b_() / ResetAuxCache().
   DtxqcdQudaAuxKernelDevice::DeviceAuxCache aux_cache_;
+  DtxqcdQudaAuxKernelNativeV3::AuxCacheV3 aux_cache_v3_;
   bool aux_static_ = false;  // SetAuxStatic: hoist the per-call aux re-pack
   bool aux_packed_ = false;
+  bool aux_v3_packed_ = false;
 
   // Style C aux perm table (lazy-built on first M_device_csf call).  Maps
   // QUDA's native (parity, x_cb) → production EO order so the native aux

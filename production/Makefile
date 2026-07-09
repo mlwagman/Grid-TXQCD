@@ -114,20 +114,24 @@ DTXQCD_NATIVE_IMPL_SRCS = \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_sp_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_sp_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_sp_impl.cc \
-  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_sp_impl.cc
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_sp_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_sp_impl.cc
 
 DTXQCD_NATIVE_IMPL_OBJS = \
   dtxqcd_quda_gamma5_native_impl.o \
   dtxqcd_quda_pre_mat_lower_native_impl.o \
   dtxqcd_quda_post_mat_lower_native_impl.o \
   dtxqcd_quda_aux_kernel_native_v2_impl.o \
+  dtxqcd_quda_aux_kernel_native_v3_impl.o \
   dtxqcd_quda_gamma5_native_sp_impl.o \
   dtxqcd_quda_pre_mat_lower_native_sp_impl.o \
   dtxqcd_quda_post_mat_lower_native_sp_impl.o \
-  dtxqcd_quda_aux_kernel_native_v2_sp_impl.o
+  dtxqcd_quda_aux_kernel_native_v2_sp_impl.o \
+  dtxqcd_quda_aux_kernel_native_v3_sp_impl.o
 
 dtxqcd_quda_gamma5_native_impl.o: \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_impl.cc
@@ -143,6 +147,17 @@ dtxqcd_quda_post_mat_lower_native_impl.o: \
 
 dtxqcd_quda_aux_kernel_native_v2_impl.o: \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_impl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# Aux kernel V3 (DTXQCD_AUX_KERNEL_V3): SoA repack + bandwidth-fixed apply.
+dtxqcd_quda_aux_kernel_native_v3_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_decl.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+dtxqcd_quda_aux_kernel_native_v3_sp_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_sp_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_decl.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # Phase β Session B — SP variants
