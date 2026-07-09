@@ -26,8 +26,11 @@
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh
 cd /lustre2/nplqcd/Grid-DTXQCD/production
 
-CFG_DIR=/lustre2/nplqcd/Grid-DTXQCD/production/cfgs/dtxqcd_lam4.0000_tla_fromchroma_cw
-OUT_DIR=/lustre2/nplqcd/Grid-DTXQCD/production/meas_2pt/dtxqcd_lam4_baryon16
+# LAM (default 4, via --export=ALL,LAM=5): EO default is the fastest wired
+# single-rhs path at lambda>=4 (M_ee cliff is lambda<=3 only).
+LAM=${LAM:-4}
+CFG_DIR=/lustre2/nplqcd/Grid-DTXQCD/production/cfgs/dtxqcd_lam${LAM}.0000_tla_fromchroma_cw
+OUT_DIR=/lustre2/nplqcd/Grid-DTXQCD/production/meas_2pt/dtxqcd_lam${LAM}_baryon16
 mkdir -p "$OUT_DIR"
 NTSRC=${NTSRC:-48}   # every source timeslice (T); binary caps to T anyway
 NGPU=4
@@ -37,7 +40,7 @@ TRAJS=""
 for t in $(ls -v "$CFG_DIR"/ckpoint_lat.* | grep -v daux | sed 's/.*\.//'); do
   [ "$t" -gt 20 ] 2>/dev/null && TRAJS="$TRAJS $t"
 done
-echo "=== baryon16 farm lambda=4  trajs:$TRAJS  ntsrc=$NTSRC ==="
+echo "=== baryon16 farm lambda=$LAM  trajs:$TRAJS  ntsrc=$NTSRC ==="
 
 declare -a SLOT_PID
 launch() {  # $1=traj $2=gpu
@@ -45,7 +48,7 @@ launch() {  # $1=traj $2=gpu
   echo "  [launch] traj=$traj -> GPU $gpu"
   srun --overlap -N1 -n1 -c16 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES="$gpu" \
-        LATT=16.16.16.48 LAMBDA_DTXQCD=4 MASS_LIGHT_DTXQCD=-0.245 \
+        LATT=16.16.16.48 LAMBDA_DTXQCD="$LAM" MASS_LIGHT_DTXQCD=-0.245 \
         CFG_DIR="$CFG_DIR" DATA_DIR="$OUT_DIR" \
         MEAS_BARYON_NTSRC="$NTSRC" CG_TOL=1e-6 \
         DTXQCD_MEAS_QUDA=1 OMP_NUM_THREADS=16 \
