@@ -253,7 +253,11 @@ Test_dtxqcd_multishift_quda_eo: Test_dtxqcd_multishift_quda_eo.o $(DTXQCD_NATIVE
 # dtxqcd_meas_helper.h -> DTXQCDMpcOpQUDA(_EO) -> native kernel symbols.
 Test_dtxqcd_grid_mg.o: Test_dtxqcd_grid_mg.cc params.h dtxqcd_meas_helper.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
-  ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h
+  ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h \
+  ../Grid/algorithms/multigrid/GeneralCoarsenedMatrixMultiRHS.h \
+  ../Grid/algorithms/deflation/MultiRHSBlockProject.h \
+  ../Grid/algorithms/deflation/MultiRHSDeflation.h \
+  ../Grid/algorithms/iterative/AdefMrhs.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 Test_dtxqcd_grid_mg: Test_dtxqcd_grid_mg.o $(DTXQCD_NATIVE_IMPL_OBJS)

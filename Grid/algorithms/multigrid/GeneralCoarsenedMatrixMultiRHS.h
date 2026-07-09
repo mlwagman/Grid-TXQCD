@@ -164,12 +164,19 @@ public:
     }
 
     // Neighbour table is more complicated
+    // _entries is a deviceVector (cudaMalloc'd): the raw host reads below
+    // segfault "invalid permissions" on non-unified-memory builds (works
+    // upstream only where host/device addressing is unified).  Stage a host
+    // copy once.  [DTXQCD local fix]
+    std::vector<GeneralStencilEntry> h_entries(Stencil._entries.size());
+    acceleratorCopyFromDevice(&Stencil._entries[0], h_entries.data(),
+                              h_entries.size()*sizeof(GeneralStencilEntry));
     int32_t j=0; // Interior point counter (unpadded)
     for(int32_t s=0;s<padded_sites;s++){ // 4 volume, padded
       int ghost_zone=0;
       for(int32_t point = 0 ; point < geom.npoint; point++){
 	int i=s*orhs*geom.npoint+point;
-	if( Stencil._entries[i]._wrap ) { // stencil is indexed by the oSite of the CoarseGridMulti, hence orhs factor
+	if( h_entries[i]._wrap ) { // stencil is indexed by the oSite of the CoarseGridMulti, hence orhs factor
 	  ghost_zone=1; // If general stencil wrapped in any direction, wrap=1
 	}
       }
@@ -177,7 +184,7 @@ public:
       if( ghost_zone==0) {
 	for(int32_t point = 0 ; point < geom.npoint; point++){
 	  int i=s*orhs*geom.npoint+point;
- 	  int32_t nbr = Stencil._entries[i]._offset*CComplex::Nsimd(); // oSite -> lSite
+ 	  int32_t nbr = h_entries[i]._offset*CComplex::Nsimd(); // oSite -> lSite
 	  GRID_ASSERT(nbr<BLAS_B.size());
 	  ComplexD * ptr = (ComplexD *)&BLAS_B[nbr];
 	  acceleratorPut(BLAS_BP[point][j],ptr); // neighbour indexing in ghost zone volume

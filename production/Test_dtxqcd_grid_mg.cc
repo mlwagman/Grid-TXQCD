@@ -53,6 +53,7 @@
 #include <Grid/lattice/PaddedCell.h>
 #include <Grid/stencil/GeneralLocalStencil.h>
 #include <Grid/algorithms/iterative/AdefGeneric.h>
+#include <Grid/algorithms/iterative/AdefMrhs.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDPackedField.h>
@@ -412,7 +413,12 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
     double irl_lo =
         (P.coarse_irl_lo > 0) ? P.coarse_irl_lo : 1.0e-3 * clmax;
     const int Nstop = P.coarse_nev;
-    const int Nk = P.coarse_nev;
+    // Nk > Nstop: convergence-window buffer.  With Nk == Nstop, deep requests
+    // (nev=128, s3A 2026-07-08) end 10 restarts with individually-converged
+    // modes but a 0/N contiguous count -> Grid IRL abort()s; a 16-vector
+    // buffer between the wanted window and the restart truncation fixes the
+    // counting.  Restart cap env COARSE_IRL_MAXIT (was hardcoded 10).
+    const int Nk = P.coarse_nev + 16;
     // 2x Krylov headroom (the phys-test ratio); deflation-guesser evecs only
     // need ~1e-3 residuals (IRL's internal target is eresid^2) — demanding
     // measurement-grade 1e-5 ground restarts to 0/N converged (o1 failure).
@@ -422,13 +428,15 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
     // via COARSE_IRL_HI.  Note deflation presumes the coarse op HAS low
     // modes; at toy volumes (4^3x8: lowest coarse eval O(1)) there is
     // nothing below lo and IRL grinds — leave COARSE_NEV=0 there.
-    const int Nm = P.coarse_nev + std::max(64, P.coarse_nev);
+    const int Nm = Nk + std::max(64, Nk);
     double irl_hi = env_real("COARSE_IRL_HI", 1.5 * clmax);
+    const int irl_restarts = env_int("COARSE_IRL_MAXIT", 10);
     Chebyshev<CoarseVector> IRLCheby(irl_lo, irl_hi, P.coarse_irl_ord);
     FunctionHermOp<CoarseVector> IRLOpCheby(IRLCheby, CoarseOp);
     PlainHermOp<CoarseVector> IRLOp(CoarseOp);
     ImplicitlyRestartedLanczos<CoarseVector> IRL(IRLOpCheby, IRLOp, Nstop, Nk,
-                                                 Nm, P.coarse_irl_tol, 10);
+                                                 Nm, P.coarse_irl_tol,
+                                                 irl_restarts);
     c_eval.resize(Nm);
     c_evec.resize(Nm, &Coarse4d);
     int Nconv = 0;
@@ -515,6 +523,107 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
               << " s" << std::endl;
     return lfails;
   };
+
+  //////////////////////////////////////////////////////////////////////
+  // MRHS_NRHS=N (mrhs-M1, compiled for nbasis 32/64): batched ADEF2 over
+  // N simultaneous sources.  The mrhs coarse grid makes nrhs the LEADING
+  // dimension carrying all the SIMD lanes (rhs-as-vector-lanes — the
+  // phys48_blockcg idiom), so block projects and coarse solves become
+  // full-width BLAS.  Fine matvecs + smoother remain per-rhs loops in
+  // stock TwoLevelADEF2mrhs (fine batching = the M2 program).  Reuses the
+  // aggregation basis (ImportBasis) and the coarse IRL eigenpairs
+  // (ImportEigenBasis) — COARSE_NEV>0 required.  Replaces the single-RHS
+  // solve when active (baselines are banked from prior runs).
+  //////////////////////////////////////////////////////////////////////
+  const int mrhs_nrhs = env_int("MRHS_NRHS", 0);
+  if constexpr (nbasis == 32 || nbasis == 64) {
+    if (mrhs_nrhs > 0) {
+      GRID_ASSERT(P.coarse_nev > 0 &&
+                  CoarseDeflGuesser);  // deflation eigenpairs required
+      GRID_ASSERT(mrhs_nrhs % vComplex::Nsimd() == 0 &&
+                  "MRHS_NRHS must be a multiple of vComplex::Nsimd()");
+      Coordinate mpi5 = GridDefaultMpi();
+      Coordinate rhMpi({1, mpi5[0], mpi5[1], mpi5[2], mpi5[3]});
+      Coordinate rhLatt({mrhs_nrhs, clatt[0], clatt[1], clatt[2], clatt[3]});
+      Coordinate rhSimd({(int)vComplex::Nsimd(), 1, 1, 1, 1});
+      GridCartesian CoarseMrhs(rhLatt, rhSimd, rhMpi);
+      std::cout << GridLogMessage << "[gridmg] MRHS: nrhs=" << mrhs_nrhs
+                << " coarse-mrhs grid " << rhLatt << std::endl;
+
+      typedef MultiGeneralCoarsenedMatrix<vDtxqcdPackedVector, vTComplex,
+                                          nbasis>
+          MrhsOp_t;
+      MrhsOp_t mrhsOp(*geom, &CoarseMrhs);
+      size_t ncm0 = FineHermOp.ncalls;
+      double tcm0 = usecond();
+      mrhsOp.CoarsenOperator(FineHermOp, Aggregates, &Coarse4d);
+      std::cout << GridLogMessage << "[gridmg] MRHS CoarsenOperator: "
+                << (FineHermOp.ncalls - ncm0) << " fine HermOps, "
+                << (usecond() - tcm0) * 1e-6 << " s" << std::endl;
+
+      typedef HermitianLinearOperator<MrhsOp_t, CoarseVector> MrhsHermMatrix;
+      MrhsHermMatrix MrhsCoarseOp(mrhsOp);
+      ConjugateGradient<CoarseVector> mrhsCGsloppy(P.coarse_tol_sloppy,
+                                                   30000, false);
+      ConjugateGradient<CoarseVector> mrhsCG(P.coarse_tol, 30000, false);
+      DoNothingGuesser<CoarseVector> DoNothing;
+      HPDSolver<CoarseVector> MrhsSolveSloppy(MrhsCoarseOp, mrhsCGsloppy,
+                                              DoNothing);
+      HPDSolver<CoarseVector> MrhsSolve(MrhsCoarseOp, mrhsCG, DoNothing);
+
+      MultiRHSDeflation<CoarseVector> MrhsDeflator;
+      MrhsDeflator.Allocate((int)c_eval.size(), &Coarse4d);
+      MrhsDeflator.ImportEigenBasis(c_evec, c_eval);
+
+      MultiRHSBlockProject<Field> MrhsProjector;
+      MrhsProjector.Allocate(nbasis, FineGrid, &Coarse4d);
+      MrhsProjector.ImportBasis(Aggregates.subspace);
+
+      TwoLevelADEF2mrhs<Field, CoarseVector> HDCGmrhs(
+          P.mg_tol, P.mg_maxit, FineHermOp, Smoother, MrhsSolveSloppy,
+          MrhsSolve, MrhsProjector, MrhsDeflator, &CoarseMrhs);
+
+      std::vector<Field> src_m(mrhs_nrhs, FineGrid);
+      std::vector<Field> res_m(mrhs_nrhs, FineGrid);
+      for (int r = 0; r < mrhs_nrhs; ++r) {
+        gaussian(pRNG, src_m[r]);
+        res_m[r] = Zero();
+        res_m[r].Checkerboard() = src_m[r].Checkerboard();
+      }
+      size_t ncs0 = FineHermOp.ncalls;
+      double ts0 = usecond();
+      HDCGmrhs(src_m, res_m);
+      double t_mrhs = (usecond() - ts0) * 1e-6;
+      std::cout << GridLogMessage << "[gridmg] MRHS solve: " << mrhs_nrhs
+                << " rhs in " << t_mrhs << " s ("
+                << t_mrhs / mrhs_nrhs << " s/rhs amortized, "
+                << (FineHermOp.ncalls - ncs0) << " fine HermOps total)"
+                << std::endl;
+      int bad = 0;
+      for (int r = 0; r < mrhs_nrhs; ++r) {
+        Field tmp_r(FineGrid);
+        tmp_r.Checkerboard() = src_m[r].Checkerboard();
+        FineHermOp.HermOp(res_m[r], tmp_r);
+        tmp_r = tmp_r - src_m[r];
+        RealD rr = std::sqrt(norm2(tmp_r) / norm2(src_m[r]));
+        if (!(rr < 10.0 * P.mg_tol)) ++bad;
+        if (r == 0 || !(rr < 10.0 * P.mg_tol))
+          std::cout << GridLogMessage << (rr < 10.0 * P.mg_tol ? "[ok]   "
+                                                               : "[FAIL] ")
+                    << "[gridmg] MRHS rhs " << r << " true residual = " << rr
+                    << std::endl;
+      }
+      if (bad) fails += bad;
+      std::cout << GridLogMessage << "[gridmg] MRHS totals: coarsen "
+                << (usecond() - tcm0) * 1e-6 << " s incl-solve, solve "
+                << t_mrhs << " s, " << t_mrhs / mrhs_nrhs << " s/rhs"
+                << std::endl;
+      return fails;
+    }
+  } else if (mrhs_nrhs > 0) {
+    std::cout << GridLogMessage
+              << "[gridmg] MRHS is compiled for NBASIS=32/64 only" << std::endl;
+  }
 
   //////////////////////////////////////////////////////////////////////
   // THREE_LEVEL=1 (compiled for nbasis==64 only): the outer ADEF2's coarse
