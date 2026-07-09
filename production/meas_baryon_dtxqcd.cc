@@ -397,8 +397,16 @@ int main(int argc, char **argv) {
   // Translation-averaged correlators per (flavor, spin) channel:
   //   C_B^{(f,σ)}(Δt) = (1/T) Σ_{t_src} S_B^{(f,σ)}(t_src+Δt; t_src)
   // and the spin-averaged + flavor-averaged total per Eq 36.
-  // Wall-wall normalization 1/V_3² applied here.
-  const RealD norm = 1.0 / (V3 * V3 * (RealD)n_tsrc);
+  // Wall-wall normalization 1/V_3², times the SD/Fierz lambda^4 (two diquark
+  // aux fields, each == qq/lambda^2, the diquark analog of the aux pion's
+  // lambda^4) so the folded correlators are directly comparable IN AMPLITUDE
+  // to the QCD nucleon (verified 2026-07-09: aux*lambda^4 = C_nucleon up to a
+  // factor 2 = ref spin-SUM Tr[P+ NNbar] vs our spin-AVERAGE; the factor 2 is
+  // NOT applied -- our spin-averaged convention is kept, remember it when
+  // comparing to the spin-summed reference).  The raw SB_2d matrices below are
+  // left UNSCALED (analyze_baryon_vs_ref.py applies lambda^4 itself).
+  const RealD lam4 = lam * lam * lam * lam;
+  const RealD norm = lam4 / (V3 * V3 * (RealD)n_tsrc);
   const bool apbc = true;   // baryon operator: antiperiodic time (chroma conv)
 
   // Forward + backward (time-reversed) translation-averaged correlators per
