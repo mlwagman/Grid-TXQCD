@@ -181,6 +181,24 @@ BaryonSinkContractProj(const LatticeColourMatrix &d_iso,
   return out;
 }
 
+// FREE_FIELD validation helper: replace a lattice field by its t=0 slice
+// broadcast across ALL timeslices (mask t=0, then sum the T time-shifts) ->
+// time-translation-invariant.  With U=I this makes SB_2d[t_src][t_sink] depend
+// only on (t_sink - t_src), so the correlator is clean+real and fwd vs bwd
+// must agree (the sharp APBC-sign check).
+template <class Field>
+static void BroadcastTimeZero(Field &f, int T) {
+  Grid::GridBase *g = f.Grid();
+  Grid::LatticeInteger tc(g);
+  Grid::LatticeCoordinate(tc, Grid::Nd - 1);
+  Field zero(g); zero = Grid::Zero();
+  Field masked = Grid::where(tc == Grid::Integer(0), f, zero);
+  Field acc(g); acc = Grid::Zero();
+  for (int t = 0; t < T; ++t)
+    acc = acc + Grid::Cshift(masked, Grid::Nd - 1, -t);
+  f = acc;
+}
+
 int main(int argc, char **argv) {
   Grid_init(&argc, &argv);
 
@@ -206,7 +224,9 @@ int main(int argc, char **argv) {
 
   const RealD lam   = lambda_dtxqcd;
   const RealD m     = mass_light_dtxqcd;
-  const RealD tol   = TXQCDProduction::detail::env_real("CG_TOL", 1e-10);
+  // 1e-6 default (2026-07-06): plenty for correlator-level precision; the
+  // old 1e-10 spent most of the CG in the convergence tail.  Override CG_TOL.
+  const RealD tol   = TXQCDProduction::detail::env_real("CG_TOL", 1e-6);
   const int   cgmax = TXQCDProduction::detail::env_int("CG_MAX", 100000);
   int T = latt[Nd - 1];
   RealD V3 = 1.0;
@@ -225,9 +245,30 @@ int main(int argc, char **argv) {
   std::cout << GridLogMessage << "====================================" << std::endl;
 
   DTXQCDField U(&Grid);
-  DTXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
-                                  cfg_dir + "/ckpoint_lat",
-                                  cfg_dir + "/ckpoint_rng", traj);
+  // FREE_FIELD=1: SELF-CONTAINED sign/convention validation (no config load,
+  // so it runs at ANY lattice -> use a small LATT + CPU for a fast check).
+  // Cold U=I + aux DRAWN in-code, then made time-translation invariant
+  // (broadcast the t=0 slice across all time).  Then SB_2d[t_src][t_sink]
+  // depends only on (t_sink - t_src): the correlator is CLEAN + REAL and fwd
+  // vs bwd (and uu vs ll) MUST agree -> the sharp check of the APBC index maps
+  // + the ll charge-conj dressing.
+  if (TXQCDProduction::detail::env_int("FREE_FIELD", 0) != 0) {
+    U = Zero();
+    LatticeColourMatrix id(&Grid); id = 1.0;
+    for (int mu = 0; mu < Nd; ++mu) PokeIndex<LorentzIndex>(U.U, id, mu);
+    DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lam);
+    BroadcastTimeZero(U.sigma, T); BroadcastTimeZero(U.pi, T);
+    BroadcastTimeZero(U.d, T);     BroadcastTimeZero(U.n, T);
+    BroadcastTimeZero(U.s, T);     BroadcastTimeZero(U.p, T);
+    std::cout << GridLogMessage << "[FREE_FIELD] cold U=I + drawn time-constant "
+              << "aux (expect clean real correlator, fwd==bwd, uu~ll)"
+              << std::endl;
+  } else {
+    DTXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
+                                    cfg_dir + "/ckpoint_lat",
+                                    cfg_dir + "/ckpoint_rng", traj);
+  }
+
   RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
 
   // Build the isosinglet diquark colour field once for this cfg.
@@ -270,7 +311,11 @@ int main(int argc, char **argv) {
   // production line.)  The solve routes through the same QUDA full-volume M
   // operator the non-EO HMC uses (DTXQCD_MEAS_QUDA=1 default; =0 → Grid-CPU
   // reference).  See dtxqcd_meas_helper.h.
-  const RealD csw_meas = csw;
+  // CSW override (default = production csw).  Set CSW=0 for the FREE_FIELD
+  // sign check: at U=I the large time-constant aux + negative mass makes the
+  // clover site-block non-HPD (QUDA CloverInvert NaNs); csw=0 removes the
+  // clover term and the sign relations don't depend on it.
+  const RealD csw_meas = TXQCDProduction::detail::env_real("CSW", csw);
   DtxqcdMeasSolver solver(Grid, RBGrid, U, m, csw_meas, tol, cgmax);
 
   // Loop over (t_src ∈ {0,…,T-1}) × (flavor ∈ {u, d}) × (spin_sign ∈ {+1, -1}).
@@ -296,9 +341,19 @@ int main(int argc, char **argv) {
   for (int j = 0; j < n_tsrc; ++j) tsrc_list.push_back((j * T) / n_tsrc);
   std::cout << GridLogMessage << "[baryon] n_tsrc=" << n_tsrc << " of T=" << T
             << "  (" << (NF * NS * n_tsrc) << " doubled solves)" << std::endl;
-  std::vector<std::vector<std::vector<std::vector<ComplexD>>>>
-      SB_2d(NF, std::vector<std::vector<std::vector<ComplexD>>>(
-                NS, std::vector<std::vector<ComplexD>>(T, std::vector<ComplexD>(T))));
+  // SB raw (t_src, t_sink) matrix per BLOCK (0=uu from upper.f, 1=ll from
+  // lower.f) × flavour × spin.  The lower block is the charge-conjugate (q^C)
+  // theory; at +parity it is a legitimate baryon correlator equal (per config,
+  // up to a parity flip inside the ε-contraction) to the upper one -- verified
+  // by Test_dtxqcd_baryon_cross_block ([CCPAR], ||uu||==||ll||).  Saving both
+  // gives the 8 uu + 8 ll physical copies the user requested; the cross
+  // (upper-source→lower-sink) baryon terms ENSEMBLE-VANISH (S_ul odd in d,n),
+  // so only the same-block uu/ll carry signal.
+  const int NB = 2;
+  std::vector<std::vector<std::vector<std::vector<std::vector<ComplexD>>>>>
+      SB_2d(NB, std::vector<std::vector<std::vector<std::vector<ComplexD>>>>(
+        NF, std::vector<std::vector<std::vector<ComplexD>>>(
+          NS, std::vector<std::vector<ComplexD>>(T, std::vector<ComplexD>(T)))));
   for (int t_src : tsrc_list) {
     for (int fi = 0; fi < NF; ++fi) {
       for (int si = 0; si < NS; ++si) {
@@ -322,15 +377,19 @@ int main(int argc, char **argv) {
         eta.upper.f[fi] = eta_f;
         // Solve doubled M psi = eta on the full volume (helper: M†M CG, QUDA).
         solver.Solve(eta, psi);
-        // Extract upper.f[fi] for sink contraction (same flavour at source/sink)
-        LatticeFermion psi_q = psi.upper.f[fi];
-        // Apply Gaussian wavefunction smearing to the sink quark field.
-        if (do_smear) {
-          CovariantSmearing<PeriodicGimplR>::GaussianSmear(
-              Umu_links, psi_q, smear_width, smear_niter, Nd - 1);
+        // Contract BOTH doubled blocks at the sink (same flavour slot fi):
+        //   blk 0 = upper.f[fi] (uu, quark),  blk 1 = lower.f[fi] (ll, q^C).
+        for (int blk = 0; blk < NB; ++blk) {
+          LatticeFermion psi_q =
+              (blk == 0) ? psi.upper.f[fi] : psi.lower.f[fi];
+          // Apply Gaussian wavefunction smearing to the sink quark field.
+          if (do_smear) {
+            CovariantSmearing<PeriodicGimplR>::GaussianSmear(
+                Umu_links, psi_q, smear_width, smear_niter, Nd - 1);
+          }
+          SB_2d[blk][fi][si][t_src] =
+              BaryonSinkContractProj(d_iso, psi_q, spin_signs[si]);
         }
-        SB_2d[fi][si][t_src] = BaryonSinkContractProj(d_iso, psi_q,
-                                                      spin_signs[si]);
       }
     }
   }
@@ -340,49 +399,90 @@ int main(int argc, char **argv) {
   // and the spin-averaged + flavor-averaged total per Eq 36.
   // Wall-wall normalization 1/V_3² applied here.
   const RealD norm = 1.0 / (V3 * V3 * (RealD)n_tsrc);
-  std::vector<std::vector<std::vector<ComplexD>>>
-      C_per(NF, std::vector<std::vector<ComplexD>>(NS, std::vector<ComplexD>(T, 0.0)));
-  for (int fi = 0; fi < NF; ++fi) {
-    for (int si = 0; si < NS; ++si) {
-      for (int dt = 0; dt < T; ++dt) {
-        for (int t_src : tsrc_list) {
-          int t_sink = (t_src + dt) % T;
-          C_per[fi][si][dt] += SB_2d[fi][si][t_src][t_sink];
+  const bool apbc = true;   // baryon operator: antiperiodic time (chroma conv)
+
+  // Forward + backward (time-reversed) translation-averaged correlators per
+  // (block, flavor, spin), with the SAME APBC index maps as the connected
+  // baryon script (meas_conn_qcd.cc shift_fwd_apbc / shift_tr_chroma):
+  //   fwd: t_lat = (dt + t_src) % T,   sign = -1 if (dt + t_src) >= T
+  //   bwd: t_lat = (t_src - dt + T)%T, sign = -1 if (dt - t_src)  > 0
+  // The bwd is the reflection of the SAME forward SB matrix (no extra solves):
+  // it reads the backward-propagating (anti-baryon, APBC-wrapped) piece.
+  //
+  // APBC ALIGNMENT SIGN (fixed 2026-07-09, synthetic_fold_test): for an
+  // antiperiodic baryon g(-dt) = -g(T-dt), so the raw reflection gives
+  // bwd = -(aligned forward).  We fold in the extra -1 for backward so the
+  // saved bwd component is the PHYSICALLY-ALIGNED backward baryon (same
+  // positive-decaying signal as fwd) -- matching the connected script's
+  // nucl_fbavg = 1/2 (fwd - nucl_neg[T-t]).  Without this the fwd+bwd average
+  // partially CANCELS (was the ~0.45 coherence on the real config).
+  auto fold = [&](int blk, int fi, int si, bool backward) {
+    std::vector<ComplexD> C(T, 0.0);
+    const RealD align = backward ? -1.0 : +1.0;   // APBC fwd/bwd alignment
+    for (int dt = 0; dt < T; ++dt) {
+      for (int t_src : tsrc_list) {
+        int t_lat; RealD sgn;
+        if (!backward) {
+          t_lat = (dt + t_src) % T;
+          sgn = (apbc && (dt + t_src) >= T) ? -1.0 : +1.0;
+        } else {
+          t_lat = ((t_src - dt) % T + T) % T;
+          sgn = (apbc && (dt - t_src) > 0) ? -1.0 : +1.0;
         }
-        C_per[fi][si][dt] *= ComplexD(norm, 0.0);
+        C[dt] += sgn * SB_2d[blk][fi][si][t_src][t_lat];
       }
+      C[dt] *= ComplexD(align * norm, 0.0);
     }
-  }
-  // Eq 36: sum over f, s of S^{(B)}_{fsfs}; "averaged at correlator level":
-  std::vector<ComplexD> C_B_total(T, 0.0);
-  for (int dt = 0; dt < T; ++dt) {
+    return C;
+  };
+
+  // 16 components: block{uu,ll} × flavor{p,n} × spin{up,dn} × dir{fwd,bwd}.
+  const char *blk_nm[NB] = {"uu", "ll"};
+  const char *fl_nm[NF]  = {"p", "n"};
+  const char *sp_nm[NS]  = {"up", "dn"};
+  std::vector<std::pair<std::string, std::vector<ComplexD>>> comps;
+  std::vector<ComplexD> C_all16_avg(T, 0.0);
+  for (int blk = 0; blk < NB; ++blk)
     for (int fi = 0; fi < NF; ++fi)
       for (int si = 0; si < NS; ++si)
-        C_B_total[dt] += C_per[fi][si][dt];
-  }
+        for (int bw = 0; bw < 2; ++bw) {
+          auto C = fold(blk, fi, si, bw != 0);
+          std::string nm = std::string("baryon_") + blk_nm[blk] + "_" +
+                           fl_nm[fi] + "_" + sp_nm[si] + "_" +
+                           (bw ? "bwd" : "fwd");
+          for (int t = 0; t < T; ++t) C_all16_avg[t] += C[t];
+          comps.emplace_back(nm, std::move(C));
+        }
+  for (int t = 0; t < T; ++t) C_all16_avg[t] *= ComplexD(1.0 / 16.0, 0.0);
+
+  // Back-compat: baryon_total = forward uu, spin+flavor summed (old Eq-36 form,
+  // now with the APBC sign the previous version omitted at the wrap).
+  std::vector<ComplexD> C_B_total(T, 0.0);
+  for (int fi = 0; fi < NF; ++fi)
+    for (int si = 0; si < NS; ++si) {
+      auto C = fold(0, fi, si, false);
+      for (int t = 0; t < T; ++t) C_B_total[t] += C[t];
+    }
 
   std::string outfile = data_dir + "/baryon_dtxqcd_" + std::to_string(traj) + ".h5";
   if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
-    // Eq 36 total: ⟨p p̄⟩ + ⟨n n̄⟩, spin-averaged at correlator level
-    write(wr, "baryon_total",      C_B_total);
-    // Individual flavor × spin channels (4 total), Δt-averaged
-    write(wr, "baryon_p_up",       C_per[0][0]);
-    write(wr, "baryon_p_dn",       C_per[0][1]);
-    write(wr, "baryon_n_up",       C_per[1][0]);
-    write(wr, "baryon_n_dn",       C_per[1][1]);
-    // Raw 2D per-(t_src,t_sink) matrices (unnormalized Σ_x sums) for diagnostics
-    auto flatten_2d = [&](int fi, int si) {
+    write(wr, "baryon_all16_avg", C_all16_avg);   // the 16-component average
+    for (auto &c : comps) write(wr, c.first, c.second);   // the 16 independently
+    write(wr, "baryon_total", C_B_total);         // back-compat (fwd uu sum)
+    // Raw 2D per-(t_src,t_sink) matrices for diagnostics (both blocks).
+    auto flatten_2d = [&](int blk, int fi, int si) {
       std::vector<ComplexD> out(T * T);
       for (int ts = 0; ts < T; ++ts)
         for (int tk = 0; tk < T; ++tk)
-          out[ts * T + tk] = SB_2d[fi][si][ts][tk];
+          out[ts * T + tk] = SB_2d[blk][fi][si][ts][tk];
       return out;
     };
-    write(wr, "baryon_SB_p_up_2d", flatten_2d(0, 0));
-    write(wr, "baryon_SB_p_dn_2d", flatten_2d(0, 1));
-    write(wr, "baryon_SB_n_up_2d", flatten_2d(1, 0));
-    write(wr, "baryon_SB_n_dn_2d", flatten_2d(1, 1));
+    for (int blk = 0; blk < NB; ++blk)
+      for (int fi = 0; fi < NF; ++fi)
+        for (int si = 0; si < NS; ++si)
+          write(wr, std::string("baryon_SB_") + blk_nm[blk] + "_" + fl_nm[fi] +
+                    "_" + sp_nm[si] + "_2d", flatten_2d(blk, fi, si));
     write(wr, "traj",    traj);
     write(wr, "lambda",  lam);
     write(wr, "mass",    m);
