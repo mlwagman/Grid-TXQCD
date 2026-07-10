@@ -4,9 +4,9 @@
 #SBATCH --qos=normal
 #SBATCH --account=nplqcd.lq2_gpu
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=8
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=16
 #SBATCH --time=12:00:00
 #SBATCH --output=/lustre2/nplqcd/Grid-DTXQCD/production/gridmg_setups/logs/meas_bar_mg_low.%j.out
 # ============================================================================
@@ -25,15 +25,17 @@
 #   deflation + SP smoother -> 2804 outers / 724 s per solve (vs full CG
 #   70612 iters / 1711 s = 2.4x).
 #
-# DECOMPOSITION: 1.1.2.2 (4 GPUs, ONE config/node, domain-decomposed).
-#   nb64 does NOT fit meas_baryon at 2 GPUs (job 1299507 OOM'd in solver
-#   construction: the 9.4 GB basis + coarse op + the EO operator caches +
-#   doubled propagator buffers exceed 2x40 GB -- note the Test_dtxqcd_grid_mg
-#   BENCH fits nb64 at 1.1.1.2 because it lacks those extra meas buffers).
-#   1.1.2.2 halves per-rank memory; coarse [4,4,4,12] -> local [4,4,2,6] all
-#   even (SIMD-legal; 1.1.1.4 gives odd coarse-T=3 and asserts).  Because the
-#   decomposition differs from the older 1.1.1.2 caches, the basis is
-#   regenerated per config (the LIME setup read is decomposition-sensitive).
+# DECOMPOSITION: 1.1.1.2 (2 GPUs/config) via srun_gpu_wrapper.sh.
+#   The wrapper is MANDATORY -- Grid is built --enable-setdevice=no, so
+#   without a per-rank CUDA_VISIBLE_DEVICES every rank piles onto GPU 0 and
+#   OOMs (the 1299507/1299520 "OOMs" were this binding bug, NOT a memory
+#   limit; the throughput bench ran 2x nb64 @1.1.1.2 concurrently at ~727 s
+#   with <1% contention once correctly bound).  coarse [4,4,4,12] -> local
+#   [4,4,4,6] even (SIMD-legal; avoid 1.1.1.4 -> odd coarse-T=3 asserts).
+#   A 4-GPU node runs TWO configs at once (two 1.1.1.2 steps, GPUs 0-1 +
+#   2-3) -- see the companion 2-config launcher.  nb48 is NOT an option at
+#   lambda=3: its coarse space is too small for the ~113-mode low band
+#   (coarse IRL got 0/96, job 1299512) so the single-GPU 4-fanout is dead.
 #
 # Parametrize via --export: LAM (default 3), TRAJ (default 0), NTSRC
 # (t_src count; default 8 -> 32 solves ~6.4 h; T=48 -> 192 solves ~38 h,
@@ -71,9 +73,10 @@ fi
 echo "=== meas_baryon Grid-MG  lambda=$LAM traj=$TRAJ ntsrc=$NTSRC ==="
 echo "    CFG_DIR=$CFG_DIR  DATA_DIR=$DATA_DIR"
 
-srun --mpi=pmix -N 1 -n 4 --cpu-bind=none \
+srun --mpi=pmix -N 1 -n 2 --cpu-bind=none \
   env LATT=16.16.16.48 LAMBDA_DTXQCD=$LAM CFG_DIR=$CFG_DIR DATA_DIR=$DATA_DIR \
       MEAS_BARYON_NTSRC=$NTSRC CG_TOL=1e-8 \
+      QUDA_ENABLE_MPS=1 \
       DTXQCD_MEAS_GRIDMG=1 \
       DTXQCD_MEAS_MG_NBASIS=64 \
       DTXQCD_MEAS_MG_GEOM=nn \
@@ -82,6 +85,7 @@ srun --mpi=pmix -N 1 -n 4 --cpu-bind=none \
       DTXQCD_MEAS_MG_NEV=96 \
       COARSE_IRL_MAXIT=30 \
       DTXQCD_MEAS_MG_SETUP_PREFIX=$SETUP_PREFIX \
-  ./meas_baryon_dtxqcd $TRAJ --grid 16.16.16.48 --mpi 1.1.2.2 --shm 512 --shm-mpi 1
+  $P/srun_gpu_wrapper.sh \
+  ./meas_baryon_dtxqcd $TRAJ --grid 16.16.16.48 --mpi 1.1.1.2 --shm 512 --shm-mpi 1
 
 echo "=== meas_baryon Grid-MG lambda=$LAM traj=$TRAJ complete rc=$? $(date) ==="
