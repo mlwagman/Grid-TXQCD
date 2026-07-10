@@ -46,7 +46,7 @@ declare -a SLOT_PID
 launch() {  # $1=traj $2=gpu
   local traj=$1 gpu=$2
   echo "  [launch] traj=$traj -> GPU $gpu"
-  srun --overlap -N1 -n1 -c16 --cpu-bind=none \
+  srun --overlap --mpi=pmix -N1 -n1 -c16 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES="$gpu" \
         LATT=16.16.16.48 LAMBDA_DTXQCD="$LAM" MASS_LIGHT_DTXQCD=-0.245 \
         CFG_DIR="$CFG_DIR" DATA_DIR="$OUT_DIR" \
