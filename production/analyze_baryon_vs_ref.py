@@ -73,12 +73,18 @@ def main():
             # — and the pre-fix uu was gauge-variant (Elitzur-zero; the sink
             # conjugation bug).  Only h5 produced by the FIXED meas_baryon
             # (gauge-invariance-gated, uu-only schema) carry signal.
+            #
+            # fwd only (2026-07-11): the P+ BACKWARD tower is the
+            # opposite-parity (N*) spectrum, NOT the nucleon — the connected
+            # script's fbavg pairs fwd-P+ with bwd-P-, which this measurement
+            # does not compute.  Averaging bwd in dilutes the nucleon with
+            # parity-partner contamination, so the nucleon estimator is the
+            # fwd 4-average {p,n}x{up,dn}.
             for blk in ["uu"]:
                 for fl in ["p", "n"]:
                     for sp in ["up", "dn"]:
                         SB = getc(h, f"baryon_SB_{blk}_{fl}_{sp}_2d").reshape(T, T)
                         comps.append(fold(SB, False, tsrc_list, norm))
-                        comps.append(fold(SB, True, tsrc_list, norm))
             per_cfg.append(np.mean(comps, axis=0))
     per_cfg = np.array(per_cfg)            # (ncfg, T)
     ncfg = len(per_cfg)
@@ -91,24 +97,25 @@ def main():
 
     print(f"aux baryon ensemble: {ncfg} cfg   lambda={lam} (l4={lam4:.0f})   "
           f"dir={d}")
-    print(f"{'t':>3} | {'ref nucleon':>12} | {'aux16 x l4':>20} | {'ref/aux':>8} "
-          f"| {'(r/a)/V3':>9}")
-    print("-" * 66)
+    print(f"{'t':>3} | {'ref nucleon':>12} | {'ref/2':>12} | "
+          f"{'aux fwd-4 x l4':>20} | {'(ref/2)/aux':>11}")
+    print("-" * 72)
     for t in range(0, 13):
         r = ref[t].real
         a = aux[t].real
-        rr = r / a if abs(a) > 1e-30 else float("nan")
-        print(f"{t:3d} | {r:+12.4e} | {a:+12.4e}+-{aux_err[t]:.1e} | "
-              f"{rr:+8.2f} | {rr/V3:+9.4f}")
+        rr = (r / 2.0) / a if abs(a) > 1e-30 else float("nan")
+        print(f"{t:3d} | {r:+12.4e} | {r/2:+12.4e} | "
+              f"{a:+12.4e}+-{aux_err[t]:.1e} | {rr:+11.2f}")
     print(f"\nref meff:  " +
           " ".join(f"{np.log(abs(ref[t]/ref[t+1])):+.3f}" for t in range(1, 10)))
     print(f"aux |meff|:" +
           " ".join(f"{np.log(abs(aux[t]/aux[t+1])):+.3f}"
                    if abs(aux[t+1]) > 0 else " nan" for t in range(1, 10)))
-    print("\nExpect: ref/aux -> EXACTLY 2 on the ensemble (ref is spin-SUMMED "
-          "Tr[P+ NNbar], our 16-avg is spin-AVERAGED; p/n, uu/ll, fwd/bwd add "
-          "no factor).  NOT V3~4096 (the (r/a)/V3 ~1e-4 column confirms).  "
-          "Match sharpens to 2.0 + extends past t=2 as ncfg grows.")
+    print("\nExpect: aux fwd-4 -> ref/2 on the ensemble, possibly x(-1) "
+          "(overall source-convention sign; ref is spin-SUMMED Tr[P+ NNbar], "
+          "ours spin-AVERAGED).  fwd only: the P+ backward tower is the "
+          "parity-partner (N*) channel, excluded from the nucleon average.  "
+          "NO V3 (verified on the fixed estimator).")
 
 
 if __name__ == "__main__":
