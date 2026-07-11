@@ -368,22 +368,17 @@ int main(int argc, char **argv) {
   for (int j = 0; j < n_tsrc; ++j) tsrc_list.push_back((j * T) / n_tsrc);
   // MEAS_BARYON_LL=1: ALSO measure the same-block ll baryon (lower-block
   // source + lower sink) — doubles the solve count.
+  //
+  // NOTE (2026-07-11): the d-wall conjugation per block is FORCED by gauge
+  // invariance (source: upper εd*, lower εd; sink weight: upper εd, lower
+  // εd*).  The swapped-conjugation "independent antibaryon" pairing was
+  // tested and FALSIFIED by the GAUGE_TWIST gate — gauge-variant ⇒
+  // Elitzur-zero (see commit a51e5dc5; beware: its contact terms make the
+  // raw magnitudes LOOK signal-scale).  uu+ll exhausts the operator family;
+  // the physical antibaryon is the bwd fold of the same SB matrix.
   const bool do_ll =
       TXQCDProduction::detail::env_int("MEAS_BARYON_LL", 0) != 0;
-  // MEAS_BARYON_ANTI=1 (EXPERIMENTAL, implies the ll pass): swap the
-  // conjugation of BOTH d-walls on the lower block — source [εd*], sink
-  // physical weight [εd] — the "independent antibaryon" candidate
-  // (mwagman 2026-07-11).  Rep algebra prediction: [εd*] is FUNDAMENTAL, the
-  // lower block needs Ω*-covariant sources, so this pairing is Ω^TΩ ≠ 1 ⇒
-  // gauge-VARIANT ⇒ Elitzur-zero (the mirror of the fixed uu sink bug).  Kept
-  // as a falsifiable test mode for the GAUGE_TWIST gate — NOT for production.
-  const bool do_anti =
-      TXQCDProduction::detail::env_int("MEAS_BARYON_ANTI", 0) != 0;
-  const int NB = (do_ll || do_anti) ? 2 : 1;
-  if (do_anti)
-    std::cout << GridLogMessage << "[baryon] MEAS_BARYON_ANTI=1: lower-block "
-              << "pass uses SWAPPED d-conjugation (source εd*, sink weight εd)"
-              << " — experimental, expect gauge-variant" << std::endl;
+  const int NB = do_ll ? 2 : 1;
   std::cout << GridLogMessage << "[baryon] n_tsrc=" << n_tsrc << " of T=" << T
             << "  (" << (NF * NS * n_tsrc * NB) << " doubled solves"
             << (NB == 2 ? ", uu+ll" : ", uu only") << ")" << std::endl;
@@ -414,14 +409,10 @@ int main(int argc, char **argv) {
         // sink with the mirrored conjugation (see BaryonSinkContractProj).
         for (int blk = 0; blk < NB; ++blk) {
           const bool upper = (blk == 0);
-          // Wall conjugation: upper → conj(d) source / d sink; lower → the
-          // mirror.  ANTI mode flips the lower-block pair (the gauge-variance
-          // demonstration — see the MEAS_BARYON_ANTI comment above).
-          const bool src_conj = upper ? true : (do_anti ? true : false);
           // Build raw single-flavour fermion source (plain LatticeFermion):
           LatticeFermion eta_f(&Grid);
           BuildBaryonWallSourceProj(eta_f, d_iso, spin_signs[si], t_src,
-                                    /*conj_wall=*/src_conj);
+                                    /*conj_wall=*/upper);
           // Apply Gaussian wavefunction smearing to the source (= smearing
           // the diquark source field; commutes with spatial integration).
           if (do_smear) {
@@ -452,7 +443,7 @@ int main(int argc, char **argv) {
           }
           SB_2d[blk][fi][si][t_src] =
               BaryonSinkContractProj(d_iso, psi_q, spin_signs[si],
-                                     /*conj_wall=*/upper || do_anti);
+                                     /*conj_wall=*/upper);
         }
       }
     }
