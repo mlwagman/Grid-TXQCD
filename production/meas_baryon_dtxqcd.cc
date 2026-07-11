@@ -370,7 +370,20 @@ int main(int argc, char **argv) {
   // source + lower sink) — doubles the solve count.
   const bool do_ll =
       TXQCDProduction::detail::env_int("MEAS_BARYON_LL", 0) != 0;
-  const int NB = do_ll ? 2 : 1;
+  // MEAS_BARYON_ANTI=1 (EXPERIMENTAL, implies the ll pass): swap the
+  // conjugation of BOTH d-walls on the lower block — source [εd*], sink
+  // physical weight [εd] — the "independent antibaryon" candidate
+  // (mwagman 2026-07-11).  Rep algebra prediction: [εd*] is FUNDAMENTAL, the
+  // lower block needs Ω*-covariant sources, so this pairing is Ω^TΩ ≠ 1 ⇒
+  // gauge-VARIANT ⇒ Elitzur-zero (the mirror of the fixed uu sink bug).  Kept
+  // as a falsifiable test mode for the GAUGE_TWIST gate — NOT for production.
+  const bool do_anti =
+      TXQCDProduction::detail::env_int("MEAS_BARYON_ANTI", 0) != 0;
+  const int NB = (do_ll || do_anti) ? 2 : 1;
+  if (do_anti)
+    std::cout << GridLogMessage << "[baryon] MEAS_BARYON_ANTI=1: lower-block "
+              << "pass uses SWAPPED d-conjugation (source εd*, sink weight εd)"
+              << " — experimental, expect gauge-variant" << std::endl;
   std::cout << GridLogMessage << "[baryon] n_tsrc=" << n_tsrc << " of T=" << T
             << "  (" << (NF * NS * n_tsrc * NB) << " doubled solves"
             << (NB == 2 ? ", uu+ll" : ", uu only") << ")" << std::endl;
@@ -401,10 +414,14 @@ int main(int argc, char **argv) {
         // sink with the mirrored conjugation (see BaryonSinkContractProj).
         for (int blk = 0; blk < NB; ++blk) {
           const bool upper = (blk == 0);
+          // Wall conjugation: upper → conj(d) source / d sink; lower → the
+          // mirror.  ANTI mode flips the lower-block pair (the gauge-variance
+          // demonstration — see the MEAS_BARYON_ANTI comment above).
+          const bool src_conj = upper ? true : (do_anti ? true : false);
           // Build raw single-flavour fermion source (plain LatticeFermion):
           LatticeFermion eta_f(&Grid);
           BuildBaryonWallSourceProj(eta_f, d_iso, spin_signs[si], t_src,
-                                    /*conj_wall=*/upper);
+                                    /*conj_wall=*/src_conj);
           // Apply Gaussian wavefunction smearing to the source (= smearing
           // the diquark source field; commutes with spatial integration).
           if (do_smear) {
@@ -435,7 +452,7 @@ int main(int argc, char **argv) {
           }
           SB_2d[blk][fi][si][t_src] =
               BaryonSinkContractProj(d_iso, psi_q, spin_signs[si],
-                                     /*conj_wall=*/upper);
+                                     /*conj_wall=*/upper || do_anti);
         }
       }
     }
