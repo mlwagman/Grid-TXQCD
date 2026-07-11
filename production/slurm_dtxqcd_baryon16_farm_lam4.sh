@@ -30,7 +30,10 @@ cd /lustre2/nplqcd/Grid-DTXQCD/production
 # single-rhs path at lambda>=4 (M_ee cliff is lambda<=3 only).
 LAM=${LAM:-4}
 CFG_DIR=/lustre2/nplqcd/Grid-DTXQCD/production/cfgs/dtxqcd_lam${LAM}.0000_tla_fromchroma_cw
-OUT_DIR=/lustre2/nplqcd/Grid-DTXQCD/production/meas_2pt/dtxqcd_lam${LAM}_baryon16
+# OUT_DIR overridable (--export=ALL,OUT_DIR=...): post-gauge-fix (f43b63aa)
+# remeasurements go to fresh *_baryon8 dirs (8-component uu schema); the old
+# *_baryon16 dirs hold the pre-fix gauge-variant (Elitzur-zero) data.
+OUT_DIR=${OUT_DIR:-/lustre2/nplqcd/Grid-DTXQCD/production/meas_2pt/dtxqcd_lam${LAM}_baryon16}
 mkdir -p "$OUT_DIR"
 NTSRC=${NTSRC:-48}   # every source timeslice (T); binary caps to T anyway
 NGPU=4
@@ -74,4 +77,4 @@ for traj in $TRAJS; do
   done
 done
 wait
-echo "=== baryon16 farm lambda=4 DONE $(date) ==="
+echo "=== baryon farm lambda=$LAM DONE $(date) ==="
