@@ -117,10 +117,20 @@ DiquarkEpsilonWall(const LatticeColourMatrix &d_iso, int t_src,
 }
 
 // Apply the positive-parity spin-(up|down) projector
-//   P_{±} ≡ (1+γ_4)/2 · (1 ± i γ_3 γ_5)/2
-// to a LatticeFermion.  Basis-independent (works in Grid's chiral basis
-// as well as Dirac).  [γ_4, γ_3 γ_5] = 0 so the half-projectors commute
-// and the product is a rank-1 projector.
+//   P₊(s) ≡ (1+γ_4)/2 · (1 ± i γ_3 γ_5)/2
+// to a LatticeFermion.  Basis-independent, rank-1 ([γ_4, γ_3γ_5] = 0).
+//
+// P₋ HANDLING (the uniform-fill trap, found by the NEGPAR gauge gate
+// 2026-07-11): the wall source fills ALL 4 spinor components equally, and a
+// uniform spinor is a PURE P₊ eigenvector — P₋ annihilates it identically
+// (||η||²=0, and the analogous sink sum u†P₋ψ ≡ 0).  So P₋ objects are NOT
+// built by passing (1−γ_4)/2 here.  Instead use the γ₅ dressing
+//   γ₅ P₊(−s) = P₋(s) γ₅  :
+//   source  η₋(s) = γ₅ · [P₊(−s) η_raw]     (γ₅ AFTER the projection)
+//   sink    ψ₋(s) = P₊(−s) · (γ₅ ψ)         (γ₅ BEFORE the projection)
+// — exact P₋(s) rank-1 pairing, amplitude-matched to the P₊ convention
+// (γ₅ unitary), basis-independent.  See the par<0 branches at the call
+// sites; this helper itself is P₊-only.
 inline LatticeFermion
 ApplyPosParitySpinProj(const LatticeFermion &in, int sign) {
   Gamma g4(Gamma::Algebra::GammaT);
@@ -150,14 +160,23 @@ ApplyPosParitySpinProj(const LatticeFermion &in, int sign) {
 inline void BuildBaryonWallSourceProj(LatticeFermion &eta,
                                        const LatticeColourMatrix &d_iso,
                                        int spin_sign, int t_src,
-                                       bool conj_wall = true) {
+                                       bool conj_wall = true, int par = +1) {
   GridBase *g = d_iso.Grid();
   LatticeColourVector wall = DiquarkEpsilonWall(d_iso, t_src,
                                                  /*conj_field=*/conj_wall);
   LatticeFermion eta_raw(g);
   eta_raw = Zero();
   for (int beta = 0; beta < Ns; ++beta) pokeSpin(eta_raw, wall, beta);
-  eta = ApplyPosParitySpinProj(eta_raw, spin_sign);
+  if (par > 0) {
+    eta = ApplyPosParitySpinProj(eta_raw, spin_sign);
+  } else {
+    // P₋(s) source via the γ₅ dressing: η₋(s) = γ₅ [P₊(−s) η_raw].
+    // (A direct (1−γ₄)/2 on the uniform fill is IDENTICALLY ZERO — see
+    // ApplyPosParitySpinProj's comment.)
+    Gamma g5(Gamma::Algebra::Gamma5);
+    LatticeFermion tmp = ApplyPosParitySpinProj(eta_raw, -spin_sign);
+    eta = g5 * tmp;
+  }
 }
 
 // Sink contraction with positive-parity spin-(up|down) projection.  Uses
@@ -182,11 +201,23 @@ inline void BuildBaryonWallSourceProj(LatticeFermion &eta,
 inline std::vector<ComplexD>
 BaryonSinkContractProj(const LatticeColourMatrix &d_iso,
                        const LatticeFermion &psi, int spin_sign,
-                       bool conj_wall = true) {
+                       bool conj_wall = true, int par = +1) {
   GridBase *g = d_iso.Grid();
   LatticeColourVector wall = DiquarkEpsilonWall(d_iso, /*t_src=*/-1,
                                                  /*conj_field=*/conj_wall);
-  LatticeFermion psi_proj = ApplyPosParitySpinProj(psi, spin_sign);
+  // P₋ sink via the γ₅ dressing: contract u†P₊(−s)(γ₅ψ) = (γ₅P₊(−s)u)†ψ =
+  // the exact conjugate of the P₋ source vector (see the source comment) —
+  // a plain P₋ projection here would pair against the P₊-pure uniform sum
+  // and vanish identically.
+  LatticeFermion psi_in(g);
+  if (par > 0) {
+    psi_in = psi;
+  } else {
+    Gamma g5(Gamma::Algebra::Gamma5);
+    psi_in = g5 * psi;
+  }
+  LatticeFermion psi_proj =
+      ApplyPosParitySpinProj(psi_in, par > 0 ? spin_sign : -spin_sign);
   // Contract: at each site, sum over the 4 spinor components of
   //   conj(wall^k) · ψ_proj^k_β  → ε^{ijk} d_iso^{ij}(x) · Σ_β ψ_proj^k_β(x)
   LatticeComplex Cn(g);
@@ -379,10 +410,26 @@ int main(int argc, char **argv) {
   const bool do_ll =
       TXQCDProduction::detail::env_int("MEAS_BARYON_LL", 0) != 0;
   const int NB = do_ll ? 2 : 1;
+  // MEAS_BARYON_NEGPAR=1: ALSO run P₋ (negative-parity) source projections —
+  // doubles the solves.  Channel content per (projector, fold direction):
+  //   P₊ fwd fold = NUCLEON forward                        → "..._fwd"
+  //   P₊ bwd fold = parity-partner (N*) tower              → "..._negpar_fwd"
+  //   P₋ bwd fold = T-REVERSED NUCLEON (the genuine anti-  → "..._bwd"
+  //                 baryon sample; the connected script's
+  //                 nucl_fbavg pairing via nucl_neg)
+  //   P₋ fwd fold = direct negative-parity channel         → "..._negpar_bwd"
+  // (2026-07-11 renaming: the P₊ backward fold was previously misnamed
+  // "bwd"; it is the OPPOSITE-parity spectrum, not the antinucleon.)
+  const bool do_pneg =
+      TXQCDProduction::detail::env_int("MEAS_BARYON_NEGPAR", 0) != 0;
+  const int NP = do_pneg ? 2 : 1;
+  const int pars[2] = {+1, -1};
   std::cout << GridLogMessage << "[baryon] n_tsrc=" << n_tsrc << " of T=" << T
-            << "  (" << (NF * NS * n_tsrc * NB) << " doubled solves"
-            << (NB == 2 ? ", uu+ll" : ", uu only") << ")" << std::endl;
-  // SB raw (t_src, t_sink) matrix per BLOCK × flavour × spin.
+            << "  (" << (NF * NS * n_tsrc * NB * NP) << " doubled solves"
+            << (NB == 2 ? ", uu+ll" : ", uu only")
+            << (do_pneg ? ", P+ and P-" : ", P+ only") << ")" << std::endl;
+  // SB raw (t_src, t_sink) matrix per (parity × block) × flavour × spin,
+  // channel index ch = parity_index * NB + blk.
   //
   // blk 0 = uu: UPPER-block source (wall ε conj(d)), contract psi.upper with
   //             sink weight ε d.
@@ -398,21 +445,26 @@ int main(int argc, char **argv) {
   // that is the CROSS propagator S_lu: grading-ODD in (d,n) (gate [G2]) ⇒
   // ensemble-zero.  Never the same-block ll baryon.
   std::vector<std::vector<std::vector<std::vector<std::vector<ComplexD>>>>>
-      SB_2d(NB, std::vector<std::vector<std::vector<std::vector<ComplexD>>>>(
+      SB_2d(NP * NB,
+        std::vector<std::vector<std::vector<std::vector<ComplexD>>>>(
         NF, std::vector<std::vector<std::vector<ComplexD>>>(
           NS, std::vector<std::vector<ComplexD>>(T, std::vector<ComplexD>(T)))));
   for (int t_src : tsrc_list) {
     for (int fi = 0; fi < NF; ++fi) {
       for (int si = 0; si < NS; ++si) {
-        // One solve per active block: blk 0 sources the UPPER doubled block
-        // (uu), blk 1 the LOWER (ll) — each contracted at its OWN block's
-        // sink with the mirrored conjugation (see BaryonSinkContractProj).
+        // One solve per active (parity, block): blk 0 sources the UPPER
+        // doubled block (uu), blk 1 the LOWER (ll) — each contracted at its
+        // OWN block's sink with the mirrored conjugation and the SAME parity
+        // projector as its source (see BaryonSinkContractProj).
+        for (int pi = 0; pi < NP; ++pi) {
         for (int blk = 0; blk < NB; ++blk) {
           const bool upper = (blk == 0);
+          const int  par   = pars[pi];
+          const int  ch    = pi * NB + blk;
           // Build raw single-flavour fermion source (plain LatticeFermion):
           LatticeFermion eta_f(&Grid);
           BuildBaryonWallSourceProj(eta_f, d_iso, spin_signs[si], t_src,
-                                    /*conj_wall=*/upper);
+                                    /*conj_wall=*/upper, par);
           // Apply Gaussian wavefunction smearing to the source (= smearing
           // the diquark source field; commutes with spatial integration).
           if (do_smear) {
@@ -424,7 +476,13 @@ int main(int argc, char **argv) {
                     << " flavor=" << (fi == 0 ? "u" : "d")
                     << " spin=" << (si == 0 ? "↑" : "↓")
                     << " blk=" << (upper ? "uu" : "ll")
+                    << " par=" << (par > 0 ? "+" : "-")
                     << " ||η_f||² = " << nrm << std::endl;
+          if (nrm < 1e-28) {
+            std::cerr << "FATAL: zero baryon source (projector/fill "
+                      << "mismatch?) — refusing to CG on 0/0" << std::endl;
+            abort();
+          }
           // Embed into the doubled fermion at the block's flavour slot fi.
           DTXQCDFermionDoubled eta(&Grid), psi(&Grid);
           eta = Zero();
@@ -441,9 +499,10 @@ int main(int argc, char **argv) {
             CovariantSmearing<PeriodicGimplR>::GaussianSmear(
                 Umu_links, psi_q, smear_width, smear_niter, Nd - 1);
           }
-          SB_2d[blk][fi][si][t_src] =
+          SB_2d[ch][fi][si][t_src] =
               BaryonSinkContractProj(d_iso, psi_q, spin_signs[si],
-                                     /*conj_wall=*/upper);
+                                     /*conj_wall=*/upper, par);
+        }
         }
       }
     }
@@ -479,7 +538,7 @@ int main(int argc, char **argv) {
   // positive-decaying signal as fwd) -- matching the connected script's
   // nucl_fbavg = 1/2 (fwd - nucl_neg[T-t]).  Without this the fwd+bwd average
   // partially CANCELS (was the ~0.45 coherence on the real config).
-  auto fold = [&](int blk, int fi, int si, bool backward) {
+  auto fold = [&](int ch, int fi, int si, bool backward) {
     std::vector<ComplexD> C(T, 0.0);
     const RealD align = backward ? -1.0 : +1.0;   // APBC fwd/bwd alignment
     for (int dt = 0; dt < T; ++dt) {
@@ -492,37 +551,58 @@ int main(int argc, char **argv) {
           t_lat = ((t_src - dt) % T + T) % T;
           sgn = (apbc && (dt - t_src) > 0) ? -1.0 : +1.0;
         }
-        C[dt] += sgn * SB_2d[blk][fi][si][t_src][t_lat];
+        C[dt] += sgn * SB_2d[ch][fi][si][t_src][t_lat];
       }
       C[dt] *= ComplexD(align * norm, 0.0);
     }
     return C;
   };
 
-  // Components per block: flavor{p,n} × spin{up,dn} × dir{fwd,bwd} = 8.
-  // baryon_all8_avg = the uu 8-average (the primary signal channel).
-  // With MEAS_BARYON_LL=1 the ll 8 are saved too, plus baryon_ll_avg —
-  // ll↔uu alignment (the [CCPAR] parity flip pairs with TR) is resolved at
-  // analysis from the separate fwd/bwd components, NOT baked in here.
+  // Folded components per (parity, block, flavor, spin, fold direction).
+  // CHANNEL NAMING (see the MEAS_BARYON_NEGPAR comment): the suffix labels
+  // physical content + time-orientation sample:
+  //   fwd        = P₊ fwd fold  = nucleon, forward sample
+  //   bwd        = P₋ bwd fold  = nucleon, T-reversed sample   (NEGPAR only)
+  //   negpar_fwd = P₊ bwd fold  = parity-partner (N*) tower
+  //   negpar_bwd = P₋ fwd fold  = negative-parity, direct      (NEGPAR only)
+  // Averages: baryon_nucleon_avg = mean of the uu NUCLEON components
+  // (fwd 4, plus bwd 4 when NEGPAR); baryon_negpar_avg likewise for the
+  // parity-partner channel; ll components (gate mode) kept separate.
   const char *blk_nm[2] = {"uu", "ll"};
   const char *fl_nm[NF]  = {"p", "n"};
   const char *sp_nm[NS]  = {"up", "dn"};
   std::vector<std::pair<std::string, std::vector<ComplexD>>> comps;
-  std::vector<ComplexD> C_all8_avg(T, 0.0), C_ll_avg(T, 0.0);
-  for (int blk = 0; blk < NB; ++blk)
-    for (int fi = 0; fi < NF; ++fi)
-      for (int si = 0; si < NS; ++si)
-        for (int bw = 0; bw < 2; ++bw) {
-          auto C = fold(blk, fi, si, bw != 0);
-          std::string nm = std::string("baryon_") + blk_nm[blk] + "_" +
-                           fl_nm[fi] + "_" + sp_nm[si] + "_" +
-                           (bw ? "bwd" : "fwd");
-          auto &acc = (blk == 0) ? C_all8_avg : C_ll_avg;
-          for (int t = 0; t < T; ++t) acc[t] += C[t];
-          comps.emplace_back(nm, std::move(C));
-        }
-  for (int t = 0; t < T; ++t) C_all8_avg[t] *= ComplexD(1.0 / 8.0, 0.0);
-  for (int t = 0; t < T; ++t) C_ll_avg[t]   *= ComplexD(1.0 / 8.0, 0.0);
+  std::vector<ComplexD> C_nuc_avg(T, 0.0), C_neg_avg(T, 0.0), C_ll_avg(T, 0.0);
+  int n_nuc = 0, n_neg = 0, n_llc = 0;
+  for (int pi = 0; pi < NP; ++pi)
+    for (int blk = 0; blk < NB; ++blk)
+      for (int fi = 0; fi < NF; ++fi)
+        for (int si = 0; si < NS; ++si)
+          for (int bw = 0; bw < 2; ++bw) {
+            const int ch = pi * NB + blk;
+            auto C = fold(ch, fi, si, bw != 0);
+            // nucleon = P₊ fwd fold OR P₋ bwd fold; the other two are negpar.
+            const bool nucleon = (pi == 0) ? (bw == 0) : (bw == 1);
+            const char *suffix =
+                (pi == 0) ? (bw ? "negpar_fwd" : "fwd")
+                          : (bw ? "bwd" : "negpar_bwd");
+            std::string nm = std::string("baryon_") + blk_nm[blk] + "_" +
+                             fl_nm[fi] + "_" + sp_nm[si] + "_" + suffix;
+            if (blk == 0) {
+              auto &acc = nucleon ? C_nuc_avg : C_neg_avg;
+              int  &cnt = nucleon ? n_nuc : n_neg;
+              for (int t = 0; t < T; ++t) acc[t] += C[t];
+              ++cnt;
+            } else {
+              for (int t = 0; t < T; ++t) C_ll_avg[t] += C[t];
+              ++n_llc;
+            }
+            comps.emplace_back(nm, std::move(C));
+          }
+  for (int t = 0; t < T; ++t) C_nuc_avg[t] *= ComplexD(1.0 / n_nuc, 0.0);
+  for (int t = 0; t < T; ++t) C_neg_avg[t] *= ComplexD(1.0 / n_neg, 0.0);
+  if (n_llc)
+    for (int t = 0; t < T; ++t) C_ll_avg[t] *= ComplexD(1.0 / n_llc, 0.0);
 
   // Back-compat: baryon_total = forward uu, spin+flavor summed (old Eq-36 form,
   // now with the APBC sign the previous version omitted at the wrap).
@@ -536,23 +616,28 @@ int main(int argc, char **argv) {
   std::string outfile = data_dir + "/baryon_dtxqcd_" + std::to_string(traj) + ".h5";
   if (Grid.IsBoss()) {
     Hdf5Writer wr(outfile);
-    write(wr, "baryon_all8_avg", C_all8_avg);   // the uu 8-component average
-    if (do_ll) write(wr, "baryon_ll_avg", C_ll_avg);  // ll 8-average
-    for (auto &c : comps) write(wr, c.first, c.second);   // the 16 independently
+    write(wr, "baryon_nucleon_avg", C_nuc_avg);  // uu nucleon channel average
+    write(wr, "baryon_negpar_avg",  C_neg_avg);  // uu parity-partner average
+    if (do_ll) write(wr, "baryon_ll_avg", C_ll_avg);  // ll gate diagnostic
+    for (auto &c : comps) write(wr, c.first, c.second);   // all components
     write(wr, "baryon_total", C_B_total);         // back-compat (fwd uu sum)
-    // Raw 2D per-(t_src,t_sink) matrices for diagnostics (both blocks).
-    auto flatten_2d = [&](int blk, int fi, int si) {
+    // Raw 2D per-(t_src,t_sink) matrices for diagnostics.  P₊ names are
+    // unchanged (baryon_SB_<blk>_<fl>_<sp>_2d); P₋ gets a _pneg tag.
+    auto flatten_2d = [&](int ch, int fi, int si) {
       std::vector<ComplexD> out(T * T);
       for (int ts = 0; ts < T; ++ts)
         for (int tk = 0; tk < T; ++tk)
-          out[ts * T + tk] = SB_2d[blk][fi][si][ts][tk];
+          out[ts * T + tk] = SB_2d[ch][fi][si][ts][tk];
       return out;
     };
-    for (int blk = 0; blk < NB; ++blk)
-      for (int fi = 0; fi < NF; ++fi)
-        for (int si = 0; si < NS; ++si)
-          write(wr, std::string("baryon_SB_") + blk_nm[blk] + "_" + fl_nm[fi] +
-                    "_" + sp_nm[si] + "_2d", flatten_2d(blk, fi, si));
+    for (int pi = 0; pi < NP; ++pi)
+      for (int blk = 0; blk < NB; ++blk)
+        for (int fi = 0; fi < NF; ++fi)
+          for (int si = 0; si < NS; ++si)
+            write(wr, std::string("baryon_SB_") + blk_nm[blk] + "_" +
+                      fl_nm[fi] + "_" + sp_nm[si] +
+                      (pi ? "_pneg" : "") + "_2d",
+                  flatten_2d(pi * NB + blk, fi, si));
     write(wr, "traj",    traj);
     write(wr, "lambda",  lam);
     write(wr, "mass",    m);
