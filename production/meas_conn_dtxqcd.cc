@@ -177,7 +177,9 @@ int main(int argc, char **argv) {
 
   const RealD lam = lambda_dtxqcd;
   const RealD m   = mass_light_dtxqcd;
-  const RealD tol = TXQCDProduction::detail::env_real("CG_TOL", 1e-8);
+  // 1e-6 default (2026-07-06): plenty for correlator-level precision; the
+  // old 1e-8 spent most of the CG in the convergence tail.  Override CG_TOL.
+  const RealD tol = TXQCDProduction::detail::env_real("CG_TOL", 1e-6);
   const int   cgmax = TXQCDProduction::detail::env_int("CG_MAX", 100000);
   const bool  gauge_only =
       TXQCDProduction::detail::env_int("DTXQCD_CONN_GAUGE_ONLY", 0) != 0;
@@ -202,6 +204,10 @@ int main(int argc, char **argv) {
   DTXQCDCheckpointer::ReadConfig(U, sRNG, pRNG,
                                   cfg_dir + "/ckpoint_lat",
                                   cfg_dir + "/ckpoint_rng", traj);
+  // Optional random gauge twist (GAUGE_TWIST=1): gauge-invariance gate — the
+  // connected pion/nucleon must be twist-invariant (the control channel for
+  // the aux-baryon gauge test).  See dtxqcd_meas_helper.h.
+  DtxqcdMaybeGaugeTwist(U, pRNG);
   RealD plaq = WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U);
 
   // The physical M48 solver (stout + csw + aux, QUDA device CG).  Only built

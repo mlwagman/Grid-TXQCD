@@ -75,6 +75,42 @@ DtxqcdInversionSmear(Grid::GridCartesian &grid,
   return smear.get_SmearedU();
 }
 
+// GAUGE_TWIST=1: apply a random LOCAL gauge transformation Ω(x) to the loaded
+// (U, aux) fields before measuring:
+//   U_μ(x) → Ω(x) U_μ(x) Ω†(x+μ̂)
+//   σ, π   → Ω σ Ω†   (fundamental ⊗ antifundamental colour indices)
+//   d, n   → Ω d Ωᵀ   (BOTH indices fundamental — the diquark couples q q)
+//   s, p   → unchanged (colour singlets)
+// Every gauge-invariant output (plaq, source norms, and — iff every colour
+// index in a correlator is correctly joined — the correlators themselves)
+// must be IDENTICAL (to CG tol) between GAUGE_TWIST=0 and =1 runs on the same
+// config.  A correlator that MOVES under the twist is gauge-variant, hence
+// ensemble-ZERO by Elitzur ⇒ a mis-joined contraction.  Call AFTER the
+// checkpoint load and BEFORE building any solver / derived field.
+inline void DtxqcdMaybeGaugeTwist(Grid::DTXQCDField &U,
+                                  Grid::GridParallelRNG &pRNG) {
+  using namespace Grid;
+  if (TXQCDProduction::detail::env_int("GAUGE_TWIST", 0) == 0) return;
+  GridBase *g_ = U.U.Grid();
+  LatticeColourMatrix om(g_);
+  SU<Nc>::RandomGaugeTransform<PeriodicGimplR>(pRNG, U.U, om);
+  LatticeColourMatrix omT(g_); omT = transpose(om);
+  LatticeColourMatrix omA(g_); omA = adj(om);
+  for (int a = 0; a < DtxqcdNf; ++a)
+    for (int b = 0; b < DtxqcdNf; ++b) {
+      { LatticeColourMatrix blk(PeekIndex<1>(U.sigma, a, b));
+        blk = om * blk * omA; PokeIndex<1>(U.sigma, blk, a, b); }
+      { LatticeColourMatrix blk(PeekIndex<1>(U.pi, a, b));
+        blk = om * blk * omA; PokeIndex<1>(U.pi, blk, a, b); }
+      { LatticeColourMatrix blk(PeekIndex<1>(U.d, a, b));
+        blk = om * blk * omT; PokeIndex<1>(U.d, blk, a, b); }
+      { LatticeColourMatrix blk(PeekIndex<1>(U.n, a, b));
+        blk = om * blk * omT; PokeIndex<1>(U.n, blk, a, b); }
+    }
+  std::cout << GridLogMessage << "[GAUGE_TWIST] random Ω(x) applied: "
+            << "U→ΩUΩ†, σ/π→ΩXΩ†, d/n→ΩXΩᵀ, s/p untouched" << std::endl;
+}
+
 class DtxqcdMeasSolver {
  public:
   // U is the freshly-loaded DTXQCDField (thin gauge + aux).  csw_val/mass are

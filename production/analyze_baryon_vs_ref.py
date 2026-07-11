@@ -68,7 +68,12 @@ def main():
             tsrc_list = [ts for ts in range(T) if np.any(np.abs(SB0[ts]) > 0)]
             norm = 1.0 / (V3 * V3 * len(tsrc_list))
             comps = []
-            for blk in ["uu", "ll"]:
+            # uu only (2026-07-11): pre-fix h5 also carried ll datasets, but
+            # those were the grading-odd cross propagator S_lu (ensemble-zero)
+            # — and the pre-fix uu was gauge-variant (Elitzur-zero; the sink
+            # conjugation bug).  Only h5 produced by the FIXED meas_baryon
+            # (gauge-invariance-gated, uu-only schema) carry signal.
+            for blk in ["uu"]:
                 for fl in ["p", "n"]:
                     for sp in ["up", "dn"]:
                         SB = getc(h, f"baryon_SB_{blk}_{fl}_{sp}_2d").reshape(T, T)
