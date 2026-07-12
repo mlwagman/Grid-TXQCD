@@ -189,9 +189,11 @@ gen_dtxqcd_cfgs.o: gen_dtxqcd_cfgs.cc params.h eig_diag.h meas_helper.h \
 # to compile .o inputs as CUDA source — they're already ELF objects).
 LINKER = $(subst -x cu,,$(CXX))
 
+# -lcusolver: the 4^4 sign-hop observer (dtxqcd_sign_hop.h) does dense
+# Zheevd; harmless on the standard production path (env-gated off).
 gen_dtxqcd_cfgs: gen_dtxqcd_cfgs.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ gen_dtxqcd_cfgs.o $(DTXQCD_NATIVE_IMPL_OBJS) \
-	  $(LDFLAGS) $(LIBS)
+	  $(LDFLAGS) $(LIBS) -lcusolver
 
 # Phase W.3: full-QUDA Wilson hop force test.  Pulls in DTXQCDMpcOpQUDA.h
 # transitively (via DTXQCDWilsonCloverRationalFullActionQudaPrimitive.h ->
@@ -240,6 +242,14 @@ Test_dtxqcd_traceless_projector: Test_dtxqcd_traceless_projector.o
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_traceless_projector.o \
 	  $(LDFLAGS) $(LIBS)
 
+# Per-solve wrapper leak watermark (2026-07-03 managed-memory OOM fix).
+Test_dtxqcd_stylec_eo_memleak.o: Test_dtxqcd_stylec_eo_memleak.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_stylec_eo_memleak: Test_dtxqcd_stylec_eo_memleak.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_stylec_eo_memleak.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
 # EO Style C port Gate 2: multishift Grid-DP vs Style C on the EO Mop.
 Test_dtxqcd_multishift_quda_eo.o: Test_dtxqcd_multishift_quda_eo.cc
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
@@ -273,6 +283,14 @@ Test_txqcd_sign_aux_draws: Test_txqcd_sign_aux_draws.o
 	$(LINKER) $(CXXFLAGS) -o $@ Test_txqcd_sign_aux_draws.o \
 	  $(LDFLAGS) $(LIBS) -lcusolver
 
+# eta contour-deformation Pf-invariance test (dense LU via cuSOLVER Zgetrf).
+Test_dtxqcd_eta_deform_pf.o: Test_dtxqcd_eta_deform_pf.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_eta_deform_pf: Test_dtxqcd_eta_deform_pf.o
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_eta_deform_pf.o \
+	  $(LDFLAGS) $(LIBS) -lcusolver
+
 # DTXQCD measurements that build the QUDA full-volume M operator via
 # dtxqcd_meas_helper.h (DTXQCDMpcOpQUDA) must link the SP/DP native-kernel
 # impl objects, exactly like the HMC test above.  The catch-all rule does not.
@@ -288,6 +306,15 @@ meas_conn_dtxqcd.o: meas_conn_dtxqcd.cc params.h meas_helper.h dtxqcd_meas_helpe
 
 meas_conn_dtxqcd: meas_conn_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ meas_conn_dtxqcd.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+# One-end-projected aux pion correlator (SD/Rao-Blackwell variance-reduction
+# test, 2026-07-05).  Uses the meas-helper M48 solver -> native impl objs.
+meas_aux_pion_proj.o: meas_aux_pion_proj.cc params.h dtxqcd_meas_helper.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+meas_aux_pion_proj: meas_aux_pion_proj.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ meas_aux_pion_proj.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
 # Catch-all.  eig_diag.h + meas_helper.h listed as prereqs so header-only
