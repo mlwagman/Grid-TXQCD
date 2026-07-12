@@ -279,6 +279,52 @@ int main(int argc, char **argv) {
         ok = false;
     }
   }
+  // ---- single-site arms (mwagman 2026-07-12): rescale row/col of ONE
+  // site's upper-block dofs by e^{+eta}/e^{-eta}.
+  //   SIM: scale the FULL row and column (all four sectors) = the true
+  //        similarity ((UAU^-1, UB),(CU^-1, D)) => det EXACTLY invariant
+  //        (numerical validation of the Schur derivation).
+  //   AUX: scale ONLY the aux sectors (UR row-entries, LL col-entries),
+  //        leaving the (u,u) Wilson block untouched = the single-site field
+  //        deformation.  Differs from SIM by the un-twisting of A's hops at
+  //        this site => det CHANGES; its size = the per-site deformation
+  //        cost.  This is exactly why the t-graded global deformation is
+  //        not exact while the uniform one is (U commutes with A only when
+  //        it is constant).
+  auto SiteScale = [&](int site0, double eta, bool aux_only) {
+    std::vector<std::complex<double>> A(H);
+    const double ep = std::exp(+eta), em = std::exp(-eta);
+    for (int k = 0; k < 24; ++k) {          // the 24 upper dofs of site0
+      const int i0 = (site0 * 2 + 0) * 24 + k;
+      for (int j = 0; j < dim; ++j) {       // row i0 *= e^{+eta}
+        if (aux_only && ((j / 24) % 2) == 0) continue;   // UR only
+        A[(size_t)j * dim + i0] *= ep;
+      }
+      for (int r = 0; r < dim; ++r) {       // col i0 *= e^{-eta}
+        if (aux_only && ((r / 24) % 2) == 0) continue;   // LL only
+        A[(size_t)i0 * dim + r] *= em;
+      }
+    }
+    return A;
+  };
+  for (int site0 : {0, 85}) {   // t=0 corner + a bulk site
+    for (bool aux_only : {false, true}) {
+      auto A = SiteScale(site0, 0.3, aux_only);
+      double lad, ph;
+      DetLU(cus, A, dim, lad, ph);
+      const double dl = lad - lad0;
+      const double dp = std::remainder(ph - ph0, 2.0 * M_PI);
+      std::cout << GridLogMessage << (aux_only ? "SITE-AUX" : "SITE-SIM")
+                << " site=" << site0 << " eta=0.3: d log|det| = " << dl
+                << "   d arg(det) = " << dp
+                << ((std::abs(dl) < pass_tol && std::abs(dp) < pass_tol)
+                        ? "   INVARIANT" : "   CHANGES") << std::endl;
+      // Gate: the similarity arm must be exact.
+      if (!aux_only && (std::abs(dl) > pass_tol || std::abs(dp) > pass_tol))
+        ok = false;
+    }
+  }
+
   // Control: UR-only (no LL compensation) MUST change det.
   {
     auto A = Deform(0.1, /*compensate_LL=*/false, /*uniform=*/false);
