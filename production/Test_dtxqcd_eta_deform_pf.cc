@@ -231,7 +231,12 @@ int main(int argc, char **argv) {
             << lad0 << "   arg(det) = " << ph0 << std::endl;
 
   // eta-deformed copy: rows (site,blk) scaled against column block.
-  auto Deform = [&](double eta, bool compensate_LL) {
+  // uniform=true drops the t-grading (constant e^{-eta} / e^{+eta}): the
+  // absorbing psi_l redefinition then commutes with the Wilson hops too, so
+  // uniform MUST be exactly invariant -- the discriminator between "the
+  // compensation itself is wrong" and "the t-grading twists the time hops
+  // (chemical-potential mechanism)".
+  auto Deform = [&](double eta, bool compensate_LL, bool uniform) {
     std::vector<std::complex<double>> A(H);
     for (int sj = 0; sj < V; ++sj)
       for (int bj = 0; bj < 2; ++bj)
@@ -239,7 +244,7 @@ int main(int argc, char **argv) {
           const int j = (sj * 2 + bj) * 12 * DtxqcdNf + k;
           for (int si = 0; si < V; ++si) {
             Coordinate c; SiteCoor(si, c);
-            const double t = (double)c[3];
+            const double t = uniform ? 1.0 : (double)c[3];
             for (int bi = 0; bi < 2; ++bi) {
               double f = 1.0;
               if (bi == 0 && bj == 1) f = std::exp(-eta * t);          // UR
@@ -257,21 +262,26 @@ int main(int argc, char **argv) {
   };
 
   bool ok = true;
-  for (double eta : {0.05, 0.1, 0.3}) {
-    auto A = Deform(eta, /*compensate_LL=*/true);
-    double lad, ph;
-    DetLU(cus, A, dim, lad, ph);
-    const double dl = lad - lad0;
-    const double dp = std::remainder(ph - ph0, 2.0 * M_PI);
-    std::cout << GridLogMessage << "eta=" << eta
-              << ": d log|det| = " << dl << "   d arg(det) = " << dp
-              << ((std::abs(dl) < pass_tol && std::abs(dp) < pass_tol)
-                      ? "   INVARIANT" : "   CHANGES") << std::endl;
-    if (std::abs(dl) > pass_tol || std::abs(dp) > pass_tol) ok = false;
+  for (bool uniform : {false, true}) {
+    for (double eta : {0.05, 0.1, 0.3}) {
+      auto A = Deform(eta, /*compensate_LL=*/true, uniform);
+      double lad, ph;
+      DetLU(cus, A, dim, lad, ph);
+      const double dl = lad - lad0;
+      const double dp = std::remainder(ph - ph0, 2.0 * M_PI);
+      std::cout << GridLogMessage << (uniform ? "UNIFORM eta=" : "eta=") << eta
+                << ": d log|det| = " << dl << "   d arg(det) = " << dp
+                << ((std::abs(dl) < pass_tol && std::abs(dp) < pass_tol)
+                        ? "   INVARIANT" : "   CHANGES") << std::endl;
+      // Gate on the UNIFORM arm (exactness claim); the t-graded arm is the
+      // measured physics result (expected: eta^2 magnitude + linear phase).
+      if (uniform && (std::abs(dl) > pass_tol || std::abs(dp) > pass_tol))
+        ok = false;
+    }
   }
   // Control: UR-only (no LL compensation) MUST change det.
   {
-    auto A = Deform(0.1, /*compensate_LL=*/false);
+    auto A = Deform(0.1, /*compensate_LL=*/false, /*uniform=*/false);
     double lad, ph;
     DetLU(cus, A, dim, lad, ph);
     const double dl = lad - lad0;
