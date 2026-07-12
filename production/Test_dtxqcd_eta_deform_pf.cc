@@ -287,6 +287,85 @@ int main(int argc, char **argv) {
     std::_Exit(0);
   }
 
+  // CHARGE_CHECK=1: verify the GL(1) charge of the cross-block propagator
+  // under the UNIFORM deformation: (M^-1)_lu -> e^{+eta} (M^-1)_lu and
+  // (M^-1)_ul -> e^{-eta} (M^-1)_ul (one net LL / UR insertion).  This is
+  // the obstruction to the "1-d cross-correlator dial": the anomalous
+  // <qbar qbar> source loop carries charge +1, exactly compensating the
+  // single d's -1, so the estimator is neutral and the uniform deformation
+  // cannot rescale it.
+  if (env_int("CHARGE_CHECK", 0) != 0) {
+    const double eta = 0.3;
+    auto Solve = [&](const std::vector<std::complex<double>> &A,
+                     std::vector<std::complex<double>> &x) {
+      cuDoubleComplex *dA, *dB; int *dPiv, *dInfo;
+      GRID_ASSERT(cudaMalloc(&dA, sizeof(cuDoubleComplex) * (size_t)dim * dim) == cudaSuccess);
+      GRID_ASSERT(cudaMalloc(&dB, sizeof(cuDoubleComplex) * dim) == cudaSuccess);
+      GRID_ASSERT(cudaMalloc(&dPiv, sizeof(int) * dim) == cudaSuccess);
+      GRID_ASSERT(cudaMalloc(&dInfo, sizeof(int)) == cudaSuccess);
+      GRID_ASSERT(cudaMemcpy(dA, A.data(), sizeof(cuDoubleComplex) * (size_t)dim * dim,
+                             cudaMemcpyHostToDevice) == cudaSuccess);
+      GRID_ASSERT(cudaMemcpy(dB, x.data(), sizeof(cuDoubleComplex) * dim,
+                             cudaMemcpyHostToDevice) == cudaSuccess);
+      int lwork = 0;
+      cusolverDnZgetrf_bufferSize(cus, dim, dim, dA, dim, &lwork);
+      cuDoubleComplex *dW;
+      GRID_ASSERT(cudaMalloc(&dW, sizeof(cuDoubleComplex) * (size_t)lwork) == cudaSuccess);
+      cusolverDnZgetrf(cus, dim, dim, dA, dim, dW, dPiv, dInfo);
+      cusolverDnZgetrs(cus, CUBLAS_OP_N, dim, 1, dA, dim, dPiv, dB, dim, dInfo);
+      GRID_ASSERT(cudaMemcpy(x.data(), dB, sizeof(cuDoubleComplex) * dim,
+                             cudaMemcpyDeviceToHost) == cudaSuccess);
+      cudaFree(dA); cudaFree(dB); cudaFree(dPiv); cudaFree(dInfo); cudaFree(dW);
+    };
+    // Unit source in the UPPER block at site 85, dof 0.
+    std::vector<std::complex<double>> e0(dim, 0.0), x0(dim), x1(dim);
+    e0[(85 * 2 + 0) * 24 + 0] = 1.0;
+    x0 = e0;
+    Solve(H, x0);                                        // original M^-1 e
+    auto A = Deform(0.0, true, true);                    // copy (eta=0)
+    // uniform deformation at eta:
+    A = H;
+    for (int sj = 0; sj < V; ++sj)
+      for (int bj = 0; bj < 2; ++bj)
+        for (int k = 0; k < 24; ++k) {
+          const int j = (sj * 2 + bj) * 24 + k;
+          for (int si = 0; si < V; ++si)
+            for (int bi = 0; bi < 2; ++bi) {
+              double f = 1.0;
+              if (bi == 0 && bj == 1) f = std::exp(-eta);
+              if (bi == 1 && bj == 0) f = std::exp(+eta);
+              if (f == 1.0) continue;
+              for (int m = 0; m < 24; ++m)
+                A[(size_t)j * dim + (si * 2 + bi) * 24 + m] *= f;
+            }
+        }
+    x1 = e0;
+    Solve(A, x1);                                        // deformed M^-1 e
+    // Compare: upper components (uu block) should be UNCHANGED; lower
+    // components (lu block) should be scaled by e^{+eta}.
+    double uu_dev = 0.0, lu_dev = 0.0, uu_scale = 0.0, lu_scale = 0.0;
+    const double ep = std::exp(+eta);
+    for (int s = 0; s < V; ++s)
+      for (int k = 0; k < 24; ++k) {
+        const int iu = (s * 2 + 0) * 24 + k;
+        const int il = (s * 2 + 1) * 24 + k;
+        uu_dev = std::max(uu_dev, std::abs(x1[iu] - x0[iu]));
+        uu_scale = std::max(uu_scale, std::abs(x0[iu]));
+        lu_dev = std::max(lu_dev, std::abs(x1[il] - ep * x0[il]));
+        lu_scale = std::max(lu_scale, std::abs(x0[il]));
+      }
+    std::cout << GridLogMessage << "CHARGE_CHECK eta=" << eta
+              << ": max|S_uu(def)-S_uu| = " << uu_dev << " (scale " << uu_scale
+              << ")   max|S_lu(def)-e^{+eta}S_lu| = " << lu_dev
+              << " (scale " << lu_scale << ")" << std::endl;
+    std::cout << GridLogMessage << "  => S_uu neutral, S_lu charge +1: "
+              << ((uu_dev < 1e-8 * uu_scale && lu_dev < 1e-8 * lu_scale)
+                      ? "CONFIRMED" : "VIOLATED") << std::endl;
+    Grid_finalize();
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
+
   bool ok = true;
   for (bool uniform : {false, true}) {
     for (double eta : {0.05, 0.1, 0.3}) {
