@@ -261,6 +261,32 @@ int main(int argc, char **argv) {
     return A;
   };
 
+  // ETA_SCAN="0.1,0.2,..." : replace the default t-graded eta list and skip
+  // the uniform/site/control arms — the reweighting-range production scan
+  // (per-config d log|det| / d arg vs eta; breakdown is set by the CONFIG-TO-
+  // CONFIG SPREAD of these, measured by running over an ensemble of TRAJs).
+  std::vector<double> scan;
+  bool scan_mode = false;
+  if (const char *v = std::getenv("ETA_SCAN"); v && *v) {
+    scan_mode = true;
+    std::stringstream ss(v); std::string tok;
+    while (std::getline(ss, tok, ',')) scan.push_back(std::atof(tok.c_str()));
+  }
+  if (scan_mode) {
+    for (double eta : scan) {
+      auto A = Deform(eta, /*compensate_LL=*/true, /*uniform=*/false);
+      double lad, ph;
+      DetLU(cus, A, dim, lad, ph);
+      std::cout << GridLogMessage << "SCAN traj=" << traj << " eta=" << eta
+                << " dlogdet= " << (lad - lad0)
+                << " darg= " << std::remainder(ph - ph0, 2.0 * M_PI)
+                << std::endl;
+    }
+    Grid_finalize();
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
+
   bool ok = true;
   for (bool uniform : {false, true}) {
     for (double eta : {0.05, 0.1, 0.3}) {
