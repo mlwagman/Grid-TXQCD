@@ -236,6 +236,18 @@ int main(int argc, char **argv) {
   // uniform MUST be exactly invariant -- the discriminator between "the
   // compensation itself is wrong" and "the t-grading twists the time hops
   // (chemical-potential mechanism)".
+  // PROFILE env: "linear" (default; e^{-eta t} -- NOTE: carries a large
+  // hidden gradient at the t = T-1 -> 0 boundary wrap, i.e. a net
+  // charge-winding insertion) or "tent" (mwagman: eta(t) = eta*min(t, T-t),
+  // periodic-smooth, reflection-symmetric, zero net winding -- the
+  // boundary-correct, non-charge-inserting profile).
+  const bool tent = [&] {
+    const char *v = std::getenv("PROFILE");
+    return v && std::string(v) == "tent";
+  }();
+  auto prof = [&](int tc) {
+    return tent ? (double)std::min(tc, T - tc) : (double)tc;
+  };
   auto Deform = [&](double eta, bool compensate_LL, bool uniform) {
     std::vector<std::complex<double>> A(H);
     for (int sj = 0; sj < V; ++sj)
@@ -244,7 +256,7 @@ int main(int argc, char **argv) {
           const int j = (sj * 2 + bj) * 12 * DtxqcdNf + k;
           for (int si = 0; si < V; ++si) {
             Coordinate c; SiteCoor(si, c);
-            const double t = uniform ? 1.0 : (double)c[3];
+            const double t = uniform ? 1.0 : prof(c[3]);
             for (int bi = 0; bi < 2; ++bi) {
               double f = 1.0;
               if (bi == 0 && bj == 1) f = std::exp(-eta * t);          // UR
@@ -277,7 +289,8 @@ int main(int argc, char **argv) {
       auto A = Deform(eta, /*compensate_LL=*/true, /*uniform=*/false);
       double lad, ph;
       DetLU(cus, A, dim, lad, ph);
-      std::cout << GridLogMessage << "SCAN traj=" << traj << " eta=" << eta
+      std::cout << GridLogMessage << "SCAN" << (tent ? "-TENT" : "")
+                << " traj=" << traj << " eta=" << eta
                 << " dlogdet= " << (lad - lad0)
                 << " darg= " << std::remainder(ph - ph0, 2.0 * M_PI)
                 << std::endl;
