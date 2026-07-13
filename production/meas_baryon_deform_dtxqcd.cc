@@ -201,9 +201,26 @@ int main(int argc, char **argv) {
   DTXQCDMOp Mop(Dw);
 
   // ---- deformed solver stack (validated in Test_dtxqcd_eta_stoch_pf) ----
+  //
+  // SOURCE-CENTERED PROFILES (2026-07-13): the deformation only SUPPRESSES
+  // noise for source->sink pairs aligned with the p-gradient (the ts=24
+  // single-config look showed up to 23x AMPLIFICATION for anti-aligned
+  // pairs).  So each t_src's propagator is solved on a profile whose tent
+  // MINIMUM sits at that source: p(t) = min((t-ts) mod T, T-(t-ts) mod T) --
+  // both time directions run uphill from every source, and the baked grading
+  // is the translation-invariant e^{-eta min(dt, T-dt)}.  BOOKKEEPING: each
+  // offset is a DIFFERENT contour => translation averaging needs a
+  // ΔlogPf(t0) reweighting factor PER OFFSET (the estimator has the matching
+  // PROF_T0 knob).  PROF_T0 >= 0 overrides with a FIXED offset for all
+  // sources (single-contour mode, e.g. to pair with one reweighting factor).
+  const int prof_t0_fixed = env_int("PROF_T0", -1);
   LatticeInteger tc(&Grid);
   LatticeCoordinate(tc, Nd - 1);
-  auto prof = [&](int t) { return tent ? (double)std::min(t, T - t) : (double)t; };
+  int prof_t0 = (prof_t0_fixed >= 0) ? prof_t0_fixed : 0;
+  auto prof = [&](int t) {
+    const int dt = ((t - prof_t0) % T + T) % T;
+    return tent ? (double)std::min(dt, T - dt) : (double)dt;
+  };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;
     for (int t = 0; t < T; ++t) {
@@ -214,10 +231,6 @@ int main(int argc, char **argv) {
   };
   LatticeDtxqcdD d_wm(&Grid), d_wp(&Grid);
   LatticeDtxqcdN n_wm(&Grid), n_wp(&Grid);
-  WeightField(U.d, d_wm, [&](int t) { return std::exp(-eta * prof(t)) - 1.0; });
-  WeightField(U.n, n_wm, [&](int t) { return std::exp(-eta * prof(t)) - 1.0; });
-  WeightField(U.d, d_wp, [&](int t) { return std::exp(+eta * prof(t)) - 1.0; });
-  WeightField(U.n, n_wp, [&](int t) { return std::exp(+eta * prof(t)) - 1.0; });
 
   typedef DTXQCDFermionDoubled F;
   auto AddCross = [&](const LatticeDtxqcdD &dd, const LatticeDtxqcdN &nn,
@@ -244,7 +257,13 @@ int main(int argc, char **argv) {
     AddCross(d_wm, n_wm, in, out, false);
   };
   LatticeComplex wGu(&Grid), wGl(&Grid), wGui(&Grid), wGli(&Grid);
-  {
+  // Rebuild ALL deformation weights for the profile centered at t0.
+  auto BuildDeformWeights = [&](int t0) {
+    prof_t0 = (prof_t0_fixed >= 0) ? prof_t0_fixed : t0;
+    WeightField(U.d, d_wm, [&](int t) { return std::exp(-eta * prof(t)) - 1.0; });
+    WeightField(U.n, n_wm, [&](int t) { return std::exp(-eta * prof(t)) - 1.0; });
+    WeightField(U.d, d_wp, [&](int t) { return std::exp(+eta * prof(t)) - 1.0; });
+    WeightField(U.n, n_wp, [&](int t) { return std::exp(+eta * prof(t)) - 1.0; });
     wGu = ComplexD(1.0, 0.0);
     wGl = ComplexD(1.0, 0.0);
     LatticeComplex one(&Grid);
@@ -256,7 +275,7 @@ int main(int argc, char **argv) {
     }
     wGui = ComplexD(1.0, 0.0); wGui = wGui / wGu;
     wGli = ComplexD(1.0, 0.0); wGli = wGli / wGl;
-  }
+  };
   auto GApply = [&](F &v, int sign) {
     const LatticeComplex &fu = (sign > 0) ? wGu : wGui;
     const LatticeComplex &fl = (sign > 0) ? wGl : wGli;
@@ -319,7 +338,8 @@ int main(int argc, char **argv) {
         NS, std::vector<std::vector<ComplexD>>(T, std::vector<ComplexD>(T))));
 
   Gamma g5(Gamma::Algebra::Gamma5);
-  for (int t_src : tsrc_list)
+  for (int t_src : tsrc_list) {
+    BuildDeformWeights(t_src);   // source-centered contour for this t_src
     for (int fi = 0; fi < NF; ++fi)
       for (int si = 0; si < NS; ++si) {
         LatticeColourVector wall = DiquarkEpsilonWall(d_iso, t_src,
@@ -356,14 +376,20 @@ int main(int argc, char **argv) {
         for (int tk = 0; tk < T; ++tk)
           SB[fi][si][t_src][tk] = TensorRemove(sl[tk]);
       }
+  }
 
-  // ---- bake in the explicit contour grading e^{-eta [p(tk)-p(ts)]} ----
+  // ---- bake in the explicit contour grading ----
+  // Source-centered profiles: p(ts)=0 at each source, so the factor is the
+  // translation-invariant e^{-eta p_rel(tk-ts)} (tent: min(dt, T-dt)).  With
+  // PROF_T0 fixed, the same formula uses the fixed-profile p differences.
   for (int fi = 0; fi < NF; ++fi)
     for (int si = 0; si < NS; ++si)
-      for (int ts : tsrc_list)
+      for (int ts : tsrc_list) {
+        prof_t0 = (prof_t0_fixed >= 0) ? prof_t0_fixed : ts;
         for (int tk = 0; tk < T; ++tk)
           SB[fi][si][ts][tk] *=
               ComplexD(std::exp(-eta * (prof(tk) - prof(ts))), 0.0);
+      }
 
   std::string outfile = data_dir + "/baryon_deform_dtxqcd_" +
                         std::to_string(traj) + ".h5";
@@ -384,6 +410,7 @@ int main(int argc, char **argv) {
     write(wr, "traj", traj);
     write(wr, "eta", eta);
     write(wr, "profile_tent", (int)tent);
+    write(wr, "prof_t0", prof_t0_fixed);   // -1 = source-centered profiles
     write(wr, "lambda", lam);
     write(wr, "mass", mass);
     write(wr, "plaq", plaq);

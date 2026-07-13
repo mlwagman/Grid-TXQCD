@@ -103,9 +103,16 @@ int main(int argc, char **argv) {
   DTXQCDMOp Mop(Dw);
 
   // t-profile weight applied to a d/n-type aux field: out = f(t) * field.
+  // PROF_T0 (default 0): profile offset -- p(t) = tent/linear of (t - t0)
+  // mod T.  Matches meas_baryon_deform_dtxqcd's source-centered contours:
+  // translation averaging there needs one ΔlogPf per offset, computed here.
+  const int prof_t0 = env_int("PROF_T0", 0);
   LatticeInteger tc(&Grid);
   LatticeCoordinate(tc, Nd - 1);
-  auto prof = [&](int t) { return tent ? (double)std::min(t, T - t) : (double)t; };
+  auto prof = [&](int t) {
+    const int dt = ((t - prof_t0) % T + T) % T;
+    return tent ? (double)std::min(dt, T - dt) : (double)dt;
+  };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;
     for (int t = 0; t < T; ++t) {
