@@ -67,18 +67,52 @@ D = np.array(D) * 256.0   # lambda^4 (deform files are unscaled; baryon8 SB raw)
 Uc = np.array(Uc) * 256.0
 n = len(TRAJS)
 
-print(f"paired configs: {TRAJS}   tsrc={TSRC}   eta={ETA} tent (grading baked in)")
+print(f"paired configs: {n} {TRAJS}   tsrc={TSRC}   eta={ETA} tent "
+      "(grading baked in)")
+
+rng = np.random.default_rng(12345)
+NBOOT = 2000
+
+
+def boot_ratio(u, d):
+    """Bootstrap error on std(d)/std(u), paired resampling."""
+    idx = rng.integers(0, n, size=(NBOOT, n))
+    su = np.array([u[i].std(ddof=1) for i in idx])
+    sd = np.array([d[i].std(ddof=1) for i in idx])
+    r = sd[su > 0] / su[su > 0]
+    r = r[np.isfinite(r)]
+    return r.std(ddof=1) if len(r) > 2 else float("nan")
+
+
 print(f"\n{'dt':>3} | {'<C_undef>':>10} {'std':>9} | {'<C_def>':>10} {'std':>9} | "
-      f"{'std ratio':>9} | {'sphi_u':>7} {'sphi_d':>7}")
-print("-" * 88)
+      f"{'std ratio':>15} | {'sphi_u':>7} {'sphi_d':>7}")
+print("-" * 100)
 for dt in range(1, 13):
     mu, su = Uc[:, dt].real.mean(), Uc[:, dt].real.std(ddof=1)
     md, sd = D[:, dt].real.mean(), D[:, dt].real.std(ddof=1)
+    dr = boot_ratio(Uc[:, dt].real, D[:, dt].real)
     # phase spread across configs (dispersion of arg, mean-centered)
     pu = np.angle(Uc[:, dt] / Uc[:, dt].mean()) if abs(Uc[:, dt].mean()) > 0 else np.zeros(n)
     pd = np.angle(D[:, dt] / D[:, dt].mean()) if abs(D[:, dt].mean()) > 0 else np.zeros(n)
     print(f"{dt:3d} | {mu:+10.2e} {su:9.2e} | {md:+10.2e} {sd:9.2e} | "
-          f"{sd/su:9.3f} | {pu.std(ddof=1):7.3f} {pd.std(ddof=1):7.3f}")
+          f"{sd/su:7.3f} +-{dr:6.3f} | {pu.std(ddof=1):7.3f} {pd.std(ddof=1):7.3f}")
+
+# mean preservation: grading is baked in, so the (unreweighted, factor ~1)
+# <C_def> must be consistent with <C_undef> -- a failure here is a
+# grading/bookkeeping bug, not physics.
+print("\nmean preservation, paired diff <C_def - C_undef> (expect 0 within err):")
+for dt in range(1, 9):
+    diff = (D[:, dt] - Uc[:, dt]).real
+    err = diff.std(ddof=1) / np.sqrt(n)
+    print(f"  dt={dt}: {diff.mean():+10.2e} +- {err:8.2e}"
+          f"   ({diff.mean()/err:+5.1f} sigma)")
+
+# ensemble-level magnitude m_eff signature (per-config lines follow)
+lu = np.log(np.abs(Uc[:, 1]) / np.abs(Uc[:, 2]))
+ld = np.log(np.abs(D[:, 1]) / np.abs(D[:, 2]))
+dm = ld - lu
+print(f"\nensemble magnitude m_eff shift (dt=1->2): "
+      f"{dm.mean():+.3f} +- {dm.std(ddof=1)/np.sqrt(n):.3f}   (expect +{ETA})")
 
 print("\nper-config MAGNITUDE m_eff (|C| slope dt=1->2), expect def = undef + eta:")
 for i, tr in enumerate(TRAJS):
@@ -88,8 +122,7 @@ for i, tr in enumerate(TRAJS):
           f"diff = {mu_d - mu_u:+.3f}  (eta = {ETA})")
 
 print("\nS/N at fixed dt (|mean|/std), undeformed vs deformed "
-      "(NOTE: deformed mean needs the ~unity reweighting factor; "
-      "5-config stds have ~50% uncertainty):")
+      "(NOTE: deformed mean needs the ~unity reweighting factor):")
 for dt in (2, 4, 6, 8, 10, 12):
     mu, su = Uc[:, dt].real.mean(), Uc[:, dt].real.std(ddof=1)
     md, sd = D[:, dt].real.mean(), D[:, dt].real.std(ddof=1)
