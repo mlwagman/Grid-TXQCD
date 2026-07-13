@@ -325,7 +325,17 @@ int main(int argc, char **argv) {
       }
       r2 = rn;
     }
-    std::cout << GridLogMessage << "[deform-CG] iters=" << k << std::endl;
+    const RealD relres = std::sqrt(norm2(r) / b2);
+    std::cout << GridLogMessage << "[deform-CG] iters=" << k
+              << " relres=" << relres << std::endl;
+    if (relres > tol) {
+      std::cout << GridLogMessage << "[deform-CG] NOT CONVERGED at CG_MAX="
+                << cgmax << " (relres " << relres << " > tol " << tol
+                << ") -- aborting rather than writing tainted correlators"
+                << std::endl;
+      Grid_finalize();
+      std::_Exit(3);
+    }
   };
 
   // ---- measurement loop: S_def . (undeformed d* wall), P+ projections ----
