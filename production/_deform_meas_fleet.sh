@@ -14,7 +14,9 @@
 # eta=0.2, NTSRC=4 (16 solves ~ 2h/config), one config per GPU, resumable.
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh
 P=/lustre2/nplqcd/Grid-DTXQCD/production
-OUT=$P/meas_2pt/dtxqcd_lam4_deform_eta0p2
+DEFETA=${DEFETA:-0.2}
+ETATAG=$(echo "$DEFETA" | tr '.' 'p')
+OUT=$P/meas_2pt/dtxqcd_lam4_deform_eta${ETATAG}
 mkdir -p "$OUT"
 TRAJS=(100 200 300 400 500)
 declare -a SLOT_PID
@@ -23,7 +25,7 @@ launch() {
   echo "  [launch] traj=$traj -> GPU $gpu"
   srun --overlap --mpi=pmix -N1 -n1 -c16 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES=$gpu \
-        LATT=16.16.16.48 ETA=0.2 PROFILE=tent MEAS_BARYON_NTSRC=4 \
+        LATT=16.16.16.48 ETA=$DEFETA PROFILE=tent MEAS_BARYON_NTSRC=4 \
         CG_TOL=1e-7 LAMBDA_DTXQCD=4 \
         CFG_DIR=$P/cfgs/dtxqcd_lam4.0000_tla_fromchroma_cw DATA_DIR=$OUT \
         OMP_NUM_THREADS=16 \
