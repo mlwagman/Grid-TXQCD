@@ -164,18 +164,149 @@ int main(int argc, char **argv) {
     AddCross(d_dp, n_dp, in, out, false);
   };
 
+  // CHEMPOT_FRAME=1 (default): work with M~ = G^{-1} M_def G, the
+  // chemical-potential representation (G = diag(e^{-eta p(t)/2} upper,
+  // e^{+eta p(t)/2} lower), site-diagonal).  M~ has UNDEFORMED aux blocks and
+  // only e^{+-eta/2}-twisted Wilson time hops -> near-undeformed CG
+  // conditioning even when e^{eta p} reaches e^{4.8} (production tent), where
+  // the aux-frame M_def is pathologically ill-conditioned.  The trace is
+  // frame-invariant: Tr[M~^{-1} G^{-1} dM G] = Tr[M_def^{-1} dM]; the
+  // G-sandwich of dM also cancels its e^{+-eta p} weight blowup (leaving ~p).
+  // Implemented as scale-in / validated-M_def / scale-out sandwiches.
+  const bool chempot = env_int("CHEMPOT_FRAME", 1) != 0;
+  // G weight fields, PRECOMPUTED once per GL node (BuildGWeights): GApply is
+  // called 4x per CG iteration, so it must be two multiplies, not a 48-slice
+  // where() loop (the first production smoke died on exactly that churn).
+  LatticeComplex wGu(&Grid), wGl(&Grid), wGui(&Grid), wGli(&Grid);
+  auto BuildGWeights = [&](double e) {
+    wGu = ComplexD(1.0, 0.0);
+    wGl = ComplexD(1.0, 0.0);
+    LatticeComplex one(&Grid);
+    for (int t = 0; t < T; ++t) {
+      one = ComplexD(std::exp(-e * prof(t) / 2.0), 0.0);
+      wGu = where(tc == Integer(t), one, wGu);
+      one = ComplexD(std::exp(+e * prof(t) / 2.0), 0.0);
+      wGl = where(tc == Integer(t), one, wGl);
+    }
+    wGui = ComplexD(1.0, 0.0);
+    wGli = ComplexD(1.0, 0.0);
+    wGui = wGui / wGu;    // pointwise reciprocals: G^{-1}
+    wGli = wGli / wGl;
+  };
+  auto GApply = [&](F &v, int sign) {
+    // sign=+1: apply G; sign=-1: apply G^{-1}.
+    const LatticeComplex &fu = (sign > 0) ? wGu : wGui;
+    const LatticeComplex &fl = (sign > 0) ? wGl : wGli;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      v.upper.f[a] = fu * v.upper.f[a];
+      v.lower.f[a] = fl * v.lower.f[a];
+    }
+  };
+  auto Mtil = [&](const F &in, F &out) {
+    if (!chempot) { Mdef(in, out); return; }
+    F w(&Grid); w = in;
+    GApply(w, +1);
+    Mdef(w, out);
+    GApply(out, -1);
+  };
+  auto MtilDag = [&](const F &in, F &out) {
+    if (!chempot) { MdefDag(in, out); return; }
+    F w(&Grid); w = in;
+    GApply(w, -1);
+    MdefDag(w, out);
+    GApply(out, +1);
+  };
+  auto dMtil_aux = [&](const F &in, F &out) {
+    if (!chempot) { dM(in, out); return; }
+    F w(&Grid); w = in;
+    GApply(w, +1);
+    dM(w, out);
+    GApply(out, -1);
+  };
+
+  // HOP-FORM trace insertion dM~/deta (INSERTION=hop, default): the exact
+  // eta-derivative of M~ in the chemical-potential frame, supported ONLY on
+  // the Wilson TIME HOPS with weights ~ dp/2 = O(1/2) -- vs the aux-frame
+  // insertion's profile weights p(t) <= T/2, whose square is the variance.
+  // (The two insertions differ by the traceless commutator [M~, Lambda], so
+  // the TRACE is identical; the hop form is the low-variance representation.)
+  //
+  //   dM~.upper(x) = af_u(t) (-1/2)(1-g_t) W3(x) psi(x+t)
+  //                + ab_u(t) (-1/2)(1+g_t) W7(x) psi(x-t)     (lower: W3c/W7c)
+  //   af_u(t) = (-dp(t)/2)   e^{-eta dp(t)/2},   dp(t) = p(t+1 mod T) - p(t)
+  //   ab_u(t) = (+dp(t-1)/2) e^{+eta dp(t-1)/2}          (lower: signs flip)
+  // W3 = APBC-phase-applied forward t-link, W7(x) = W3(x-t)^dag -- the same
+  // objects Grid's DoubleStore puts in slots 3 and 7.  Block-diagonal (no
+  // cross terms).  All spin/sign conventions are certified by DERIVCHECK
+  // against the finite difference of the exact G-sandwich M~.
+  const bool hop_insert = [&] {
+    const char *v = std::getenv("INSERTION");
+    return !v || std::string(v) != "aux";
+  }();
+  Gamma g_t(Gamma::Algebra::GammaT);
+  LatticeColourMatrix W3(&Grid), W7(&Grid), W3c(&Grid), W7c(&Grid);
+  {
+    LatticeColourMatrix Ut(&Grid);
+    Ut = PeekIndex<LorentzIndex>(Usm, Nd - 1);
+    LatticeColourMatrix mUt(&Grid);
+    mUt = ComplexD(-1.0, 0.0) * Ut;                    // APBC phase on wrap
+    W3 = where(tc == Integer(T - 1), mUt, Ut);
+    W7 = Cshift(LatticeColourMatrix(adj(W3)), Nd - 1, -1);
+    W3c = conjugate(W3);                               // lower block gauge
+    W7c = Cshift(LatticeColourMatrix(adj(W3c)), Nd - 1, -1);
+  }
+  LatticeComplex af_u(&Grid), ab_u(&Grid), af_l(&Grid), ab_l(&Grid);
+  auto BuildHopWeights = [&](double e) {
+    auto dp = [&](int t) { return prof((t + 1) % T) - prof(t); };
+    LatticeComplex one(&Grid);
+    for (int t = 0; t < T; ++t) {
+      const double dpf = dp(t);
+      const double dpb = dp((t - 1 + T) % T);
+      one = ComplexD(-0.5 * dpf * std::exp(-e * dpf / 2.0), 0.0);
+      af_u = where(tc == Integer(t), one, af_u);
+      one = ComplexD(+0.5 * dpb * std::exp(+e * dpb / 2.0), 0.0);
+      ab_u = where(tc == Integer(t), one, ab_u);
+      one = ComplexD(+0.5 * dpf * std::exp(+e * dpf / 2.0), 0.0);
+      af_l = where(tc == Integer(t), one, af_l);
+      one = ComplexD(-0.5 * dpb * std::exp(-e * dpb / 2.0), 0.0);
+      ab_l = where(tc == Integer(t), one, ab_l);
+    }
+  };
+  auto dMhopBlock = [&](const LatticeFermion &psi, LatticeFermion &out,
+                        const LatticeColourMatrix &Wf,
+                        const LatticeColourMatrix &Wb,
+                        const LatticeComplex &af, const LatticeComplex &ab) {
+    LatticeFermion pp = Cshift(psi, Nd - 1, +1);
+    LatticeFermion tf = Wf * pp;
+    tf = ComplexD(-0.5, 0.0) * (tf - g_t * tf);        // -1/2 (1 - g_t)
+    LatticeFermion pm = Cshift(psi, Nd - 1, -1);
+    LatticeFermion tb = Wb * pm;
+    tb = ComplexD(-0.5, 0.0) * (tb + g_t * tb);        // -1/2 (1 + g_t)
+    out = af * tf + ab * tb;
+  };
+  auto dMhop = [&](const F &in, F &out) {
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      dMhopBlock(in.upper.f[a], out.upper.f[a], W3, W7, af_u, ab_u);
+      dMhopBlock(in.lower.f[a], out.lower.f[a], W3c, W7c, af_l, ab_l);
+    }
+  };
+  auto dMtil = [&](const F &in, F &out) {
+    if (hop_insert) dMhop(in, out);
+    else            dMtil_aux(in, out);
+  };
+
   // Custom CG on Mdef^dag Mdef (pattern of dtxqcd_diag.h compute_trminv).
   auto SolveDef = [&](const F &src, F &x) {
     F b(&Grid), r(&Grid), p(&Grid), t1(&Grid), Ap(&Grid);
-    MdefDag(src, b);
+    MtilDag(src, b);
     x = Zero();
     r = b; p = b;
     RealD r2 = norm2(r), b2 = std::max(norm2(b), 1e-300);
     RealD tol2 = tol * tol * b2;
     int k = 0;
     for (; k < cgmax; ++k) {
-      Mdef(p, t1);
-      MdefDag(t1, Ap);
+      Mtil(p, t1);
+      MtilDag(t1, Ap);
       RealD pAp = innerProduct(p, Ap).real();
       RealD alpha = r2 / pAp;
       for (int a = 0; a < DtxqcdNf; ++a) {
@@ -317,6 +448,43 @@ int main(int argc, char **argv) {
     std::_Exit(0);
   }
 
+  // DERIVCHECK=1: certify the hop-form insertion against the finite
+  // difference of the EXACT M~ (G-sandwich of the OPCHECK-validated M_def):
+  //   dMhop(v) =?= [M~(eta+d) - M~(eta-d)] v / (2d),  d = 1e-4.
+  // Any spin/sign/weight convention error shows as an O(1) mismatch; a
+  // correct implementation agrees to O(d^2) ~ 1e-8.
+  if (env_int("DERIVCHECK", 0) != 0) {
+    const double d = 1e-4;
+    F v(&Grid), y1(&Grid), y2(&Grid), yd(&Grid), yh(&Grid);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      gaussian(pRNG, v.upper.f[a]);
+      gaussian(pRNG, v.lower.f[a]);
+    }
+    BuildWeights(eta + d); BuildGWeights(eta + d);
+    Mtil(v, y1);
+    BuildWeights(eta - d); BuildGWeights(eta - d);
+    Mtil(v, y2);
+    RealD nrm = 0.0, dev = 0.0;
+    BuildHopWeights(eta);
+    dMhop(v, yh);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      yd.upper.f[a] = (0.5 / d) * (y1.upper.f[a] - y2.upper.f[a]);
+      yd.lower.f[a] = (0.5 / d) * (y1.lower.f[a] - y2.lower.f[a]);
+      dev += norm2(LatticeFermion(yd.upper.f[a] - yh.upper.f[a]));
+      dev += norm2(LatticeFermion(yd.lower.f[a] - yh.lower.f[a]));
+      nrm += norm2(yd.upper.f[a]) + norm2(yd.lower.f[a]);
+    }
+    std::cout << GridLogMessage << "DERIVCHECK eta=" << eta
+              << " profile=" << (tent ? "tent" : "linear")
+              << ": |dMhop - FD(Mtil)| / |FD| = "
+              << std::sqrt(dev / nrm)
+              << (std::sqrt(dev / nrm) < 1e-6 ? "   MATCH" : "   MISMATCH")
+              << std::endl;
+    Grid_finalize();
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
+
   // 8-node Gauss-Legendre on [0,1] (rescaled to [0,eta]); truncate to n_gl.
   static const double gl_x[8] = {0.01985507, 0.10166676, 0.23723379, 0.40828268,
                                  0.59171732, 0.76276621, 0.89833324, 0.98014493};
@@ -328,6 +496,8 @@ int main(int argc, char **argv) {
   for (int q = 0; q < n_gl; ++q) {
     const double ep = eta * gl_x[q];
     BuildWeights(ep);
+    if (chempot) BuildGWeights(ep);
+    if (hop_insert) BuildHopWeights(ep);
     // Hutchinson: Tr[Mdef^{-1} dM] = E<v, Mdef^{-1} dM v> / 2 (gaussian).
     ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
     for (int h = 0; h < n_noise; ++h) {
@@ -340,12 +510,12 @@ int main(int argc, char **argv) {
         gaussian(pRNG, v.upper.f[a]);
         gaussian(pRNG, v.lower.f[a]);
       }
-      dM(v, y);
+      dMtil(v, y);
       SolveDef(y, x);
       ComplexD est1 = innerProduct(v, x) / 2.0;
       for (int a = 0; a < DtxqcdNf; ++a)
         v.lower.f[a] = -v.lower.f[a];                    // v -> Gv
-      dM(v, y);
+      dMtil(v, y);
       SolveDef(y, x);
       ComplexD est2 = innerProduct(v, x) / 2.0;
       ComplexD est = 0.5 * (est1 + est2);
