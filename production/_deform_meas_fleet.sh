@@ -20,11 +20,16 @@ OUT=$P/meas_2pt/dtxqcd_lam4_deform_eta${ETATAG}
 mkdir -p "$OUT"
 # All lambda=4 configs with an UNDEFORMED partner (pairing requirement):
 # enumerate the baryon8 h5s.  Resumable via the h5-skip below.
-TRAJS=()
-for f in $(ls -v $P/meas_2pt/dtxqcd_lam4_baryon8/baryon_dtxqcd_*.h5 2>/dev/null); do
-  t=$(basename "$f"); t=${t#baryon_dtxqcd_}; t=${t%.h5}
-  TRAJS+=("$t")
-done
+# DEFTRAJS="100 200 ..." overrides with an explicit list (eta-scan subsets).
+if [ -n "$DEFTRAJS" ]; then
+  TRAJS=($DEFTRAJS)
+else
+  TRAJS=()
+  for f in $(ls -v $P/meas_2pt/dtxqcd_lam4_baryon8/baryon_dtxqcd_*.h5 2>/dev/null); do
+    t=$(basename "$f"); t=${t#baryon_dtxqcd_}; t=${t%.h5}
+    TRAJS+=("$t")
+  done
+fi
 echo "=== deform fleet eta=$DEFETA: ${#TRAJS[@]} paired configs ==="
 declare -a SLOT_PID
 launch() {
