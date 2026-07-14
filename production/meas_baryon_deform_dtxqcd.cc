@@ -232,7 +232,12 @@ int main(int argc, char **argv) {
   // solve — the Grid-path apply (~0.11 s) is ample there, so the adapter
   // is built WITHOUT the QUDA op and the deform driver's full-path legs
   // fall back to the struct reference automatically.)
-  const bool use_eo_def = env_int("DTXQCD_DEFORM_EO", 0) != 0;
+  // DEFAULT ON for lambda >= 5 since 2026-07-14 (e2882a2e gates: operator
+  // 4.4e-16, solution 2.5e-8/2.9e-7, ~2x wall at eta=0.4-0.6, and at
+  // eta=0.8 EO CONVERGES where the full path does not).  Keyed off
+  // LAMBDA_DTXQCD (metadata env, set by all fleets); =0/1 overrides.
+  const bool use_eo_def =
+      env_int("DTXQCD_DEFORM_EO", (lam >= 5.0) ? 1 : 0) != 0;
 #ifdef GRID_HAVE_QUDA
   std::unique_ptr<DTXQCDMpcOpQUDA> Mq;
 #endif
@@ -501,6 +506,58 @@ int main(int argc, char **argv) {
     //   ref = M~oo v − M~oe u.
     // Plus adjointness of the device Mpc~/Mpc~dag pair.
     if (use_eo_def && Qdef && Qdef->HasEO()) {
+      // The full Schur-synthesis identity needs ~2 GB of check temporaries
+      // on top of the EO stack — it fits ONLY at small volumes (the 4^4
+      // signhop gate).  At production volume run the cheap device
+      // adjointness check (4 RB fields; catches coefficient-array swap /
+      // staleness drift, the realistic runtime failure) — production
+      // correctness is certified by the solution-level h5 gates
+      // (e2882a2e: 2.5e-8/2.9e-7).  DTXQCD_DEFORM_EO_FULLCHECK=1 forces
+      // the full identity anywhere (memory permitting).
+      const bool full_eo_check =
+          env_int("DTXQCD_DEFORM_EO_FULLCHECK",
+                  (Grid.gSites() <= 65536) ? 1 : 0) != 0;
+      if (!full_eo_check) {
+        F vo(&RBGrid), uo(&RBGrid), qo(&RBGrid), qdo(&RBGrid);
+        {
+          GridParallelRNG RNGf(&Grid);
+          RNGf.SeedFixedIntegers({11, 22, 33, 44});
+          F tmp_full(&Grid);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            gaussian(RNGf, tmp_full.upper.f[a]);
+            gaussian(RNGf, tmp_full.lower.f[a]);
+          }
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            pickCheckerboard(Odd, vo.upper.f[a], tmp_full.upper.f[a]);
+            pickCheckerboard(Odd, vo.lower.f[a], tmp_full.lower.f[a]);
+          }
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            gaussian(RNGf, tmp_full.upper.f[a]);
+            gaussian(RNGf, tmp_full.lower.f[a]);
+          }
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            pickCheckerboard(Odd, uo.upper.f[a], tmp_full.upper.f[a]);
+            pickCheckerboard(Odd, uo.lower.f[a], tmp_full.lower.f[a]);
+          }
+        }
+        Qdef->MpcTil(vo, qo);
+        Qdef->MpcTilDag(uo, qdo);
+        const ComplexD a1 = DtxqcdDeformQuda::finner_(uo, qo);
+        const ComplexD a2 = DtxqcdDeformQuda::finner_(qdo, vo);
+        const RealD adjEO = DtxqcdAbs(ComplexD(a1 - a2)) / DtxqcdAbs(a1);
+        std::cout << GridLogMessage
+                  << "[deform-qcheck:EO] adjointness (device-only) rel = "
+                  << adjEO << std::endl;
+        if (adjEO > 1e-10) {
+          std::cout << GridLogMessage << "[deform-qcheck:EO] FAILED"
+                    << std::endl;
+          Grid_finalize();
+          std::_Exit(4);
+        }
+        std::cout << GridLogMessage << "[deform-qcheck:EO] PASSED "
+                  << "(adjointness; full identity = the 4^4 gate)"
+                  << std::endl;
+      } else {
       F vo(&RBGrid), uo(&RBGrid), qo(&RBGrid), qdo(&RBGrid);
       F ref_oo(&RBGrid), ref_eo(&RBGrid), ref_oe(&RBGrid), ue(&RBGrid);
       F zf(&Grid), mzf(&Grid);
@@ -580,6 +637,7 @@ int main(int argc, char **argv) {
         std::_Exit(4);
       }
       std::cout << GridLogMessage << "[deform-qcheck:EO] PASSED" << std::endl;
+      }  // full_eo_check
     }
 #endif
   }
