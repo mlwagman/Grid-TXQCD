@@ -23,6 +23,7 @@
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDRemezAutoScale.h>
 #ifdef GRID_HAVE_QUDA
 #include <Grid/util/QudaInit.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
@@ -45,6 +46,18 @@ static std::string env_str(const char *k, const std::string &d) {
   const char *v = std::getenv(k);
   return (v && *v) ? std::string(v) : d;
 }
+
+// Shim: DtxqcdDeformQuda's Mtil/MtilDag as the M/Mdag interface that
+// DtxqcdLanczosMinMax (the RHMC-autoscale plain Lanczos) expects.
+struct DeformOpShim {
+  DtxqcdDeformQuda &q;
+  void M(const DTXQCDFermionDoubled &in, DTXQCDFermionDoubled &out) {
+    q.Mtil(in, out);
+  }
+  void Mdag(const DTXQCDFermionDoubled &in, DTXQCDFermionDoubled &out) {
+    q.MtilDag(in, out);
+  }
+};
 
 // M~^dag M~ on the packed field (IRL/PowerMethod need one Lattice type).
 class PackedDeformNormalOp : public LinearOperatorBase<LatticeDtxqcdPacked> {
@@ -159,6 +172,32 @@ int main(int argc, char **argv) {
   PackedDeformNormalOp NOp(Qdef, Grid);
   GridParallelRNG RNG(&Grid);
   RNG.SeedFixedIntegers({314, 159, 265, 358});
+
+  // SPECTRUM_MODE=ritz: the RHMC-autoscale plain Lanczos (DtxqcdLanczosMinMax,
+  // no Chebyshev) — lambda_min/max Ritz estimates in ~2*NM applies (~1 s per
+  // eta at the native-kernel speed).  Right tool for mildly-conditioned
+  // spectra (lambda=5/6); at deep kappa the Ritz lambda_min is an UPPER
+  // bound (underconverged), so treat lambda=3/4 ritz numbers as bounds.
+  // Default mode "irl" = the Chebyshev-IRL census below.
+  const bool ritz = env_str("SPECTRUM_MODE", "irl") == "ritz";
+  const int ritz_nm = env_int("NM", 48);
+  if (ritz) {
+    DeformOpShim shim{Qdef};
+    for (double eta : etas) {
+      Qdef.SetProfile(eta, prof);
+      RealD lmin = 0, lmax = 0;
+      DtxqcdLanczosMinMax(shim, (GridBase *)&Grid, RNG, ritz_nm, /*cb=*/-1,
+                          lmin, lmax);
+      std::cout << GridLogMessage << "[ritz] eta=" << eta
+                << " lambda_min~" << lmin << " lambda_max~" << lmax
+                << " kappa~" << (lmin > 0 ? lmax / lmin : 0.0) << std::endl;
+    }
+    std::cout << GridLogMessage << "==== probe_deform_spectrum done ===="
+              << std::endl;
+    Grid_finalize();
+    std::cout.flush();
+    std::_Exit(0);
+  }
 
   for (double eta : etas) {
     Qdef.SetProfile(eta, prof);
