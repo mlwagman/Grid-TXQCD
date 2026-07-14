@@ -17,6 +17,12 @@
 # compatible: different s distribution + nonzero traces).  EO Style C fast
 # path for lambda>=5; pass BACKEND=noneo for the lambda=4 point (EO MDS=10
 # M_ee pathology).  Parametrized via --export: LAM, optional BACKEND.
+#
+# NO_METROP defaults to 0 (2026-07-14): Grid's NoMetropolisUntil is RELATIVE
+# to StartTrajectory, so the old hardcoded 5 force-accepted the first 5
+# trajectories of EVERY chained restart (one unfiltered 5-traj window per
+# job).  Fresh chroma forks that want the import-equilibration window must
+# now pass NO_METROP=5 explicitly.
 mkdir -p /lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs
 nvidia-smi --query-gpu=index,name --format=csv,noheader
 
@@ -49,6 +55,6 @@ LAMBDA_DTXQCD=$LAM MDSTEPS=10 TRAJL=0.353553390593274 \
 ADD_STRANGE=1 MASS_STRANGE=-0.245 \
 IMPORT_CFG=$CHROMA DTXQCD_SUFFIX="_tla_fromchroma_cw" \
 DTXQCD_TRACELESS_AUX=1 \
-TRAJ=${TRAJ:-500} NO_METROP=${NO_METROP:-5} N_SKIP=10 \
+TRAJ=${TRAJ:-500} NO_METROP=${NO_METROP:-0} N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 echo "=== tla clean-window lam=$LAM backend=${BACKEND:-eo} exited rc=$? $(date) ==="
