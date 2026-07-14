@@ -43,6 +43,14 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/util/QudaInit.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
+#endif
+// QUDA-backed M~ (StyleC base op + per-timeslice hop corrections) — the
+// DTXQCD_DEFORM_QUDA=1 fast path.  See the header for the operator identity
+// and the dagger (projector-flip + array-swap) derivation.
+#include "dtxqcd_deform_quda.h"
 
 using namespace Grid;
 
@@ -200,6 +208,41 @@ int main(int argc, char **argv) {
                                  U.sigma, U.pi, U.d, U.n, U.s, U.p);
   DTXQCDMOp Mop(Dw);
 
+  // ---- DTXQCD_DEFORM_QUDA=1: QUDA-backed M~ (default OFF -> Grid path) ---
+  // Base op = the untouched StyleC device M (chem-potential frame keeps aux
+  // cross-blocks UNDEFORMED, so the standard operator + aux-static cache
+  // apply verbatim); the deformation rides as 4 Grid-side hop-correction
+  // terms per apply.  DTXQCD_DEFORM_QUDA_CHECK=1 (default ON when the
+  // backend is on) verifies M~ and M~^dag against the Grid sandwich on
+  // random vectors before any solve.
+  const bool use_qdef = env_int("DTXQCD_DEFORM_QUDA", 0) != 0;
+  const bool qdef_check =
+      env_int("DTXQCD_DEFORM_QUDA_CHECK", use_qdef ? 1 : 0) != 0;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<DTXQCDMpcOpQUDA> Mq;
+#endif
+  std::unique_ptr<DtxqcdPackedFullHermOp> Hop;
+  std::unique_ptr<DtxqcdDeformQuda> Qdef;
+  if (use_qdef) {
+#ifdef GRID_HAVE_QUDA
+    Grid::Quda::initialize();  // idempotent
+    Mq.reset(new DTXQCDMpcOpQUDA(Usm, Grid, RBGrid, mass, csw,
+                                 U.sigma, U.pi, U.d, U.n, U.s, U.p));
+    // Aux fields are fixed for the whole measurement: pack the device aux
+    // cache once (the SetAuxStatic hoist), same as the undeformed meas path.
+    Mq->SetAuxStatic(true);
+    Hop.reset(new DtxqcdPackedFullHermOp(Mop, *Mq, &Grid, Even));
+#else
+    Hop.reset(new DtxqcdPackedFullHermOp(Mop, &Grid, Even));
+#endif
+    Qdef.reset(new DtxqcdDeformQuda(*Hop, Grid, Usm, T));
+    std::cout << GridLogMessage << "[baryon-def] backend=QUDA-hopcorr"
+#ifndef GRID_HAVE_QUDA
+              << " (non-QUDA build: struct-path reference fallback)"
+#endif
+              << std::endl;
+  }
+
   // ---- deformed solver stack (validated in Test_dtxqcd_eta_stoch_pf) ----
   //
   // SOURCE-CENTERED PROFILES (2026-07-13): the deformation only SUPPRESSES
@@ -275,6 +318,7 @@ int main(int argc, char **argv) {
     }
     wGui = ComplexD(1.0, 0.0); wGui = wGui / wGu;
     wGli = ComplexD(1.0, 0.0); wGli = wGli / wGl;
+    if (Qdef) Qdef->SetProfile(eta, [&](int t) { return prof(t); });
   };
   auto GApply = [&](F &v, int sign) {
     const LatticeComplex &fu = (sign > 0) ? wGu : wGui;
@@ -338,6 +382,55 @@ int main(int argc, char **argv) {
     }
   };
 
+  // ---- QUDA-path operator gates (random-vector, before any solve) --------
+  // 1. M~ identity: QUDA hop-correction M~ == Grid sandwich Mtil (exact
+  //    operator identity; catches convention/frame errors at any volume).
+  // 2. Dagger identity: same for M~^dag (the #1 trap).
+  // 3. Adjointness: <u, M~ v> == <M~^dag u, v> within roundoff.
+  if (Qdef && qdef_check) {
+    BuildDeformWeights(0);
+    GridParallelRNG RNG(&Grid);
+    RNG.SeedFixedIntegers({77, 13, 999, 4242});
+    F v(&Grid), u(&Grid), ag(&Grid), aq(&Grid), dg(&Grid), dq(&Grid);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      gaussian(RNG, v.upper.f[a]);
+      gaussian(RNG, v.lower.f[a]);
+      gaussian(RNG, u.upper.f[a]);
+      gaussian(RNG, u.lower.f[a]);
+    }
+    Mtil(v, ag);
+    Qdef->Mtil(v, aq);
+    MtilDag(u, dg);
+    Qdef->MtilDag(u, dq);
+    RealD nm = 0, nd = 0, nmd = 0, ndd = 0;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      nm += norm2(LatticeFermion(ag.upper.f[a] - aq.upper.f[a])) +
+            norm2(LatticeFermion(ag.lower.f[a] - aq.lower.f[a]));
+      nd += norm2(ag.upper.f[a]) + norm2(ag.lower.f[a]);
+      nmd += norm2(LatticeFermion(dg.upper.f[a] - dq.upper.f[a])) +
+             norm2(LatticeFermion(dg.lower.f[a] - dq.lower.f[a]));
+      ndd += norm2(dg.upper.f[a]) + norm2(dg.lower.f[a]);
+    }
+    const RealD relM = std::sqrt(nm / nd), relD = std::sqrt(nmd / ndd);
+    const ComplexD ip1 = DtxqcdDeformQuda::finner_(u, aq);
+    const ComplexD ip2 = DtxqcdDeformQuda::finner_(dq, v);
+    const RealD adj_rel = DtxqcdAbs(ComplexD(ip1 - ip2)) / DtxqcdAbs(ip1);
+    std::cout << GridLogMessage << "[deform-qcheck] |Mtil_quda - Mtil_grid| rel = "
+              << relM << std::endl;
+    std::cout << GridLogMessage << "[deform-qcheck] |MtilDag_quda - MtilDag_grid| rel = "
+              << relD << std::endl;
+    std::cout << GridLogMessage << "[deform-qcheck] adjointness <u,Mv> vs <Mdag u,v> rel = "
+              << adj_rel << std::endl;
+    if (relM > 1e-8 || relD > 1e-8 || adj_rel > 1e-10) {
+      std::cout << GridLogMessage
+                << "[deform-qcheck] FAILED — refusing to run tainted solves"
+                << std::endl;
+      Grid_finalize();
+      std::_Exit(4);
+    }
+    std::cout << GridLogMessage << "[deform-qcheck] PASSED" << std::endl;
+  }
+
   // ---- measurement loop: S_def . (undeformed d* wall), P+ projections ----
   const int NF = 2, NS = 2;
   const int spin_signs[NS] = {+1, -1};
@@ -366,7 +459,23 @@ int main(int argc, char **argv) {
         src.upper.f[fi] = eta_f;
         // S_def = G Mtil^{-1} G^{-1}: scale source by G^{-1}, solve, scale by G.
         GApply(src, -1);
-        SolveTil(src, y);
+        if (Qdef) {
+          RealD relres = 0;
+          const int it = Qdef->SolveTil(src, y, tol, cgmax, relres);
+          std::cout << GridLogMessage << "[deform-CG:quda] iters=" << it
+                    << " relres=" << relres << std::endl;
+          if (relres > tol) {
+            std::cout << GridLogMessage
+                      << "[deform-CG:quda] NOT CONVERGED at CG_MAX=" << cgmax
+                      << " (relres " << relres << " > tol " << tol
+                      << ") -- aborting rather than writing tainted "
+                      << "correlators" << std::endl;
+            Grid_finalize();
+            std::_Exit(3);
+          }
+        } else {
+          SolveTil(src, y);
+        }
         GApply(y, +1);
         // Sink contraction: physical weight eps d_iso (localInnerProduct
         // conjugates its first arg -> pass the conjugated wall; the

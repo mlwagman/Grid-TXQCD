@@ -205,6 +205,75 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
   void OpDir(const Field &in, Field &out, int dir, int disp) { GRID_ASSERT(0); }
   void OpDirAll(const Field &in, std::vector<Field> &out) { GRID_ASSERT(0); }
 
+  // Single-leg device-resident applies (deformed-contour stack, 2026-07-13):
+  // M-tilde = M_device + Grid-side per-timeslice hop corrections needs M and
+  // Mdag SEPARATELY with the corrections applied in between, so the fused
+  // HermOp is unusable there.  Same conversion/CSF machinery as
+  // HermOpDeviceDirect_; non-QUDA builds (or device_copy off) fall back to
+  // the struct-path mpc_ reference so the gates run everywhere.
+  void MDeviceDirect(const Field &in, Field &out) {
+    SingleLegDirect_(in, out, /*dagger=*/false);
+  }
+  void MdagDeviceDirect(const Field &in, Field &out) {
+    SingleLegDirect_(in, out, /*dagger=*/true);
+  }
+  void SingleLegDirect_(const Field &in, Field &out, bool dagger) {
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    if (Mq_ && device_copy_) {
+      EnsureCsf_();
+      InitDeviceCopy_(in.Grid());
+      PackedToCsfDevice_(in, in_q_);
+      if (!skip_zero_ || !zeroed_once_) {
+        mid_q_.zero();
+        out_q_.zero();
+        scr_q_.zero();
+        zeroed_once_ = true;
+      }
+      quda::ColorSpinorField *iu[DtxqcdNf] = {in_q_.csf[0].get(),
+                                              in_q_.csf[1].get()};
+      quda::ColorSpinorField *il[DtxqcdNf] = {in_q_.csf[2].get(),
+                                              in_q_.csf[3].get()};
+      quda::ColorSpinorField *ou[DtxqcdNf] = {out_q_.csf[0].get(),
+                                              out_q_.csf[1].get()};
+      quda::ColorSpinorField *ol[DtxqcdNf] = {out_q_.csf[2].get(),
+                                              out_q_.csf[3].get()};
+      quda::ColorSpinorField *sl[DtxqcdNf] = {scr_q_.csf[0].get(),
+                                              scr_q_.csf[1].get()};
+      if (dagger)
+        Mq_->Mdag_device_csf(iu, il, ou, ol, sl);
+      else
+        Mq_->M_device_csf(iu, il, ou, ol, sl);
+      CsfToPackedDevice_(out_q_, out);
+      out.Checkerboard() = in.Checkerboard();
+      ncalls++;
+      return;
+    }
+#endif
+    DtxqcdUnpackDoubled(in, tmp_in_);
+    StampCb_(tmp_in_);
+    if (dagger)
+      mpc_.Mdag(tmp_in_, tmp_out_);
+    else
+      mpc_.M(tmp_in_, tmp_out_);
+    DtxqcdPackDoubled(tmp_out_, out);
+    out.Checkerboard() = in.Checkerboard();
+    ncalls++;
+  }
+
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  void EnsureCsf_() {
+    if (!csf_ready_) {
+      quda::ColorSpinorParam ptmpl = Mq_->MakeNativeCsfParam();
+      in_q_.allocate(ptmpl);
+      mid_q_.allocate(ptmpl);
+      out_q_.allocate(ptmpl);
+      scr_q_.allocate_lower_only(ptmpl);
+      for (int d = 0; d < 4; ++d) X_full_[d] = Mq_->GaugeParam().X[d];
+      csf_ready_ = true;
+    }
+  }
+#endif
+
   // Fine-matvec accounting for the coarsening/solve experiments.  Phase
   // accumulators (us): unpack = packed->struct Grid kernel (+cb stamps),
   // h2d/d2h = the host-mode copy_{from,to}_grid CSF crossings, zero = the

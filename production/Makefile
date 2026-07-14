@@ -308,6 +308,28 @@ meas_conn_dtxqcd: meas_conn_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ meas_conn_dtxqcd.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
+# eta-deformed aux baryon: DTXQCD_DEFORM_QUDA=1 rides the StyleC device op
+# (via the packed adapter's single-leg applies) -> needs the native-impl objs.
+meas_baryon_deform_dtxqcd.o: meas_baryon_deform_dtxqcd.cc params.h \
+  dtxqcd_deform_quda.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+meas_baryon_deform_dtxqcd: meas_baryon_deform_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ meas_baryon_deform_dtxqcd.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
+# eta-spectrum probe: lowest evals of M~^dag M~ vs eta (deform hardness map).
+probe_deform_spectrum.o: probe_deform_spectrum.cc dtxqcd_deform_quda.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+probe_deform_spectrum: probe_deform_spectrum.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ probe_deform_spectrum.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
 # One-end-projected aux pion correlator (SD/Rao-Blackwell variance-reduction
 # test, 2026-07-05).  Uses the meas-helper M48 solver -> native impl objs.
 meas_aux_pion_proj.o: meas_aux_pion_proj.cc params.h dtxqcd_meas_helper.h
