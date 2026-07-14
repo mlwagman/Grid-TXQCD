@@ -17,6 +17,8 @@
 #include <Grid/util/QudaInit.h>
 #include <Grid/util/QudaFieldConvert.h>
 #include <Grid/util/QudaMultigridConfig.h>
+#include <chrono>
+#include <algorithm>
 
 #ifndef GRID_HAVE_QUDA
 #  error "QudaCloverInverter requires GRID_HAVE_QUDA — configure --with-quda"
@@ -114,6 +116,11 @@ public:
     // F_μν · σ_μν · csw·κ on-device, sidestepping any Grid-vs-QUDA clover
     // sign-convention mismatch.
     loadCloverQuda(nullptr, nullptr, &inv_param_);
+    // Every load REPLACES QUDA's resident gauge/clover fields, so any MG
+    // preconditioner built earlier (by ANY instance) now dereferences freed
+    // memory until it is thin-updated.  Bump the process-wide generation so
+    // stale handles can be detected (EnsureMgCurrent).
+    ++resident_field_generation_;
 
     // ---- Multigrid setup --------------------------------------------------
     // Must happen AFTER loadGauge + loadClover.  If MG is already built (this
@@ -122,23 +129,78 @@ public:
     // null vectors when the gauge has changed only mildly (matches the
     // chroma+QUDA "thin update" recipe).
     if (params_.use_multigrid) {
+      auto t0 = std::chrono::steady_clock::now();
       if (mg_preconditioner_ == nullptr) {
         buildMgInnerInvertParam(mg_inv_param_, inv_param_, params_.mg);
         buildMultigridParam(mg_param_, params_.mg);
         mg_param_.invert_param = &mg_inv_param_;
         mg_preconditioner_ = newMultigridQuda(&mg_param_);
         inv_param_.preconditioner = mg_preconditioner_;
+        last_mg_setup_secs_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::cout << GridLogMessage
                   << "QudaCloverInverter: MG preconditioner built ("
-                  << params_.mg.n_level << " levels)" << std::endl;
-      } else {
-        mg_param_.thin_update_only = QUDA_BOOLEAN_TRUE;
-        updateMultigridQuda(mg_preconditioner_, &mg_param_);
-        mg_param_.thin_update_only = QUDA_BOOLEAN_FALSE;
-        std::cout << GridLogMessage
-                  << "QudaCloverInverter: MG preconditioner thin-updated"
+                  << params_.mg.n_level << " levels) setup=" << last_mg_setup_secs_ << " s"
                   << std::endl;
+      } else {
+        // Cadence (default = legacy pure thin-update; non-HMC callers unaffected):
+        //   setup_maxiter_refresh > 0 alone => refresh null vectors on EVERY update
+        //     (thin_update_only=FALSE) so the near-null space tracks an evolving
+        //     HMC gauge.
+        //   + refresh_every = N > 0 => refresh only every Nth update, thin-update
+        //     otherwise (fixed cadence).
+        //   + threshold_count > 0 => refresh on the update FOLLOWING any solve
+        //     whose outer iteration count reached the threshold (adaptive; flag
+        //     set in operator()).  OR-combined with refresh_every.
+        //   rebuild_every = N > 0 => full destroy+newMultigridQuda every N
+        //     updates (unconditional backstop; supersedes a pending refresh).
+        const int  rebuild_every = params_.mg.rebuild_every;
+        const int  refresh_every = params_.mg.refresh_every;
+        const bool cadence_gated = (refresh_every > 0 || params_.mg.threshold_count > 0);
+        ++mg_setgauge_count_;
+        const bool counter_due =
+            (refresh_every > 0 && mg_setgauge_count_ % refresh_every == 0);
+        // Adaptive soft-tier trigger fired: an iter-threshold flag (set in
+        // operator()) or an every-N counter.
+        const bool adaptive_due = cadence_gated && (mg_refresh_pending_ || counter_due);
+        // Route the adaptive trigger to a full REBUILD instead of an in-place
+        // refresh when HMC_MG_THRESHOLD_REBUILD is set (4-node-safe; refresh
+        // needs 8 -- see QudaMultigridConfig.h). Capture the trigger reason
+        // before mg_refresh_pending_ is cleared below.
+        const bool adaptive_rebuild_due = params_.mg.threshold_action_rebuild && adaptive_due;
+        const bool was_iter_threshold  = mg_refresh_pending_;
+        bool refresh = (params_.mg.setup_maxiter_refresh > 0);
+        const char *trigger = "";
+        if (refresh && cadence_gated && !adaptive_rebuild_due) {
+          if (mg_refresh_pending_)  trigger = " [trigger: iter-threshold]";
+          else if (counter_due)     trigger = " [trigger: every-N]";
+          refresh = adaptive_due;
+        }
+        if ((rebuild_every > 0 && (++mg_update_count_ % rebuild_every == 0))
+            || adaptive_rebuild_due) {
+          rebuild_mg_();
+          mg_refresh_pending_ = false;
+          last_mg_setup_secs_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+          std::cout << GridLogMessage << "QudaCloverInverter: MG full-rebuilt ";
+          if (adaptive_rebuild_due)
+            std::cout << (was_iter_threshold ? "(iter-threshold)" : "(every-N adaptive)");
+          else
+            std::cout << "(every " << rebuild_every << ")";
+          std::cout << " setup=" << last_mg_setup_secs_ << " s" << std::endl;
+        } else {
+          mg_param_.thin_update_only = refresh ? QUDA_BOOLEAN_FALSE : QUDA_BOOLEAN_TRUE;
+          updateMultigridQuda(mg_preconditioner_, &mg_param_);
+          mg_param_.thin_update_only = QUDA_BOOLEAN_FALSE;
+          if (refresh) mg_refresh_pending_ = false;
+          last_mg_setup_secs_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+          std::cout << GridLogMessage << "QudaCloverInverter: MG "
+                    << (refresh ? "refreshed (null-vectors)" : "thin-updated")
+                    << trigger
+                    << " setup=" << last_mg_setup_secs_ << " s" << std::endl;
+        }
       }
+      // Whichever path ran (build / rebuild / update), the MG is now
+      // consistent with the fields this SetGauge just loaded.
+      mg_resident_gen_ = resident_field_generation_;
     }
 
     gauge_loaded_ = true;
@@ -161,21 +223,113 @@ public:
 
     invertQuda(sol_eo.data(), src_eo.data(), &inv_param_);
 
-    Quda::eo_buffer_to_fermion(sol_eo.data(), sol);
-
     last_iter_ = inv_param_.iter;
     last_residual_ = inv_param_.true_res[0];
     last_secs_ = inv_param_.secs;
+
+    if (params_.use_multigrid) {
+      // Hard tier (Chroma RsdToleranceFactor): the solve came back without
+      // meeting tolerance — a force computed from it would be silently wrong.
+      // Rebuild the MG subspace from scratch against the loaded gauge and
+      // re-solve once from a zero guess; abort if even that fails.
+      const double rsd_fac = params_.mg.rsd_tolerance_factor;
+      if (rsd_fac > 0.0 && last_residual_ > rsd_fac * params_.tol) {
+        std::cout << GridLogMessage
+                  << "QudaCloverInverter: MG HARD FAILURE — true residual "
+                  << last_residual_ << " > " << rsd_fac << " x tol " << params_.tol
+                  << " (outer iters " << last_iter_
+                  << "); rebuilding subspace + re-solving" << std::endl;
+        auto t0 = std::chrono::steady_clock::now();
+        rebuild_mg_();
+        last_mg_setup_secs_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << GridLogMessage
+                  << "QudaCloverInverter: MG full-rebuilt (hard-failure recovery) setup="
+                  << last_mg_setup_secs_ << " s" << std::endl;
+        std::fill(sol_eo.begin(), sol_eo.end(), 0.0);
+        invertQuda(sol_eo.data(), src_eo.data(), &inv_param_);
+        last_iter_ = inv_param_.iter;
+        last_residual_ = inv_param_.true_res[0];
+        last_secs_ = inv_param_.secs;
+        if (last_residual_ > rsd_fac * params_.tol) {
+          std::cout << GridLogError
+                    << "QudaCloverInverter: MG hard-failure recovery FAILED — residual "
+                    << last_residual_ << " still > " << rsd_fac << " x tol "
+                    << params_.tol << " after subspace rebuild; aborting."
+                    << std::endl;
+          assert(false && "QudaCloverInverter: MG solve failed tolerance even after subspace rebuild");
+        }
+      }
+      // Soft tier (Chroma ThresholdCount): solve converged but worked too
+      // hard — null vectors are going stale.  Flag a refresh for the next
+      // SetGauge so the next solve is healthy again.
+      const int thr = params_.mg.threshold_count;
+      if (thr > 0 && last_iter_ >= thr && !mg_refresh_pending_) {
+        mg_refresh_pending_ = true;
+        std::cout << GridLogMessage
+                  << "QudaCloverInverter: MG refresh flagged (outer iters "
+                  << last_iter_ << " >= threshold " << thr << ")" << std::endl;
+      }
+    }
+
+    Quda::eo_buffer_to_fermion(sol_eo.data(), sol);
   }
 
   int    LastIter()     const { return last_iter_; }
   double LastResidual() const { return last_residual_; }
   double LastSecs()     const { return last_secs_; }
+  // Wall time of the most recent MG build/rebuild/thin-update/refresh inside
+  // SetGauge (0 if use_multigrid=false, or before the first SetGauge call).
+  double LastMgSetupSecs() const { return last_mg_setup_secs_; }
 
   QudaInvertParam &InvertParam() { return inv_param_; }
   QudaGaugeParam  &GaugeParam()  { return gauge_param_; }
 
+  // The MG preconditioner handle this instance owns (null before the first
+  // SetGauge, or if use_multigrid=false).  Exposed so ANOTHER inverter can
+  // reuse this setup as an external preconditioner (chroma's shared
+  // SubspaceID pattern: one MG built at the lightest mass preconditions GCR
+  // solves at heavier masses -- correctness lives in the outer solve, the
+  // mass mismatch only costs outer iterations).  Callers must re-fetch
+  // before every solve: rebuild_mg_ (hard-failure recovery / rebuild_every)
+  // REPLACES the handle.
+  void *MgPreconditioner() const { return mg_preconditioner_; }
+
+  // Thin-update the MG against QUDA's CURRENTLY RESIDENT gauge/clover if any
+  // instance has loaded fields since this MG was last built/updated (loadGauge/
+  // loadCloverQuda replace the resident fields, leaving the MG's internal
+  // operators dangling -- borrowing the handle without this re-sync aborts in
+  // DiracClover::checkParitySpinor with a garbage checkerboard volume, seen
+  // 2026-07-09).  Sharees MUST call this right before every borrowed-handle
+  // solve; no-op when already current.  The re-coarsening runs with this
+  // (donor) instance's invert_param mass against the sharee's resident fields;
+  // that mismatch only affects preconditioner quality -- correctness lives in
+  // the sharee's outer GCR at its own mass.
+  void EnsureMgCurrent() {
+    if (mg_preconditioner_ == nullptr ||
+        mg_resident_gen_ == resident_field_generation_) return;
+    auto t0 = std::chrono::steady_clock::now();
+    mg_param_.thin_update_only = QUDA_BOOLEAN_TRUE;
+    updateMultigridQuda(mg_preconditioner_, &mg_param_);
+    mg_param_.thin_update_only = QUDA_BOOLEAN_FALSE;
+    mg_resident_gen_ = resident_field_generation_;
+    last_mg_setup_secs_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << GridLogMessage
+              << "QudaCloverInverter: MG thin-updated [trigger: resident-field sync] setup="
+              << last_mg_setup_secs_ << " s" << std::endl;
+  }
+
 private:
+  // Destroy + rebuild the MG preconditioner against the currently loaded
+  // gauge/clover.  Shared by the rebuild_every cadence and the post-solve
+  // hard-failure recovery.
+  void rebuild_mg_() {
+    destroyMultigridQuda(mg_preconditioner_);
+    mg_preconditioner_ = newMultigridQuda(&mg_param_);
+    inv_param_.preconditioner = mg_preconditioner_;
+    // Rebuild runs post-solve, with this instance's fields still resident.
+    mg_resident_gen_ = resident_field_generation_;
+  }
+
   void setup_params_() {
     Coordinate lc = grid_->LocalDimensions();
 
@@ -307,10 +461,22 @@ private:
   int    last_iter_     = 0;
   double last_residual_ = 0.0;
   double last_secs_     = 0.0;
+  double last_mg_setup_secs_ = 0.0;
+  int    mg_update_count_ = 0;  // gauge updates since build, for rebuild_every cadence
+                                // (NOTE: only advances when rebuild_every > 0 — the
+                                // increment is short-circuited away otherwise)
+  int    mg_setgauge_count_ = 0;   // ALL post-build SetGauge calls, for refresh_every
+  bool   mg_refresh_pending_ = false;  // set post-solve by the threshold_count tier
   // Multigrid state — populated only if params_.use_multigrid (else null).
   QudaMultigridParam mg_param_{};
   QudaInvertParam    mg_inv_param_{};
   void              *mg_preconditioner_ = nullptr;
+  // Resident-field staleness tracking for shared-MG (EnsureMgCurrent):
+  // process-wide count of loadGauge/loadClover calls vs the value this MG was
+  // last built/updated at.  QUDA is driven single-threaded, so a plain long
+  // suffices.
+  long mg_resident_gen_ = -1;
+  inline static long resident_field_generation_ = 0;
 };
 
 NAMESPACE_END(Grid);

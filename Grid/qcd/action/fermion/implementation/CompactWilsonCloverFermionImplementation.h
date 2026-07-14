@@ -267,14 +267,111 @@ void CompactWilsonCloverFermion<Impl, CloverHelpers>::MDeriv(GaugeField& force, 
   force += clover_force;
 }
 
+// Clover-diagonal force on the odd sublattice.  Implementation mirrors
+// WilsonCloverFermion::MooDeriv exactly: the force depends only on the gauge
+// links (this->Umu) and the outer product of the (odd-parity) fermion fields,
+// NOT on the stored clover term, so the compact Diagonal/Triangle layout is
+// irrelevant here and no ConvertLayout is needed.  Bit-identical to the
+// non-compact operator.  (The local gauge-link vector is named `Ulinks` to
+// avoid shadowing the `U` fermion-field argument.)
 template<class Impl, class CloverHelpers>
 void CompactWilsonCloverFermion<Impl, CloverHelpers>::MooDeriv(GaugeField& mat, const FermionField& U, const FermionField& V, int dag) {
-  GRID_ASSERT(0);
+  GRID_ASSERT(!fixedBoundaries); // TODO check for changes required for open bc
+  GRID_ASSERT(U.Checkerboard() == Odd);
+  GRID_ASSERT(V.Checkerboard() == Odd);
+
+  FermionField Uf(this->GaugeGrid()), Vf(this->GaugeGrid());
+  Uf = Zero(); Vf = Zero();
+  setCheckerboard(Uf, U);
+  setCheckerboard(Vf, V);
+
+  GaugeLinkField force_mu(mat.Grid()), lambda(mat.Grid());
+  PropagatorField Lambda(mat.Grid());
+
+  std::vector<GaugeLinkField> Ulinks(Nd, mat.Grid());
+  Impl::extractLinkField(Ulinks, this->Umu);
+
+  Impl::outerProductImpl(Lambda, Uf, Vf);
+
+  Gamma::Algebra sigma[] = {
+      Gamma::Algebra::SigmaXY,
+      Gamma::Algebra::SigmaXZ,
+      Gamma::Algebra::SigmaXT,
+      Gamma::Algebra::MinusSigmaXY,
+      Gamma::Algebra::SigmaYZ,
+      Gamma::Algebra::SigmaYT,
+      Gamma::Algebra::MinusSigmaXZ,
+      Gamma::Algebra::MinusSigmaYZ,
+      Gamma::Algebra::SigmaZT,
+      Gamma::Algebra::MinusSigmaXT,
+      Gamma::Algebra::MinusSigmaYT,
+      Gamma::Algebra::MinusSigmaZT};
+
+  int count = 0;
+  mat = Zero();
+  for (int mu = 0; mu < 4; mu++) {
+    force_mu = Zero();
+    for (int nu = 0; nu < 4; nu++) {
+      if (mu == nu) continue;
+      RealD factor = (nu == 4 || mu == 4) ? 2.0 * csw_t : 2.0 * csw_r;
+      PropagatorField Slambda = Gamma(sigma[count]) * Lambda;
+      Impl::TraceSpinImpl(lambda, Slambda);
+      force_mu -= factor * CloverHelpers::Cmunu(Ulinks, lambda, mu, nu);
+      count++;
+    }
+    pokeLorentz(mat, Ulinks[mu] * force_mu, mu);
+  }
 }
 
+// Clover-diagonal force on the even sublattice.  Identical to MooDeriv above
+// except the inputs are even-parity (mirrors WilsonCloverFermion::MeeDeriv).
 template<class Impl, class CloverHelpers>
 void CompactWilsonCloverFermion<Impl, CloverHelpers>::MeeDeriv(GaugeField& mat, const FermionField& U, const FermionField& V, int dag) {
-  GRID_ASSERT(0);
+  GRID_ASSERT(!fixedBoundaries); // TODO check for changes required for open bc
+  GRID_ASSERT(U.Checkerboard() == Even);
+  GRID_ASSERT(V.Checkerboard() == Even);
+
+  FermionField Uf(this->GaugeGrid()), Vf(this->GaugeGrid());
+  Uf = Zero(); Vf = Zero();
+  setCheckerboard(Uf, U);
+  setCheckerboard(Vf, V);
+
+  GaugeLinkField force_mu(mat.Grid()), lambda(mat.Grid());
+  PropagatorField Lambda(mat.Grid());
+
+  std::vector<GaugeLinkField> Ulinks(Nd, mat.Grid());
+  Impl::extractLinkField(Ulinks, this->Umu);
+
+  Impl::outerProductImpl(Lambda, Uf, Vf);
+
+  Gamma::Algebra sigma[] = {
+      Gamma::Algebra::SigmaXY,
+      Gamma::Algebra::SigmaXZ,
+      Gamma::Algebra::SigmaXT,
+      Gamma::Algebra::MinusSigmaXY,
+      Gamma::Algebra::SigmaYZ,
+      Gamma::Algebra::SigmaYT,
+      Gamma::Algebra::MinusSigmaXZ,
+      Gamma::Algebra::MinusSigmaYZ,
+      Gamma::Algebra::SigmaZT,
+      Gamma::Algebra::MinusSigmaXT,
+      Gamma::Algebra::MinusSigmaYT,
+      Gamma::Algebra::MinusSigmaZT};
+
+  int count = 0;
+  mat = Zero();
+  for (int mu = 0; mu < 4; mu++) {
+    force_mu = Zero();
+    for (int nu = 0; nu < 4; nu++) {
+      if (mu == nu) continue;
+      RealD factor = (nu == 4 || mu == 4) ? 2.0 * csw_t : 2.0 * csw_r;
+      PropagatorField Slambda = Gamma(sigma[count]) * Lambda;
+      Impl::TraceSpinImpl(lambda, Slambda);
+      force_mu -= factor * CloverHelpers::Cmunu(Ulinks, lambda, mu, nu);
+      count++;
+    }
+    pokeLorentz(mat, Ulinks[mu] * force_mu, mu);
+  }
 }
 
 template<class Impl, class CloverHelpers>

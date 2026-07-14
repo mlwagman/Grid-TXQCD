@@ -51,7 +51,9 @@ class TwoFlavourSchurCloverQudaForceActionMP
       OperatorFunction<typename Base::FermionField> &AS,
       const QudaCloverParams &qp)
       : Base(opD, DS, AS), opF_(opF), qp_(qp) {
-    Quda::initialize();
+    // Pass the gauge grid -> QUDA inherits Grid's MPI comm + rank map (MPI build);
+    // see OneFlavourSchurCloverQudaForceRationalActionMP.h for the rationale.
+    Quda::initialize(/*device=*/-1, /*mpi_dims=*/nullptr, opD.GaugeGrid());
     QudaCloverMultiShiftSpec spec;
     // EVEN parity throughout — matches PyQUDA's CloverWilsonAction convention
     // and the Phase 7 strange (OneFlavourSchurCloverQudaForceRationalActionMP)
@@ -127,6 +129,23 @@ class TwoFlavourSchurCloverQudaForceActionMP
         qp_mg.mg.geo_block_size = (qp_mg.mg.n_level >= 3)
             ? std::vector<std::array<int,4>>{b0, b1}
             : std::vector<std::array<int,4>>{b0};
+        // Per-level null vectors (Chroma 24 32):  HMC_MG_NVEC='24 32'
+        if (const char *nv = std::getenv("HMC_MG_NVEC")) {
+          int a=0,b=0,c=0; int n = std::sscanf(nv, "%d %d %d", &a,&b,&c);
+          std::vector<int> v; if(n>=1)v.push_back(a); if(n>=2)v.push_back(b); if(n>=3)v.push_back(c);
+          if (!v.empty()) { qp_mg.mg.n_vec_levels = v; qp_mg.mg.n_vec = v[0]; }
+        }
+        if (const char *cm = std::getenv("HMC_MG_COARSE_MAXITER"))  // default 16; diagnostic
+          qp_mg.mg.coarse_solver_maxiter = std::atoi(cm);
+        // Phase 7b cadence (default 0 = legacy thin-update):
+        //   HMC_MG_REFRESH=<iters/level> refreshes null vectors each MD step;
+        //   HMC_MG_REBUILD_EVERY=N forces a full rebuild every N force calls.
+        if (const char *r = std::getenv("HMC_MG_REFRESH"))
+          qp_mg.mg.setup_maxiter_refresh = std::atoi(r);
+        if (const char *r = std::getenv("HMC_MG_REBUILD_EVERY"))
+          qp_mg.mg.rebuild_every = std::atoi(r);
+        // HMC_MG_REFRESH_EVERY / HMC_MG_THRESHOLD_COUNT / HMC_MG_RSD_TOL_FACTOR
+        applyHmcMgCadenceEnv(qp_mg.mg);
         mg_inv_.reset(new QudaCloverInverter(ggrid, qp_mg));
         std::cout << GridLogMessage
                   << "[TwoFlavourSchurCloverQudaForceActionMP] USE_HMC_MG=1 — "
@@ -143,11 +162,23 @@ class TwoFlavourSchurCloverQudaForceActionMP
       src_full = Zero();
       setCheckerboard(src_full, this->PhiEven);
 
-      // Step 1: y_full = M†^{-1} · src_full
+      // Step 1: y_full = M†^{-1} · src_full.
+      // QUDA multigrid CANNOT solve the dagger operator by flipping
+      // inv_param.dagger: the MG preconditioner (prolongators + coarse ops) is
+      // built for the FORWARD operator M during newMultigridQuda, so a dagger
+      // solve runs effectively unpreconditioned and stalls at the iteration cap
+      // (observed: 30000 iters, residual 6.7e-2). Use γ5-hermiticity instead —
+      //   M†^{-1} = γ5 · M^{-1} · γ5   (exact for full Wilson-clover) —
+      // so BOTH solves run on the working forward MG (dagger=NO). γ5 is
+      // site-local + spin-only, preserves checkerboard, and is ~free.
       QudaInvertParam &mg_iparam = mg_inv_->InvertParam();
       QudaDagType saved_mg_dagger = mg_iparam.dagger;
-      mg_iparam.dagger = QUDA_DAG_YES;
-      (*mg_inv_)(Mpc, src_full, y_full);
+      mg_iparam.dagger = QUDA_DAG_NO;
+      Gamma g5(Gamma::Algebra::Gamma5);
+      FermionField src_g5(ggrid);
+      src_g5 = g5 * src_full;
+      (*mg_inv_)(Mpc, src_g5, y_full);
+      y_full = g5 * y_full;
 
       // Extract EVEN part of y_full → y_e, embed in fresh src_full with odd = 0
       y_e.Checkerboard() = Even;

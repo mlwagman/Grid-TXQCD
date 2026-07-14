@@ -48,7 +48,9 @@ class OneFlavourSchurCloverQudaRationalActionMP
     spec.tols.assign(poles.size(), p.tolerance);
     for (size_t k = 0; k < poles.size(); ++k) spec.shifts[k] = poles[k];
 
-    Quda::initialize();
+    // Pass the gauge grid -> QUDA inherits Grid's MPI comm + rank map (MPI build);
+    // see OneFlavourSchurCloverQudaForceRationalActionMP.h for the rationale.
+    Quda::initialize(/*device=*/-1, /*mpi_dims=*/nullptr, opD.GaugeGrid());
     quda_ms_.reset(new QudaCloverMultiShiftInverter(
         opD.GaugeGrid(), qp_, spec));
     std::cout << GridLogMessage

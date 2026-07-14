@@ -25,6 +25,7 @@
 #include <quda.h>
 #include <vector>
 #include <array>
+#include <cstdlib>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -44,10 +45,46 @@ struct QudaMgUserParams {
   // Number of null-space vectors per level (default 24, NPLQCD prod value).
   int n_vec = 24;
 
+  // Optional per-level null-vector counts (Chroma: 24 32). Empty => use the
+  // single `n_vec` for every level. Set by the HMC force header from
+  // HMC_MG_NVEC='24 32' (length up to n_level-1; coarsest level unused).
+  std::vector<int> n_vec_levels;
+
   // Setup solver: CG (matches --mg-setup-inv cg).
   QudaInverterType setup_inv = QUDA_CG_INVERTER;
   int setup_maxiter = 2000;
   double setup_tol = 5e-6;
+
+  // --- HMC evolving-gauge cadence. Defaults (0,0) = legacy pure thin-update,
+  //     so fixed-gauge callers (compute_vev, propagators) are unaffected. The
+  //     HMC force header sets these from env. (Chroma uses adaptive refresh,
+  //     MaxIterSubspaceRefresh=500, not a static thin-update — see cfg metadata.)
+  // Null-vector refresh iters/level on updateMultigridQuda; >0 => refresh each update.
+  int setup_maxiter_refresh = 0;
+  // Full destroy+newMultigridQuda every N SetGauge calls (0 = never).
+  int rebuild_every = 0;
+  // Refresh only on every Nth post-build SetGauge, thin-update otherwise
+  // (0 = legacy: refresh on EVERY SetGauge when setup_maxiter_refresh > 0).
+  // Env: HMC_MG_REFRESH_EVERY.
+  int refresh_every = 0;
+  // Adaptive soft tier (Chroma ThresholdCount): after any solve whose outer
+  // iteration count reaches this, flag a null-vector refresh for the next
+  // SetGauge (0 = off).  OR-combined with refresh_every.
+  // Env: HMC_MG_THRESHOLD_COUNT.
+  int threshold_count = 0;
+  // Route the adaptive soft-tier trigger (threshold_count / refresh_every) to a
+  // full destroy+rebuild instead of an in-place refresh.  Rebuild's lower memory
+  // peak fits 4 nodes at 48^3, whereas refresh needs 8 (measured 2026-07-06,
+  // OOMs Grid's device allocs on 4 nodes).  Default false = legacy refresh
+  // action.  When true, setup_maxiter_refresh need NOT be set (the trigger fires
+  // a rebuild, which does not use the refresh machinery).  Env: HMC_MG_THRESHOLD_REBUILD.
+  bool threshold_action_rebuild = false;
+  // Hard tier (Chroma RsdToleranceFactor): after each solve, if the true
+  // residual exceeds factor x requested tol, rebuild the subspace from
+  // scratch and re-solve once from a zero guess; abort if it still fails
+  // (0 = off, i.e. no post-solve residual check).
+  // Env: HMC_MG_RSD_TOL_FACTOR.
+  double rsd_tolerance_factor = 0.0;
 
   // Smoother (matches --mg-smoother ca-gcr).
   QudaInverterType smoother = QUDA_CA_GCR_INVERTER;
@@ -74,6 +111,21 @@ struct QudaMgUserParams {
   // Verbosity for MG setup (QUDA_SUMMARIZE default, QUDA_VERBOSE for debug).
   QudaVerbosity verbosity = QUDA_SUMMARIZE;
 };
+
+// Parse the HMC MG-cadence env knobs (HMC_MG_REFRESH_EVERY,
+// HMC_MG_THRESHOLD_COUNT, HMC_MG_RSD_TOL_FACTOR) into an existing
+// QudaMgUserParams.  Complements — does not replace — the per-driver parsing
+// of HMC_MG_REFRESH / HMC_MG_REBUILD_EVERY; call once wherever those are read.
+inline void applyHmcMgCadenceEnv(QudaMgUserParams &mg) {
+  if (const char *r = std::getenv("HMC_MG_REFRESH_EVERY"))
+    mg.refresh_every = std::atoi(r);
+  if (const char *r = std::getenv("HMC_MG_THRESHOLD_COUNT"))
+    mg.threshold_count = std::atoi(r);
+  if (const char *r = std::getenv("HMC_MG_THRESHOLD_REBUILD"))
+    mg.threshold_action_rebuild = (std::atoi(r) != 0);
+  if (const char *r = std::getenv("HMC_MG_RSD_TOL_FACTOR"))
+    mg.rsd_tolerance_factor = std::atof(r);
+}
 
 // Build the inner QudaInvertParam used by MG (passed to mg_param.invert_param).
 // The "outer" QudaInvertParam (held by QudaCloverInverter) handles the
@@ -170,9 +222,11 @@ inline void buildMultigridParam(QudaMultigridParam &mg,
     // coarser levels keep the 2-spin block-orthonormal structure.
     mg.spin_block_size[l] = (l == 0) ? 2 : 1;
 
-    // Null vector count: coarsest level inherits the same n_vec; the per-
-    // level count drives the per-coarse-level dofs.  Standard practice.
-    mg.n_vec[l] = mg_user.n_vec;
+    // Null vector count: per-level if n_vec_levels is set (Chroma 24 32),
+    // else the single n_vec for every level.
+    mg.n_vec[l] = (l < (int)mg_user.n_vec_levels.size())
+                      ? mg_user.n_vec_levels[l]
+                      : mg_user.n_vec;
     mg.precision_null[l] = QUDA_HALF_PRECISION;
     mg.n_block_ortho[l] = 1;
     mg.block_ortho_two_pass[l] = QUDA_BOOLEAN_TRUE;
@@ -181,7 +235,7 @@ inline void buildMultigridParam(QudaMultigridParam &mg,
     mg.setup_inv_type[l] = mg_user.setup_inv;
     mg.num_setup_iter[l] = 1;
     mg.setup_maxiter[l] = mg_user.setup_maxiter;
-    mg.setup_maxiter_refresh[l] = 0;
+    mg.setup_maxiter_refresh[l] = mg_user.setup_maxiter_refresh;
     mg.setup_tol[l] = mg_user.setup_tol;
     mg.setup_ca_basis[l] = QUDA_POWER_BASIS;
     mg.setup_ca_basis_size[l] = 4;

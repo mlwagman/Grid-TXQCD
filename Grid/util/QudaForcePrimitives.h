@@ -731,6 +731,89 @@ inline void computeCloverFullForceWithSchurFields(
   if (gauge_param->return_result_mom) cpuMom.copy(cudaMom);
 }
 
+// ----------------------------------------------------------------------------
+// computeCloverLogDetForceQuda
+// ----------------------------------------------------------------------------
+// Even-even clover LogDet force (d/dU of -Nf ln det M_ee) via QUDA's fused
+// sigma-trace kernel.  This is the PURE sigma_munu-trace piece — no Wilson
+// hop, no sigma-Oprod, and NO fermion vectors or linear solve at all: exactly
+// the trace term the WithSchurFields siblings switch OFF (sigma_trace_coeff=0).
+//
+// Grid's reference (QCDLogDetCompactCloverEOAction::deriv_gpu):
+//   lambda_k = Tr_spin( sigma_munu · Mee^{-1} );  dSdU = Nf·Σ(±2 csw)·Cmunu(lambda)
+// which is precisely  computeCloverSigmaTrace (Tr_spin(σ·A^{-1}) into oprod)
+//   → cloverDerivative (the Cmunu clover-staple analog) → updateMomentum.
+//
+// Parity: Grid uses the EVEN block Mee^{-1}.  The trace is taken on
+// `other_parity`, so a caller with ODD_ODD_ASYMMETRIC matpc (parity=ODD ⇒
+// other_parity=EVEN) matches Grid — the same matpc the ratio/tail force
+// actions already use.
+//
+// Coefficient: QUDA's Tr(σ·A^{-1}) (A = 1 + csw·κ·σF, κ-normalized) and Grid's
+// Tr(σ·Mee^{-1}) (Mee = A/(2κ), mass-carrying) are PROPORTIONAL, so cos=1 is
+// expected and `sigma_trace_coeff` absorbs the (Nf, csw, κ, sign) scalar —
+// pinned once by COMPARE, exactly like the WithSchurFields unpack factor.
+//
+// Residency: reads ::cloverPrecise (needs its inverse — present after any EO
+// solver's SetGauge/loadCloverQuda) and ::extendedGaugeResident (cloverDerivative).
+// Writes MILC RECONSTRUCT_10 momentum into h_mom (unpack with GpuUnpackMomToGauge
+// and the -1/(8 kappa^2) geometric factor, same as the Schur engine).
+inline void computeCloverLogDetForceQuda(
+    void *h_mom,
+    double sigma_trace_coeff,
+    QudaGaugeParam *gauge_param,
+    QudaInvertParam *inv_param)
+{
+  using namespace ::quda;
+  if (!::gaugePrecise)  errorQuda("No resident gauge field");
+  if (!::cloverPrecise) errorQuda("No resident clover field");
+  if (!::extendedGaugeResident)
+    errorQuda("No extended resident gauge (call a solver SetGauge first)");
+  if (inv_param->matpc_type != QUDA_MATPC_EVEN_EVEN_ASYMMETRIC &&
+      inv_param->matpc_type != QUDA_MATPC_ODD_ODD_ASYMMETRIC) {
+    errorQuda("MatPC type %d not supported by computeCloverLogDetForceQuda",
+              inv_param->matpc_type);
+  }
+
+  GaugeFieldParam fParam(*gauge_param, h_mom, QUDA_ASQTAD_MOM_LINKS);
+  GaugeField cpuMom(fParam);
+
+  fParam.location    = QUDA_CUDA_FIELD_LOCATION;
+  fParam.create      = gauge_param->overwrite_mom ? QUDA_ZERO_FIELD_CREATE
+                                                   : QUDA_COPY_FIELD_CREATE;
+  fParam.field       = &cpuMom;
+  fParam.reconstruct = QUDA_RECONSTRUCT_10;
+  fParam.setPrecision(gauge_param->cuda_prec, true);
+  GaugeField cudaMom(fParam);
+
+  // Force + oprod accumulators (oprod is the tensor-geometry σ container).
+  GaugeFieldParam fparam2(cudaMom);
+  fparam2.link_type   = QUDA_GENERAL_LINKS;
+  fparam2.reconstruct = QUDA_RECONSTRUCT_NO;
+  fparam2.create      = QUDA_ZERO_FIELD_CREATE;
+  fparam2.setPrecision(fparam2.Precision(), true);
+  GaugeField force(fparam2);
+  fparam2.geometry = QUDA_TENSOR_GEOMETRY;
+  GaugeField oprod(fparam2);
+
+  QudaParity parity =
+      inv_param->matpc_type == QUDA_MATPC_EVEN_EVEN_ASYMMETRIC
+          ? QUDA_EVEN_PARITY
+          : QUDA_ODD_PARITY;
+  QudaParity other_parity = static_cast<QudaParity>(1 - parity);
+
+  GaugeField &gaugeEx = *::extendedGaugeResident;
+
+  // Pure LogDet trace: Tr_spin(σ_μν · A^{-1}) → oprod (no hop, no oprod bilinear).
+  computeCloverSigmaTrace(oprod, *::cloverPrecise, sigma_trace_coeff,
+                          other_parity);
+
+  cloverDerivative(force, gaugeEx, oprod, 1.0);
+  updateMomentum(cudaMom, -1.0, force, "clover_logdet");
+
+  if (gauge_param->return_result_mom) cpuMom.copy(cudaMom);
+}
+
 }  // namespace Quda
 NAMESPACE_END(Grid);
 

@@ -38,7 +38,8 @@ public:
   {
 #ifdef GRID_HAVE_QUDA
     if (std::getenv("QUDA_SOLVER")) {
-      Quda::initialize();
+      // Pass the gauge grid so QUDA inherits Grid's MPI comm + rank map (MPI build).
+      Quda::initialize(/*device=*/-1, /*mpi_dims=*/nullptr, grid_);
       QudaCloverParams qp;
       qp.mass = mass;
       qp.csw  = csw;

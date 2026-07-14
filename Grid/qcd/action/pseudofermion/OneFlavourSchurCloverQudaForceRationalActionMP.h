@@ -48,7 +48,11 @@ class OneFlavourSchurCloverQudaForceRationalActionMP
     spec.tols.assign(poles.size(), p.tolerance);
     for (size_t k = 0; k < poles.size(); ++k) spec.shifts[k] = poles[k];
 
-    Quda::initialize();
+    // Pass the gauge grid so QUDA inherits Grid's MPI communicator + rank map
+    // (MPI-comms build).  Without a comm, QUDA uses a default rank order that
+    // disagrees with Grid for >=2 partitioned directions -> wrong-neighbor halos
+    // -> few-% force error.  GridBase is-a CartesianCommunicator.
+    Quda::initialize(/*device=*/-1, /*mpi_dims=*/nullptr, opD.GaugeGrid());
     quda_ms_.reset(new QudaCloverMultiShiftInverter(
         opD.GaugeGrid(), qp_, spec));
     std::cout << GridLogMessage
