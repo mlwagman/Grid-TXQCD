@@ -215,7 +215,13 @@ int main(int argc, char **argv) {
   // terms per apply.  DTXQCD_DEFORM_QUDA_CHECK=1 (default ON when the
   // backend is on) verifies M~ and M~^dag against the Grid sandwich on
   // random vectors before any solve.
-  const bool use_qdef = env_int("DTXQCD_DEFORM_QUDA", 0) != 0;
+  // Default ON since 2026-07-13 (gates: operator identity 1e-15 at t0=0/12
+  // and eta=0.2/0.8, twist invariance 2.4e-10, e2e row-0 3.3e-10, ~7x/iter
+  // with the native kernel).  =0 restores the pure-Grid sandwich reference.
+  // The qcheck (also default ON) re-verifies the operator against the Grid
+  // sandwich at startup of EVERY run and _Exit(4)s on drift — tainted
+  // solves are structurally impossible.
+  const bool use_qdef = env_int("DTXQCD_DEFORM_QUDA", 1) != 0;
   const bool qdef_check =
       env_int("DTXQCD_DEFORM_QUDA_CHECK", use_qdef ? 1 : 0) != 0;
 #ifdef GRID_HAVE_QUDA

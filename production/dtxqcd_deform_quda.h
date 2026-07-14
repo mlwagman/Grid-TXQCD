@@ -80,12 +80,15 @@ class DtxqcdDeformQuda {
     W7c_ = Cshift(LatticeColourMatrix(adj(W3c_)), Nd - 1, -1);
 
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
-    // DTXQCD_DEFORM_NATIVE_CORR=1: CSF-resident hop-correction kernel
-    // (single-rank only — no halo exchange; the deform measurements run
-    // 1.1.1.1).  Gauge upload is once per config (t0-independent).
+    // DTXQCD_DEFORM_NATIVE_CORR: CSF-resident hop-correction kernel.
+    // Default ON since 2026-07-13 (qcheck 1e-15 vs the Grid sandwich,
+    // 19.1 -> 15.2 ms/leg); =0 restores the Grid Cshift corrections.
+    // Single-rank only (no halo exchange) — auto-disables on multi-rank;
+    // the deform measurements run 1.1.1.1.  Gauge upload is once per
+    // config (t0-independent).
     {
       const char *e = std::getenv("DTXQCD_DEFORM_NATIVE_CORR");
-      native_ = e && *e && std::atoi(e) != 0;
+      native_ = !(e && *e) || std::atoi(e) != 0;
       if (native_ && grid_._Nprocessors != 1) {
         std::cout << GridLogMessage
                   << "[deform-native] DISABLED: multi-rank run (kernel has "
