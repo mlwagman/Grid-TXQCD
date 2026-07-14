@@ -49,6 +49,6 @@ LAMBDA_DTXQCD=$LAM MDSTEPS=10 TRAJL=0.353553390593274 \
 ADD_STRANGE=1 MASS_STRANGE=-0.245 \
 IMPORT_CFG=$CHROMA DTXQCD_SUFFIX="_tla_fromchroma_cw" \
 DTXQCD_TRACELESS_AUX=1 \
-TRAJ=${TRAJ:-500} NO_METROP=5 N_SKIP=10 \
+TRAJ=${TRAJ:-500} NO_METROP=${NO_METROP:-5} N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 echo "=== tla clean-window lam=$LAM backend=${BACKEND:-eo} exited rc=$? $(date) ==="
