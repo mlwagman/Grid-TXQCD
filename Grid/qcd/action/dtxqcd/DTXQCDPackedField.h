@@ -261,6 +261,47 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
   }
 
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  // Single-leg apply with a CSF-resident post-matvec hook: hook(in_csf[4],
+  // out_csf[4]) runs after M/Mdag_device_csf and BEFORE the export, with
+  // fields ordered {upper0, upper1, lower0, lower1}.  The deformed-operator
+  // native hop-correction kernel rides here (out += corr(in) while both
+  // sides are still device-native).
+  template <class Hook>
+  void SingleLegDirectHooked(const Field &in, Field &out, bool dagger,
+                             Hook &&hook) {
+    GRID_ASSERT(Mq_ && device_copy_ &&
+                "SingleLegDirectHooked requires the QUDA device-copy path");
+    EnsureCsf_();
+    InitDeviceCopy_(in.Grid());
+    PackedToCsfDevice_(in, in_q_);
+    if (!skip_zero_ || !zeroed_once_) {
+      mid_q_.zero();
+      out_q_.zero();
+      scr_q_.zero();
+      zeroed_once_ = true;
+    }
+    quda::ColorSpinorField *iu[DtxqcdNf] = {in_q_.csf[0].get(),
+                                            in_q_.csf[1].get()};
+    quda::ColorSpinorField *il[DtxqcdNf] = {in_q_.csf[2].get(),
+                                            in_q_.csf[3].get()};
+    quda::ColorSpinorField *ou[DtxqcdNf] = {out_q_.csf[0].get(),
+                                            out_q_.csf[1].get()};
+    quda::ColorSpinorField *ol[DtxqcdNf] = {out_q_.csf[2].get(),
+                                            out_q_.csf[3].get()};
+    quda::ColorSpinorField *sl[DtxqcdNf] = {scr_q_.csf[0].get(),
+                                            scr_q_.csf[1].get()};
+    if (dagger)
+      Mq_->Mdag_device_csf(iu, il, ou, ol, sl);
+    else
+      Mq_->M_device_csf(iu, il, ou, ol, sl);
+    quda::ColorSpinorField *ics[4] = {iu[0], iu[1], il[0], il[1]};
+    quda::ColorSpinorField *ocs[4] = {ou[0], ou[1], ol[0], ol[1]};
+    hook(ics, ocs);
+    CsfToPackedDevice_(out_q_, out);
+    out.Checkerboard() = in.Checkerboard();
+    ncalls++;
+  }
+
   void EnsureCsf_() {
     if (!csf_ready_) {
       quda::ColorSpinorParam ptmpl = Mq_->MakeNativeCsfParam();

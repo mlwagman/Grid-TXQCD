@@ -44,10 +44,14 @@
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDPackedField.h>
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_hopcorr_native_decl.h>
+#endif
 
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <vector>
 
 namespace Grid {
 
@@ -74,6 +78,61 @@ class DtxqcdDeformQuda {
     W7_ = Cshift(LatticeColourMatrix(adj(W3_)), Nd - 1, -1);
     W3c_ = conjugate(W3_);
     W7c_ = Cshift(LatticeColourMatrix(adj(W3c_)), Nd - 1, -1);
+
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    // DTXQCD_DEFORM_NATIVE_CORR=1: CSF-resident hop-correction kernel
+    // (single-rank only — no halo exchange; the deform measurements run
+    // 1.1.1.1).  Gauge upload is once per config (t0-independent).
+    {
+      const char *e = std::getenv("DTXQCD_DEFORM_NATIVE_CORR");
+      native_ = e && *e && std::atoi(e) != 0;
+      if (native_ && grid_._Nprocessors != 1) {
+        std::cout << GridLogMessage
+                  << "[deform-native] DISABLED: multi-rank run (kernel has "
+                  << "no halo exchange)" << std::endl;
+        native_ = false;
+      }
+      if (native_) {
+        Coordinate ldims = grid_.LocalDimensions();
+        int X[4] = {(int)ldims[0], (int)ldims[1], (int)ldims[2],
+                    (int)ldims[3]};
+        const std::size_t vol =
+            (std::size_t)X[0] * X[1] * X[2] * X[3];
+        std::vector<double> h3(vol * 18), h7(vol * 18);
+        Coordinate site(Nd);
+        typename LatticeColourMatrix::vector_object::scalar_object m3, m7;
+        for (int t = 0; t < X[3]; ++t)
+          for (int z = 0; z < X[2]; ++z)
+            for (int y = 0; y < X[1]; ++y)
+              for (int xx = 0; xx < X[0]; ++xx) {
+                site[0] = xx; site[1] = y; site[2] = z; site[3] = t;
+                peekLocalSite(m3, W3_, site);
+                peekLocalSite(m7, W7_, site);
+                const int par = (xx + y + z + t) & 1;
+                const std::size_t lex =
+                    xx + (std::size_t)X[0] *
+                             (y + (std::size_t)X[1] *
+                                      (z + (std::size_t)X[2] * t));
+                const std::size_t gsite = (std::size_t)par * (vol / 2) +
+                                          (lex >> 1);
+                for (int c = 0; c < Nc; ++c)
+                  for (int b = 0; b < Nc; ++b) {
+                    const std::complex<double> v3 = DtxqcdToStd(m3()()(c, b));
+                    const std::complex<double> v7 = DtxqcdToStd(m7()()(c, b));
+                    h3[gsite * 18 + (c * 3 + b) * 2 + 0] = v3.real();
+                    h3[gsite * 18 + (c * 3 + b) * 2 + 1] = v3.imag();
+                    h7[gsite * 18 + (c * 3 + b) * 2 + 0] = v7.real();
+                    h7[gsite * 18 + (c * 3 + b) * 2 + 1] = v7.imag();
+                  }
+              }
+        DtxqcdQudaHopCorrNative::UploadHopGauge(h3.data(), h7.data(), X,
+                                                hop_gauge_);
+        std::cout << GridLogMessage
+                  << "[deform-native] hop gauge uploaded (" << vol
+                  << " sites)" << std::endl;
+      }
+    }
+#endif
   }
 
   // Rebuild the 4 per-timeslice coefficient masks for profile p(.) at
@@ -96,19 +155,105 @@ class DtxqcdDeformQuda {
       one = ComplexD(std::exp(-eta * dpb / 2.0) - 1.0, 0.0);
       cbl_ = where(tc_ == Integer(t), one, cbl_);
     }
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    if (native_) {
+      std::vector<double> fu(T_), bu(T_), fl(T_), bl(T_);
+      for (int t = 0; t < T_; ++t) {
+        const double dpf = dp(t);
+        const double dpb = dp((t - 1 + T_) % T_);
+        fu[t] = std::exp(-eta * dpf / 2.0) - 1.0;
+        bu[t] = std::exp(+eta * dpb / 2.0) - 1.0;
+        fl[t] = std::exp(+eta * dpf / 2.0) - 1.0;
+        bl[t] = std::exp(-eta * dpb / 2.0) - 1.0;
+      }
+      using namespace DtxqcdQudaHopCorrNative;
+      FreeCoeffs(cfu_d_); FreeCoeffs(cbu_d_);
+      FreeCoeffs(cfl_d_); FreeCoeffs(cbl_d_);
+      cfu_d_ = UploadCoeffs(fu.data(), T_);
+      cbu_d_ = UploadCoeffs(bu.data(), T_);
+      cfl_d_ = UploadCoeffs(fl.data(), T_);
+      cbl_d_ = UploadCoeffs(bl.data(), T_);
+    }
+#endif
   }
 
-  void Mtil(const F &in, F &out) {
+  void Mtil(const F &in, F &out) { Leg_(in, out, /*dagger=*/false); }
+  void MtilDag(const F &in, F &out) { Leg_(in, out, /*dagger=*/true); }
+
+  void Leg_(const F &in, F &out, bool dagger) {
+    // DTXQCD_DEFORM_PROFILE=1: per-phase wallclock, printed every 200 legs.
+    static const bool prof = [] {
+      const char *e = std::getenv("DTXQCD_DEFORM_PROFILE");
+      return e && *e && std::atoi(e) != 0;
+    }();
+    double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+    if (prof) { accelerator_barrier(); t0 = usecond(); }
     DtxqcdPackDoubled(in, pk_in_);
-    adapter_.MDeviceDirect(pk_in_, pk_out_);
+    if (prof) { accelerator_barrier(); t1 = usecond(); }
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    if (native_) {
+      // CSF-resident corrections: out_csf += corr(in_csf) inside the leg,
+      // no Grid Cshift pass.  Dagger = swapped arrays + flipped projectors.
+      const double *fu = dagger ? cfl_d_ : cfu_d_;
+      const double *bu = dagger ? cbl_d_ : cbu_d_;
+      const double *fl = dagger ? cfu_d_ : cfl_d_;
+      const double *bl = dagger ? cbu_d_ : cbl_d_;
+      auto hook = [&](quda::ColorSpinorField *ics[4],
+                      quda::ColorSpinorField *ocs[4]) {
+        using DtxqcdQudaHopCorrNative::ApplyHopCorrNative;
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          ApplyHopCorrNative(*ics[a], *ocs[a], hop_gauge_, fu, bu,
+                             /*conj_gauge=*/false, /*flip_proj=*/dagger);
+          ApplyHopCorrNative(*ics[2 + a], *ocs[2 + a], hop_gauge_, fl, bl,
+                             /*conj_gauge=*/true, /*flip_proj=*/dagger);
+        }
+      };
+      adapter_.SingleLegDirectHooked(pk_in_, pk_out_, dagger, hook);
+      if (prof) { accelerator_barrier(); t2 = usecond(); }
+      DtxqcdUnpackDoubled(pk_out_, out);
+      if (prof) {
+        accelerator_barrier();
+        t3 = usecond();
+        p_pack_ += t1 - t0;
+        p_base_ += t2 - t1;  // includes the native corr kernels
+        p_unpack_ += t3 - t2;
+        if (++p_n_ % 200 == 0) {
+          const double inv = 1e-3 / p_n_;
+          std::cout << GridLogMessage << "[deform-prof:native] " << p_n_
+                    << " legs, per-leg ms: pack " << p_pack_ * inv
+                    << " + base+corr " << p_base_ * inv << " + unpack "
+                    << p_unpack_ * inv << " = total "
+                    << (p_pack_ + p_base_ + p_unpack_) * inv << std::endl;
+        }
+      }
+      return;
+    }
+#endif
+    if (dagger)
+      adapter_.MdagDeviceDirect(pk_in_, pk_out_);
+    else
+      adapter_.MDeviceDirect(pk_in_, pk_out_);
+    if (prof) { accelerator_barrier(); t2 = usecond(); }
     DtxqcdUnpackDoubled(pk_out_, out);
-    CorrAdd_(in, out, /*dagger=*/false);
-  }
-  void MtilDag(const F &in, F &out) {
-    DtxqcdPackDoubled(in, pk_in_);
-    adapter_.MdagDeviceDirect(pk_in_, pk_out_);
-    DtxqcdUnpackDoubled(pk_out_, out);
-    CorrAdd_(in, out, /*dagger=*/true);
+    if (prof) { accelerator_barrier(); t3 = usecond(); }
+    CorrAdd_(in, out, dagger);
+    if (prof) {
+      accelerator_barrier();
+      t4 = usecond();
+      p_pack_ += t1 - t0;
+      p_base_ += t2 - t1;
+      p_unpack_ += t3 - t2;
+      p_corr_ += t4 - t3;
+      if (++p_n_ % 200 == 0) {
+        const double inv = 1e-3 / p_n_;
+        std::cout << GridLogMessage << "[deform-prof] " << p_n_
+                  << " legs, per-leg ms: pack " << p_pack_ * inv << " + base "
+                  << p_base_ * inv << " + unpack " << p_unpack_ * inv
+                  << " + corr " << p_corr_ * inv << " = total "
+                  << (p_pack_ + p_base_ + p_unpack_ + p_corr_) * inv
+                  << std::endl;
+      }
+    }
   }
 
   // CGNR on M~^dag M~ (same loop/semantics as the Grid-path SolveTil).
@@ -205,6 +350,26 @@ class DtxqcdDeformQuda {
   DtxqcdPackedFullHermOp &adapter_;
   GridCartesian &grid_;
   int T_;
+  // DTXQCD_DEFORM_PROFILE accumulators (us) — see Leg_.
+  double p_pack_ = 0, p_base_ = 0, p_unpack_ = 0, p_corr_ = 0;
+  long p_n_ = 0;
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  // DTXQCD_DEFORM_NATIVE_CORR state (see ctor).
+  bool native_ = false;
+  DtxqcdQudaHopCorrNative::HopGauge hop_gauge_;
+  double *cfu_d_ = nullptr, *cbu_d_ = nullptr;
+  double *cfl_d_ = nullptr, *cbl_d_ = nullptr;
+
+ public:
+  ~DtxqcdDeformQuda() {
+    using namespace DtxqcdQudaHopCorrNative;
+    FreeHopGauge(hop_gauge_);
+    FreeCoeffs(cfu_d_); FreeCoeffs(cbu_d_);
+    FreeCoeffs(cfl_d_); FreeCoeffs(cbl_d_);
+  }
+
+ private:
+#endif
   Gamma g_t_;
   LatticeColourMatrix W3_, W7_, W3c_, W7c_;
   LatticeComplex cfu_, cbu_, cfl_, cbl_;

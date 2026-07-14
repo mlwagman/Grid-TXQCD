@@ -119,7 +119,8 @@ DTXQCD_NATIVE_IMPL_SRCS = \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_pre_mat_lower_native_sp_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_post_mat_lower_native_sp_impl.cc \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v2_sp_impl.cc \
-  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_sp_impl.cc
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_aux_kernel_native_v3_sp_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_hopcorr_native_impl.cc
 
 DTXQCD_NATIVE_IMPL_OBJS = \
   dtxqcd_quda_gamma5_native_impl.o \
@@ -131,7 +132,13 @@ DTXQCD_NATIVE_IMPL_OBJS = \
   dtxqcd_quda_pre_mat_lower_native_sp_impl.o \
   dtxqcd_quda_post_mat_lower_native_sp_impl.o \
   dtxqcd_quda_aux_kernel_native_v2_sp_impl.o \
-  dtxqcd_quda_aux_kernel_native_v3_sp_impl.o
+  dtxqcd_quda_aux_kernel_native_v3_sp_impl.o \
+  dtxqcd_quda_hopcorr_native_impl.o
+
+dtxqcd_quda_hopcorr_native_impl.o: \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_hopcorr_native_impl.cc \
+  ../Grid/qcd/action/dtxqcd/dtxqcd_quda_hopcorr_native_decl.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 dtxqcd_quda_gamma5_native_impl.o: \
   ../Grid/qcd/action/dtxqcd/dtxqcd_quda_gamma5_native_impl.cc
