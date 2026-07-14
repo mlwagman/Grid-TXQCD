@@ -50,5 +50,14 @@ void ApplyHopCorrNative(quda::ColorSpinorField &in_csf,
                         const double *cf_d, const double *cb_d,
                         bool conj_gauge, bool flip_proj);
 
+// Parity-crossing variant for the EO Schur chain (M~eo/M~oe legs): in and
+// out are SINGLE-PARITY CSFs of opposite parity.  out_parity names out's
+// parity (0=even, 1=odd); the t+-1 neighbors read from `in` are then on
+// in's parity automatically.  Same hop math, gauge indexed at the OUT site.
+void ApplyHopCorrNativeEO(quda::ColorSpinorField &in_csf,
+                          quda::ColorSpinorField &out_csf, const HopGauge &g,
+                          const double *cf_d, const double *cb_d,
+                          bool conj_gauge, bool flip_proj, int out_parity);
+
 }  // namespace DtxqcdQudaHopCorrNative
 }  // namespace Grid

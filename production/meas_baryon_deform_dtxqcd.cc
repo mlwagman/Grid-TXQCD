@@ -46,6 +46,7 @@
 #ifdef GRID_HAVE_QUDA
 #include <Grid/util/QudaInit.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA_EO.h>
 #endif
 // QUDA-backed M~ (StyleC base op + per-timeslice hop corrections) — the
 // DTXQCD_DEFORM_QUDA=1 fast path.  See the header for the operator identity
@@ -224,6 +225,14 @@ int main(int argc, char **argv) {
   const bool use_qdef = env_int("DTXQCD_DEFORM_QUDA", 1) != 0;
   const bool qdef_check =
       env_int("DTXQCD_DEFORM_QUDA_CHECK", use_qdef ? 1 : 0) != 0;
+  // EO mode (checked early: it decides which QUDA stack gets built — the
+  // full-volume device stack + the EO stack do NOT coexist on one A100;
+  // job 1301152 OOM'd in the EO op's lazy init.  In EO mode the full M~ is
+  // needed only for Schur prep/backsub + the gate reference, twice per
+  // solve — the Grid-path apply (~0.11 s) is ample there, so the adapter
+  // is built WITHOUT the QUDA op and the deform driver's full-path legs
+  // fall back to the struct reference automatically.)
+  const bool use_eo_def = env_int("DTXQCD_DEFORM_EO", 0) != 0;
 #ifdef GRID_HAVE_QUDA
   std::unique_ptr<DTXQCDMpcOpQUDA> Mq;
 #endif
@@ -232,12 +241,17 @@ int main(int argc, char **argv) {
   if (use_qdef) {
 #ifdef GRID_HAVE_QUDA
     Grid::Quda::initialize();  // idempotent
-    Mq.reset(new DTXQCDMpcOpQUDA(Usm, Grid, RBGrid, mass, csw,
-                                 U.sigma, U.pi, U.d, U.n, U.s, U.p));
-    // Aux fields are fixed for the whole measurement: pack the device aux
-    // cache once (the SetAuxStatic hoist), same as the undeformed meas path.
-    Mq->SetAuxStatic(true);
-    Hop.reset(new DtxqcdPackedFullHermOp(Mop, *Mq, &Grid, Even));
+    if (!use_eo_def) {
+      Mq.reset(new DTXQCDMpcOpQUDA(Usm, Grid, RBGrid, mass, csw,
+                                   U.sigma, U.pi, U.d, U.n, U.s, U.p));
+      // Aux fields are fixed for the whole measurement: pack the device aux
+      // cache once (SetAuxStatic hoist), same as the undeformed meas path.
+      Mq->SetAuxStatic(true);
+      Hop.reset(new DtxqcdPackedFullHermOp(Mop, *Mq, &Grid, Even));
+    } else {
+      // EO mode: struct-path full adapter only (see the memory note above).
+      Hop.reset(new DtxqcdPackedFullHermOp(Mop, &Grid, Even));
+    }
 #else
     Hop.reset(new DtxqcdPackedFullHermOp(Mop, &Grid, Even));
 #endif
@@ -248,6 +262,24 @@ int main(int argc, char **argv) {
 #endif
               << std::endl;
   }
+
+  // ---- DTXQCD_DEFORM_EO=1: EO Schur solve (the lambda=5/6 accelerator) --
+  // Mpc~ = Moo - M~oe Mee^{-1} M~eo, with M~ee = Mee exactly (deformation
+  // rides only the t-hops).  Default OFF pending gates.
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<DTXQCDMpcOpQUDA_EO> Mq_eo;
+  std::unique_ptr<DTXQCDMpcOp> Mpc_cpu;
+  std::unique_ptr<DtxqcdPackedMpcHermOp> HopEO;
+  if (use_eo_def && Qdef) {
+    Mq_eo.reset(new DTXQCDMpcOpQUDA_EO(Dw, Usm, Grid, RBGrid, mass, csw,
+                                       U.sigma, U.pi, U.d, U.n, U.s, U.p));
+    Mpc_cpu.reset(new DTXQCDMpcOp(Dw));
+    HopEO.reset(new DtxqcdPackedMpcHermOp(*Mpc_cpu, *Mq_eo, &RBGrid, Odd));
+    Qdef->AttachEO(*HopEO, *Mq_eo, RBGrid, Dw);
+    std::cout << GridLogMessage << "[baryon-def] EO Schur solve ENABLED "
+              << "(Mpc~ device; M~ee = Mee caches verbatim)" << std::endl;
+  }
+#endif
 
   // ---- deformed solver stack (validated in Test_dtxqcd_eta_stoch_pf) ----
   //
@@ -395,6 +427,30 @@ int main(int argc, char **argv) {
   // 3. Adjointness: <u, M~ v> == <M~^dag u, v> within roundoff.
   if (Qdef && qdef_check) {
     BuildDeformWeights(0);
+#ifdef GRID_HAVE_QUDA
+    // WARM UP the EO device pools FIRST.  Grid's MemoryManager cache is
+    // elastic (grows on every temporary, yields only to its own pressure)
+    // while QUDA's pools are inelastic: if the qcheck's Grid temporaries
+    // grow the cache before the EO op's lazy init (CSFs + ~7 GB site
+    // caches), the init starves (jobs 1301152/84/96 all OOM'd here by
+    // ~18 MB).  One zero-vector Mpc~ apply allocates everything up front.
+    if (use_eo_def && Qdef->HasEO()) {
+      F w1(&RBGrid), w2(&RBGrid);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        w1.upper.f[a] = Zero(); w1.lower.f[a] = Zero();
+        w1.upper.f[a].Checkerboard() = Odd;
+        w1.lower.f[a].Checkerboard() = Odd;
+      }
+      Qdef->MpcTil(w1, w2);
+      std::cout << GridLogMessage << "[deform-qcheck:EO] device pools warm"
+                << std::endl;
+    }
+#endif
+    // Scope block: the six full-volume temporaries (~0.9 GB) must die
+    // before the EO gate allocates its RB set — with BOTH QUDA stacks
+    // resident the checks otherwise tip the device budget (job 1301095
+    // OOM'd exactly here).
+    {
     GridParallelRNG RNG(&Grid);
     RNG.SeedFixedIntegers({77, 13, 999, 4242});
     F v(&Grid), u(&Grid), ag(&Grid), aq(&Grid), dg(&Grid), dq(&Grid);
@@ -435,6 +491,97 @@ int main(int argc, char **argv) {
       std::_Exit(4);
     }
     std::cout << GridLogMessage << "[deform-qcheck] PASSED" << std::endl;
+    }
+
+#ifdef GRID_HAVE_QUDA
+    // EO gate: device Mpc~ vs the Schur complement SYNTHESIZED from the
+    // (just-verified) full-volume M~ + the cached Mee^{-1}:
+    //   M~(v_o ⊕ 0)  ->  odd part = M~oo v, even part = M~eo v
+    //   u = Mee^{-1}(M~eo v) ;  M~(0 ⊕ u) -> odd part = M~oe u
+    //   ref = M~oo v − M~oe u.
+    // Plus adjointness of the device Mpc~/Mpc~dag pair.
+    if (use_eo_def && Qdef && Qdef->HasEO()) {
+      F vo(&RBGrid), uo(&RBGrid), qo(&RBGrid), qdo(&RBGrid);
+      F ref_oo(&RBGrid), ref_eo(&RBGrid), ref_oe(&RBGrid), ue(&RBGrid);
+      F zf(&Grid), mzf(&Grid);
+      // RB noise = full-grid gaussian + pickCheckerboard (the §5b / house
+      // pattern; a GridParallelRNG constructed ON the RB grid hangs — job
+      // 1301201 burned its wall in exactly that constructor).
+      {
+        GridParallelRNG RNGf(&Grid);
+        RNGf.SeedFixedIntegers({11, 22, 33, 44});
+        F tmp_full(&Grid);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          gaussian(RNGf, tmp_full.upper.f[a]);
+          gaussian(RNGf, tmp_full.lower.f[a]);
+        }
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          pickCheckerboard(Odd, vo.upper.f[a], tmp_full.upper.f[a]);
+          pickCheckerboard(Odd, vo.lower.f[a], tmp_full.lower.f[a]);
+        }
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          gaussian(RNGf, tmp_full.upper.f[a]);
+          gaussian(RNGf, tmp_full.lower.f[a]);
+        }
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          pickCheckerboard(Odd, uo.upper.f[a], tmp_full.upper.f[a]);
+          pickCheckerboard(Odd, uo.lower.f[a], tmp_full.lower.f[a]);
+        }
+      }
+      // ref = M~oo v − M~oe Mee^{-1} M~eo v via two full-M~ applies.
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        zf.upper.f[a] = Zero(); zf.lower.f[a] = Zero();
+      }
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        setCheckerboard(zf.upper.f[a], vo.upper.f[a]);
+        setCheckerboard(zf.lower.f[a], vo.lower.f[a]);
+      }
+      Qdef->Mtil(zf, mzf);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        pickCheckerboard(Odd, ref_oo.upper.f[a], mzf.upper.f[a]);
+        pickCheckerboard(Odd, ref_oo.lower.f[a], mzf.lower.f[a]);
+        pickCheckerboard(Even, ref_eo.upper.f[a], mzf.upper.f[a]);
+        pickCheckerboard(Even, ref_eo.lower.f[a], mzf.lower.f[a]);
+      }
+      Dw.MooeeInv(ref_eo, ue);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        zf.upper.f[a] = Zero(); zf.lower.f[a] = Zero();
+        setCheckerboard(zf.upper.f[a], ue.upper.f[a]);
+        setCheckerboard(zf.lower.f[a], ue.lower.f[a]);
+      }
+      Qdef->Mtil(zf, mzf);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        pickCheckerboard(Odd, ref_oe.upper.f[a], mzf.upper.f[a]);
+        pickCheckerboard(Odd, ref_oe.lower.f[a], mzf.lower.f[a]);
+        ref_oo.upper.f[a] = ref_oo.upper.f[a] - ref_oe.upper.f[a];
+        ref_oo.lower.f[a] = ref_oo.lower.f[a] - ref_oe.lower.f[a];
+      }
+      Qdef->MpcTil(vo, qo);
+      RealD nm = 0, nd = 0;
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        nm += norm2(LatticeFermion(qo.upper.f[a] - ref_oo.upper.f[a])) +
+              norm2(LatticeFermion(qo.lower.f[a] - ref_oo.lower.f[a]));
+        nd += norm2(ref_oo.upper.f[a]) + norm2(ref_oo.lower.f[a]);
+      }
+      const RealD relEO = std::sqrt(nm / nd);
+      Qdef->MpcTilDag(uo, qdo);
+      const ComplexD e1 = DtxqcdDeformQuda::finner_(uo, qo);
+      const ComplexD e2 = DtxqcdDeformQuda::finner_(qdo, vo);
+      const RealD adjEO = DtxqcdAbs(ComplexD(e1 - e2)) / DtxqcdAbs(e1);
+      std::cout << GridLogMessage
+                << "[deform-qcheck:EO] |Mpc~_dev - Mpc~_schur| rel = " << relEO
+                << std::endl;
+      std::cout << GridLogMessage
+                << "[deform-qcheck:EO] adjointness rel = " << adjEO
+                << std::endl;
+      if (relEO > 1e-8 || adjEO > 1e-10) {
+        std::cout << GridLogMessage << "[deform-qcheck:EO] FAILED" << std::endl;
+        Grid_finalize();
+        std::_Exit(4);
+      }
+      std::cout << GridLogMessage << "[deform-qcheck:EO] PASSED" << std::endl;
+    }
+#endif
   }
 
   // ---- measurement loop: S_def . (undeformed d* wall), P+ projections ----
@@ -447,10 +594,17 @@ int main(int argc, char **argv) {
         NS, std::vector<std::vector<ComplexD>>(T, std::vector<ComplexD>(T))));
 
   Gamma g5(Gamma::Algebra::Gamma5);
+  // MEAS_BARYON_MAXSOLVES=N (0 = unlimited): stop after N solves — timing
+  // probes and h5 A/B gates need one representative solve, not the full
+  // flavor x spin x t_src set (NTSRC=1 still means 4 solves).
+  const int max_solves = env_int("MEAS_BARYON_MAXSOLVES", 0);
+  int n_solved = 0;
   for (int t_src : tsrc_list) {
     BuildDeformWeights(t_src);   // source-centered contour for this t_src
     for (int fi = 0; fi < NF; ++fi)
       for (int si = 0; si < NS; ++si) {
+        if (max_solves > 0 && n_solved >= max_solves) continue;
+        ++n_solved;
         LatticeColourVector wall = DiquarkEpsilonWall(d_iso, t_src,
                                                       /*conj_field=*/true);
         LatticeFermion eta_raw(&Grid);
@@ -467,8 +621,18 @@ int main(int argc, char **argv) {
         GApply(src, -1);
         if (Qdef) {
           RealD relres = 0;
-          const int it = Qdef->SolveTil(src, y, tol, cgmax, relres);
-          std::cout << GridLogMessage << "[deform-CG:quda] iters=" << it
+          int it = 0;
+          const char *tag = "[deform-CG:quda]";
+#ifdef GRID_HAVE_QUDA
+          if (use_eo_def && Qdef->HasEO()) {
+            it = Qdef->SolveTilEO(src, y, tol, cgmax, relres);
+            tag = "[deform-CG:quda-EO]";
+          } else
+#endif
+          {
+            it = Qdef->SolveTil(src, y, tol, cgmax, relres);
+          }
+          std::cout << GridLogMessage << tag << " iters=" << it
                     << " relres=" << relres << std::endl;
           if (relres > tol) {
             std::cout << GridLogMessage

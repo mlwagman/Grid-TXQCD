@@ -176,6 +176,7 @@ class DtxqcdDeformQuda {
       cbu_d_ = UploadCoeffs(bu.data(), T_);
       cfl_d_ = UploadCoeffs(fl.data(), T_);
       cbl_d_ = UploadCoeffs(bl.data(), T_);
+      PushEOWeights_();  // device addresses changed — refresh the EO op
     }
 #endif
   }
@@ -194,7 +195,7 @@ class DtxqcdDeformQuda {
     DtxqcdPackDoubled(in, pk_in_);
     if (prof) { accelerator_barrier(); t1 = usecond(); }
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
-    if (native_) {
+    if (native_ && adapter_.HasDeviceLeg()) {
       // CSF-resident corrections: out_csf += corr(in_csf) inside the leg,
       // no Grid Cshift pass.  Dagger = swapped arrays + flipped projectors.
       const double *fu = dagger ? cfl_d_ : cfu_d_;
@@ -258,6 +259,72 @@ class DtxqcdDeformQuda {
       }
     }
   }
+
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  // ---- EO Schur path (the lambda=5/6 accelerator; HANDOFF §5b consumer) --
+  // Mpc~ = Moo - M~oe Mee^{-1} M~eo with M~ee = Mee EXACTLY (the deformation
+  // lives only on the t-hops), so the EO op's cached site inverses carry
+  // over untouched; the hop legs gain the same correction kernels
+  // (parity-crossing variant), injected inside Mq_eo's M_device_csf.
+  // Schur prep/back-substitution run ONCE per solve through the validated
+  // full-volume M~ (zero-extend + parity picks) + the host MooeeInv.
+  void AttachEO(DtxqcdPackedMpcHermOp &eo_adapter, DTXQCDMpcOpQUDA_EO &mq_eo,
+                GridRedBlackCartesian &rbgrid,
+                DTXQCDWilsonCloverFermionEO &dw) {
+    GRID_ASSERT(native_ &&
+                "AttachEO requires the native hop-gauge upload "
+                "(DTXQCD_DEFORM_NATIVE_CORR)");
+    eo_adapter_ = &eo_adapter;
+    mq_eo_ = &mq_eo;
+    rbgrid_ = &rbgrid;
+    dw_ = &dw;
+    pk_eo_in_.reset(new LatticeDtxqcdPacked(&rbgrid));
+    pk_eo_out_.reset(new LatticeDtxqcdPacked(&rbgrid));
+    PushEOWeights_();
+  }
+  bool HasEO() const { return mq_eo_ != nullptr; }
+
+  // CGNR on Mpc~^dag Mpc~ for the odd block, with even prep/backsub:
+  //   b'_o = b_o - M~oe Mee^{-1} b_e ;  solve Mpc~ x_o = b'_o ;
+  //   x_e  = Mee^{-1} (b_e - M~eo x_o).
+  int SolveTilEO(const F &src, F &x, RealD tol, int cgmax, RealD &rel_out) {
+    GRID_ASSERT(mq_eo_);
+    F tmp(&grid_), ze(&grid_);
+    F b_e(rbgrid_), b_o(rbgrid_), t_e(rbgrid_), t_o(rbgrid_);
+    PickCb_(Even, b_e, src);
+    PickCb_(Odd, b_o, src);
+    // t_e = Mee^{-1} b_e ; b'_o = b_o - pick_o( M~ (t_e ⊕ 0) )
+    dw_->MooeeInv(b_e, t_e);
+    ZeroExtend_(t_e, ze);
+    Mtil(ze, tmp);
+    PickCb_(Odd, t_o, tmp);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      b_o.upper.f[a] = b_o.upper.f[a] - t_o.upper.f[a];
+      b_o.lower.f[a] = b_o.lower.f[a] - t_o.lower.f[a];
+    }
+    // Odd-block CGNR on the device Mpc~.
+    F xo(rbgrid_);
+    const int it = CgnrEO_(b_o, xo, tol, cgmax, rel_out);
+    // Backsub: x_e = Mee^{-1}( b_e - pick_e( M~ (0 ⊕ x_o) ) ).
+    ZeroExtend_(xo, ze);
+    Mtil(ze, tmp);
+    PickCb_(Even, t_e, tmp);
+    PickCb_(Even, b_e, src);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      t_e.upper.f[a] = b_e.upper.f[a] - t_e.upper.f[a];
+      t_e.lower.f[a] = b_e.lower.f[a] - t_e.lower.f[a];
+    }
+    F x_e(rbgrid_);
+    dw_->MooeeInv(t_e, x_e);
+    SetCb_(x, x_e);
+    SetCb_(x, xo);
+    return it;
+  }
+
+  // Single Mpc~ / Mpc~^dag applies on odd struct fields (gates + CGNR).
+  void MpcTil(const F &in_o, F &out_o) { EoLeg_(in_o, out_o, false); }
+  void MpcTilDag(const F &in_o, F &out_o) { EoLeg_(in_o, out_o, true); }
+#endif
 
   // CGNR on M~^dag M~ (same loop/semantics as the Grid-path SolveTil).
   // Returns iterations; rel_out = final |r|/|b| (caller decides on
@@ -356,6 +423,90 @@ class DtxqcdDeformQuda {
   // DTXQCD_DEFORM_PROFILE accumulators (us) — see Leg_.
   double p_pack_ = 0, p_base_ = 0, p_unpack_ = 0, p_corr_ = 0;
   long p_n_ = 0;
+
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  // ---- EO members / helpers ----
+  DtxqcdPackedMpcHermOp *eo_adapter_ = nullptr;
+  DTXQCDMpcOpQUDA_EO *mq_eo_ = nullptr;
+  GridRedBlackCartesian *rbgrid_ = nullptr;
+  DTXQCDWilsonCloverFermionEO *dw_ = nullptr;
+  std::unique_ptr<LatticeDtxqcdPacked> pk_eo_in_, pk_eo_out_;
+
+  void PushEOWeights_() {
+    if (mq_eo_)
+      mq_eo_->SetDeformHopWeights(&hop_gauge_, cfu_d_, cbu_d_, cfl_d_,
+                                  cbl_d_);
+  }
+  void PickCb_(int cb, F &half, const F &full) {
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      pickCheckerboard(cb, half.upper.f[a], full.upper.f[a]);
+      pickCheckerboard(cb, half.lower.f[a], full.lower.f[a]);
+    }
+  }
+  void SetCb_(F &full, const F &half) {
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      setCheckerboard(full.upper.f[a], half.upper.f[a]);
+      setCheckerboard(full.lower.f[a], half.lower.f[a]);
+    }
+  }
+  void ZeroExtend_(const F &half, F &full) {
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      full.upper.f[a] = Zero();
+      full.lower.f[a] = Zero();
+    }
+    SetCb_(full, half);
+  }
+  void EoLeg_(const F &in_o, F &out_o, bool dagger) {
+    DtxqcdPackDoubled(in_o, *pk_eo_in_);
+    pk_eo_in_->Checkerboard() = Odd;
+    if (dagger)
+      eo_adapter_->MdagDeviceDirect(*pk_eo_in_, *pk_eo_out_);
+    else
+      eo_adapter_->MDeviceDirect(*pk_eo_in_, *pk_eo_out_);
+    DtxqcdUnpackDoubled(*pk_eo_out_, out_o);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      out_o.upper.f[a].Checkerboard() = Odd;
+      out_o.lower.f[a].Checkerboard() = Odd;
+    }
+  }
+  int CgnrEO_(const F &src_o, F &x_o, RealD tol, int cgmax, RealD &rel_out) {
+    F b(rbgrid_), r(rbgrid_), pv(rbgrid_), t1(rbgrid_), Ap(rbgrid_);
+    MpcTilDag(src_o, b);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      x_o.upper.f[a] = Zero();
+      x_o.lower.f[a] = Zero();
+      x_o.upper.f[a].Checkerboard() = Odd;
+      x_o.lower.f[a].Checkerboard() = Odd;
+    }
+    r = b;
+    pv = b;
+    RealD r2 = fnorm2_(r), b2 = std::max(fnorm2_(b), 1e-300);
+    RealD tol2 = tol * tol * b2;
+    int k = 0;
+    for (; k < cgmax; ++k) {
+      MpcTil(pv, t1);
+      MpcTilDag(t1, Ap);
+      RealD pAp = finner_(pv, Ap).real();
+      RealD alpha = r2 / pAp;
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        x_o.upper.f[a] = x_o.upper.f[a] + alpha * pv.upper.f[a];
+        x_o.lower.f[a] = x_o.lower.f[a] + alpha * pv.lower.f[a];
+        r.upper.f[a] = r.upper.f[a] - alpha * Ap.upper.f[a];
+        r.lower.f[a] = r.lower.f[a] - alpha * Ap.lower.f[a];
+      }
+      RealD rn = fnorm2_(r);
+      if (rn < tol2) { r2 = rn; ++k; break; }
+      RealD beta = rn / r2;
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        pv.upper.f[a] = r.upper.f[a] + beta * pv.upper.f[a];
+        pv.lower.f[a] = r.lower.f[a] + beta * pv.lower.f[a];
+      }
+      r2 = rn;
+    }
+    rel_out = std::sqrt(r2 / b2);
+    return k;
+  }
+#endif
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
   // DTXQCD_DEFORM_NATIVE_CORR state (see ctor).
   bool native_ = false;

@@ -42,6 +42,9 @@
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDWilsonCloverFermionEO.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMpcOp.h>
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+#include <Grid/qcd/action/dtxqcd/dtxqcd_quda_hopcorr_native_decl.h>
+#endif
 
 NAMESPACE_BEGIN(Grid);
 
@@ -140,13 +143,17 @@ class DTXQCDMpcOpQUDA_EO : public DTXQCDMpcOpQUDA {
     // ---- hop1: t_e = M_eo psi_o  (odd -> even) ----
     HopDevice_(in_all, t_e, /*out_parity=*/QUDA_EVEN_PARITY,
                scratch_lower);
+    DeformHopCorr_(in_all, t_e, /*out_parity=*/0);
 
     // ---- site1: t_e2 = M_ee^{-1} t_e  (even) ----
+    // (M~ee = Mee exactly: the eta deformation lives ONLY on the t-hops,
+    //  so the cached inverses apply verbatim — HANDOFF_QUDA_DEFORM §4/§5b.)
     SiteMatDevice_(t_e, t_e2, Even, /*use_inverse=*/true);
 
     // ---- hop2: out = M_oe t_e2  (even -> odd) ----
     HopDevice_(t_e2, out_all, /*out_parity=*/QUDA_ODD_PARITY,
                eo_state_.even_scratch_ptrs());
+    DeformHopCorr_(t_e2, out_all, /*out_parity=*/1);
 
     // ---- site2 + subtract: out = M_oo psi_o - out ----
     // Reuse t_e/t_e2 slots' flat buffers via SiteMatDevice_ into t_e (odd
@@ -164,6 +171,49 @@ class DTXQCDMpcOpQUDA_EO : public DTXQCDMpcOpQUDA {
     cudaDeviceSynchronize();
   }
 
+  // ---- eta-deform hop weights (chem-potential frame; HANDOFF §4/§5b) ----
+  // When set, M_device_csf applies M~eo/M~oe = Meo/Moe + per-timeslice hop
+  // corrections; the site blocks are untouched (M~ee = Mee exactly).  The
+  // dagger identity Mpc~^dag = g5 Mpc~(w -> 1/w) g5 descends blockwise, so
+  // Mdag_device_csf's existing g5 wrap works verbatim with the coefficient
+  // arrays swapped during the wrapped call (deform_recip_).  Pointers are
+  // BORROWED (owner: the deform driver, e.g. DtxqcdDeformQuda).
+  void SetDeformHopWeights(const DtxqcdQudaHopCorrNative::HopGauge *g,
+                           const double *cfu, const double *cbu,
+                           const double *cfl, const double *cbl) {
+    deform_gauge_ = g;
+    dcfu_ = cfu; dcbu_ = cbu; dcfl_ = cfl; dcbl_ = cbl;
+  }
+  void ClearDeformHopWeights() { deform_gauge_ = nullptr; }
+
+ private:
+  void DeformHopCorr_(quda::ColorSpinorField *in_all[kNField],
+                      quda::ColorSpinorField *out_all[kNField],
+                      int out_parity) {
+    if (!deform_gauge_) return;
+    const double *fu = deform_recip_ ? dcfl_ : dcfu_;
+    const double *bu = deform_recip_ ? dcbl_ : dcbu_;
+    const double *fl = deform_recip_ ? dcfu_ : dcfl_;
+    const double *bl = deform_recip_ ? dcbu_ : dcbl_;
+    using DtxqcdQudaHopCorrNative::ApplyHopCorrNativeEO;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      ApplyHopCorrNativeEO(*in_all[a], *out_all[a], *deform_gauge_, fu, bu,
+                           /*conj_gauge=*/false, /*flip_proj=*/false,
+                           out_parity);
+      ApplyHopCorrNativeEO(*in_all[DtxqcdNf + a], *out_all[DtxqcdNf + a],
+                           *deform_gauge_, fl, bl,
+                           /*conj_gauge=*/true, /*flip_proj=*/false,
+                           out_parity);
+    }
+    cudaDeviceSynchronize();
+  }
+
+  const DtxqcdQudaHopCorrNative::HopGauge *deform_gauge_ = nullptr;
+  const double *dcfu_ = nullptr, *dcbu_ = nullptr;
+  const double *dcfl_ = nullptr, *dcbl_ = nullptr;
+  bool deform_recip_ = false;
+
+ public:
   void Mdag_device_csf(quda::ColorSpinorField *in_upper[DtxqcdNf],
                        quda::ColorSpinorField *in_lower[DtxqcdNf],
                        quda::ColorSpinorField *out_upper[DtxqcdNf],
@@ -174,7 +224,9 @@ class DTXQCDMpcOpQUDA_EO : public DTXQCDMpcOpQUDA {
       DtxqcdQudaGamma5Native::ApplyGamma5InplaceNative(*in_upper[a], g5v);
       DtxqcdQudaGamma5Native::ApplyGamma5InplaceNative(*in_lower[a], g5v);
     }
+    deform_recip_ = true;  // M~(1/w) inside the g5 wrap (no-op undeformed)
     M_device_csf(in_upper, in_lower, out_upper, out_lower, scratch_lower);
+    deform_recip_ = false;
     for (int a = 0; a < DtxqcdNf; ++a) {
       DtxqcdQudaGamma5Native::ApplyGamma5InplaceNative(*in_upper[a], g5v);
       DtxqcdQudaGamma5Native::ApplyGamma5InplaceNative(*in_lower[a], g5v);

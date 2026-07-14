@@ -178,5 +178,76 @@ void ApplyHopCorrNative(quda::ColorSpinorField &in_csf,
   });
 }
 
+void ApplyHopCorrNativeEO(quda::ColorSpinorField &in_csf,
+                          quda::ColorSpinorField &out_csf, const HopGauge &g,
+                          const double *cf_d, const double *cb_d,
+                          bool conj_gauge, bool flip_proj, int out_parity) {
+  AccessorTy in_acc(in_csf);
+  AccessorTy out_acc(out_csf);
+
+  const int volumeCB = out_csf.VolumeCB();
+  const int X0 = g.X[0], X1 = g.X[1], X2 = g.X[2], X3 = g.X[3];
+  const Cd *w3 = (const Cd *)g.w3_d;
+  const Cd *w7 = (const Cd *)g.w7_d;
+  const double ps = flip_proj ? -1.0 : +1.0;
+  const double cg = conj_gauge ? -1.0 : +1.0;
+  const std::size_t halfvol = g.vol / 2;
+  const int opar = out_parity;
+
+  accelerator_for(x_cb, (std::size_t)volumeCB, 1, {
+    int x[4];
+    coordsFromCb_((int)x_cb, opar, X0, X1, X2, X3, x);
+    const int t = x[3];
+
+    int xp[4] = {x[0], x[1], x[2], (t + 1) % X3};
+    int xm[4] = {x[0], x[1], x[2], (t - 1 + X3) % X3};
+    const int xp_cb = cbFromCoords_(xp, X0, X1, X2, X3);
+    const int xm_cb = cbFromCoords_(xm, X0, X1, X2, X3);
+
+    const std::size_t gsite = (std::size_t)opar * halfvol + x_cb;
+    const Cd *W3s = w3 + gsite * 9;
+    const Cd *W7s = w7 + gsite * 9;
+
+    Cd nb_UK[12], nb_DR[12], pr[12], tf[12], tb[12];
+
+    in_acc.load(nb_UK, xp_cb, 0);  // single-parity CSF: parity index 0
+    toRel_(nb_UK, nb_DR);
+    projFwd_(nb_DR, pr, ps);
+    for (int s = 0; s < 4; ++s)
+      for (int c = 0; c < 3; ++c) {
+        Cd acc(0.0, 0.0);
+        for (int b = 0; b < 3; ++b) {
+          Cd wcb = W3s[c * 3 + b];
+          wcb = Cd(wcb.real(), cg * wcb.imag());
+          acc += wcb * pr[s * 3 + b];
+        }
+        tf[s * 3 + c] = acc;
+      }
+
+    in_acc.load(nb_UK, xm_cb, 0);
+    toRel_(nb_UK, nb_DR);
+    projBwd_(nb_DR, pr, ps);
+    for (int s = 0; s < 4; ++s)
+      for (int c = 0; c < 3; ++c) {
+        Cd acc(0.0, 0.0);
+        for (int b = 0; b < 3; ++b) {
+          Cd wcb = W7s[c * 3 + b];
+          wcb = Cd(wcb.real(), cg * wcb.imag());
+          acc += wcb * pr[s * 3 + b];
+        }
+        tb[s * 3 + c] = acc;
+      }
+
+    Cd add_DR[12], add_UK[12], out_UK[12];
+    const double cft = cf_d[t], cbt = cb_d[t];
+    for (int i = 0; i < 12; ++i)
+      add_DR[i] = Cd(-0.5, 0.0) * (cft * tf[i] + cbt * tb[i]);
+    toNonRelHalf_(add_DR, add_UK);
+    out_acc.load(out_UK, x_cb, 0);
+    for (int i = 0; i < 12; ++i) out_UK[i] += add_UK[i];
+    out_acc.save(out_UK, x_cb, 0);
+  });
+}
+
 }  // namespace DtxqcdQudaHopCorrNative
 }  // namespace Grid

@@ -211,6 +211,17 @@ class DtxqcdPackedHermOpT : public LinearOperatorBase<LatticeDtxqcdPacked> {
   // HermOp is unusable there.  Same conversion/CSF machinery as
   // HermOpDeviceDirect_; non-QUDA builds (or device_copy off) fall back to
   // the struct-path mpc_ reference so the gates run everywhere.
+  // True when the fast device single-leg path is available (QUDA op bound
+  // and device-copy on); consumers with fallbacks (e.g. the deform driver's
+  // native branch) must check before routing through the device legs.
+  bool HasDeviceLeg() const {
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    return Mq_ != nullptr && device_copy_;
+#else
+    return false;
+#endif
+  }
+
   void MDeviceDirect(const Field &in, Field &out) {
     SingleLegDirect_(in, out, /*dagger=*/false);
   }
