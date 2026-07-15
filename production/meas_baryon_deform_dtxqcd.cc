@@ -728,6 +728,8 @@ int main(int argc, char **argv) {
                     env_int("DTXQCD_DEFORM_EO_DEFLATE_RESTARTS", 20));
                 if (!defl_cache.empty()) Qdef->SaveEODeflation(defl_cache);
               }
+              if (env_int("DTXQCD_DEFORM_EO_DEFLATE_DIAG", 0))
+                Qdef->VerifyDeflationBasis();
             }
             if (Qdef->HasDeflation()) {
               it = Qdef->SolveTilEODeflated(src, y, tol, cgmax, relres);

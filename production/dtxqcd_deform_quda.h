@@ -410,6 +410,39 @@ class DtxqcdDeformQuda {
   }
   bool HasDeflation() const { return !defl_evec_.empty(); }
 
+  // DIAG gate: apply the CG-SIDE operator (MpcTilDag . MpcTil, the exact
+  // legs CgnrEO_ iterates) to basis vectors and print Rayleigh quotient +
+  // residual.  Discriminates "IRL pairs are under-resolved mush" (RQ ~
+  // eval, residual >> eval — the 9-decade band vs the lambda_max-relative
+  // convergence test) from "eigensolve ran on a DIFFERENT operator than
+  // the CG" (RQ wildly off eval).
+  void VerifyDeflationBasis() {
+    if (defl_evec_.empty()) return;
+    F v(rbgrid_), t(rbgrid_), Av(rbgrid_);
+    LatticeDtxqcdPacked pAv(rbgrid_);
+    const int n = (int)defl_evec_.size();
+    const int picks[3] = {0, 1, n - 1};
+    for (int pi = 0; pi < 3; ++pi) {
+      const int i = picks[pi];
+      DtxqcdUnpackDoubled(defl_evec_[i], v);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        v.upper.f[a].Checkerboard() = Odd;
+        v.lower.f[a].Checkerboard() = Odd;
+      }
+      MpcTil(v, t);
+      MpcTilDag(t, Av);
+      DtxqcdPackDoubled(Av, pAv);
+      pAv.Checkerboard() = Odd;
+      const ComplexD rq = innerProduct(defl_evec_[i], pAv);
+      pAv = pAv - rq * defl_evec_[i];
+      const RealD rn = std::sqrt(norm2(pAv));
+      std::cout << GridLogMessage << "[deform-defl-diag] CGop check v[" << i
+                << "]: eval " << defl_eval_[i] << "  RQ "
+                << DtxqcdToStd(rq).real() << "  |Av-RQ v| " << rn
+                << std::endl;
+    }
+  }
+
   // ---- deflation basis cache -------------------------------------------
   // The tight (tol=1e-5) eigensolve is ~20-30 min per (config, eta) and is
   // t0-translatable, so it is shared between the propagator solves and the
@@ -856,6 +889,7 @@ class DtxqcdDeformQuda {
         since_proj = 0;
         // Galerkin correction x += V A_c^-1 V^dag r ; r recomputed exactly;
         // CG restarted.
+        const RealD rn_pre = rn;  // pre-correction (for the DIAG print)
         DtxqcdPackDoubled(r, *pk_eo_in_);
         pk_eo_in_->Checkerboard() = Odd;
         LatticeDtxqcdPacked g(rbgrid_);
@@ -876,6 +910,13 @@ class DtxqcdDeformQuda {
           r.lower.f[a] = b.lower.f[a] - Ap.lower.f[a];
         }
         rn = fnorm2_(r);
+        // Failure-mode discriminator (needs DIAG=1): a big pre->post drop
+        // means the stalled weight WAS in span(V) (cadence/restart story);
+        // no drop means it lives outside the basis (need more nev).
+        if (defl_diag)
+          std::cout << GridLogMessage << "[deform-defl-diag] corr@" << k
+                    << " relres " << std::sqrt(rn_pre / b2_orig) << " -> "
+                    << std::sqrt(rn / b2_orig) << std::endl;
         if (rn < tol2) { r2 = rn; ++k; break; }
         pv = r;  // restart the Krylov recurrence
         r2 = rn;
