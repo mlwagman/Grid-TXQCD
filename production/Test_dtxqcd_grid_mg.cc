@@ -404,6 +404,47 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
       HermMatrix;
   HermMatrix CoarseOp(LittleDiracOp);
 
+  // COARSE_CENSUS=1: measure the level-1 coarse operator's spectrum (lmax
+  // + CENSUS_NEV lowest via Chebyshev-IRL) and exit without solving.  The
+  // L2 bring-up instrument: the 3-level level-2 windows must be set from
+  // THIS spectrum — stock L2 defaults (undeformed-tuned) DIVERGED on the
+  // deformed inherited band (fPcg 636 -> 9,730 in 6 outers, 2026-07-15).
+  // Knobs: CENSUS_NEV(48) CENSUS_LO(1e-4*lmax) CENSUS_HI(1.5*lmax)
+  // CENSUS_ORD(501) CENSUS_TOL(1e-3, census-grade) CENSUS_MAXIT(20).
+  if (env_int("COARSE_CENSUS", 0) != 0) {
+    GridParallelRNG CRNG(&Coarse4d);
+    CRNG.SeedFixedIntegers({41, 42, 43, 44});
+    CoarseVector c_src(&Coarse4d);
+    gaussian(CRNG, c_src);
+    PowerMethod<CoarseVector> cPM;
+    RealD clmax = cPM(CoarseOp, c_src);
+    std::cout << GridLogMessage << "[coarse-census] lambda_max ~ " << clmax
+              << std::endl;
+    const int cnev = env_int("CENSUS_NEV", 48);
+    const int Nk = cnev + 16, Nm = Nk + std::max(64, Nk);
+    const double lo = env_real("CENSUS_LO", 1e-4 * clmax);
+    const double hi = env_real("CENSUS_HI", 1.5 * clmax);
+    const int ord = env_int("CENSUS_ORD", 501);
+    Chebyshev<CoarseVector> cheb(lo, hi, ord);
+    FunctionHermOp<CoarseVector> OpCheby(cheb, CoarseOp);
+    PlainHermOp<CoarseVector> Op(CoarseOp);
+    ImplicitlyRestartedLanczos<CoarseVector> IRL(
+        OpCheby, Op, cnev, Nk, Nm, env_real("CENSUS_TOL", 1e-3),
+        env_int("CENSUS_MAXIT", 20));
+    std::vector<RealD> eval(Nm);
+    std::vector<CoarseVector> evec(Nm, &Coarse4d);
+    int Nconv = 0;
+    IRL.calc(eval, evec, c_src, Nconv);
+    const int nuse = std::min(Nconv, cnev);
+    for (int i = 0; i < nuse; ++i)
+      std::cout << GridLogMessage << "[coarse-census] ev[" << i << "] = "
+                << eval[i] << "  (kappa_i = " << clmax / eval[i] << ")"
+                << std::endl;
+    std::cout << GridLogMessage << "[coarse-census] done (" << nuse
+              << " converged)" << std::endl;
+    return fails;
+  }
+
   // Coarse deflation (COARSE_NEV>0): IRL on the coarse operator once per
   // setup, DeflatedGuesser feeds both coarse solvers.  Kills the dominant
   // non-matvec cost (sloppy coarse CG was ~135 its/outer on the lam4 EO
