@@ -290,7 +290,7 @@ Test_dtxqcd_deform_mg_mtilde.o: Test_dtxqcd_deform_mg_mtilde.cc params.h \
 Test_dtxqcd_deform_mg_mtilde: Test_dtxqcd_deform_mg_mtilde.o \
   $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde.o \
-	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
 # TXQCD Wilson-vs-Mobius(naive Delta) sign probe -- same dense cuSOLVER
 # machinery as the DTXQCD sibling.

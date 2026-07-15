@@ -40,6 +40,9 @@
 
 #include <cstdlib>
 #include <string>
+#if defined(GRID_CUDA) && defined(GRID_HAVE_QUDA)
+#include <cusolverDn.h>
+#endif
 
 using namespace Grid;
 
@@ -432,6 +435,210 @@ int main(int argc, char **argv) {
   }
 
   //////////////////////////////////////////////////////////////////////
+  // COARSE_DIRECT (default 1): dense LU of A_c on a SECOND GPU.
+  // Motivation (eta=0.8 v1/v2): restarted GMRES does not converge on the
+  // inherited-band coarse system even at restart 768 — so make the coarse
+  // correction EXACT and remove the inner-solver variable entirely.  At
+  // 24,576-dim the dense matrix is 9.7 GB (does NOT fit GPU 0 beside the
+  // fine stack -> cudaSetDevice(1), context restored after every call)
+  // and cusolverDnZgetrf factors it in seconds.  The assembly gate is
+  // self-calibrating: it tests BOTH gather conventions against Ac.M and
+  // keeps the one that matches.
+  //////////////////////////////////////////////////////////////////////
+  const int Ncc = (int)(Coarse4d.gSites()) * NB;
+  const int npoint = geomp->npoint;
+  Coordinate cdims = Coarse4d.GlobalDimensions();
+  auto cflat = [&](const Coordinate &c) {
+    int64_t idx = 0;
+    for (int mu = Nd - 1; mu >= 0; --mu) idx = idx * cdims[mu] + c[mu];
+    return idx;
+  };
+  typedef typename LittleDiracOperator::CoarseVector CoarseVectorT;
+  auto packc = [&](const CoarseVectorT &v, std::vector<ComplexD> &out) {
+    out.resize(Ncc);
+    Coordinate c(Nd);
+    for (c[3] = 0; c[3] < cdims[3]; ++c[3])
+      for (c[2] = 0; c[2] < cdims[2]; ++c[2])
+        for (c[1] = 0; c[1] < cdims[1]; ++c[1])
+          for (c[0] = 0; c[0] < cdims[0]; ++c[0]) {
+            auto s = peekSite(v, c);
+            const int64_t b = cflat(c) * NB;
+            for (int i = 0; i < NB; ++i)
+              out[b + i] = TensorRemove(s(i));
+          }
+  };
+  auto pokec = [&](const std::vector<ComplexD> &in, CoarseVectorT &v) {
+    Coordinate c(Nd);
+    for (c[3] = 0; c[3] < cdims[3]; ++c[3])
+      for (c[2] = 0; c[2] < cdims[2]; ++c[2])
+        for (c[1] = 0; c[1] < cdims[1]; ++c[1])
+          for (c[0] = 0; c[0] < cdims[0]; ++c[0]) {
+            decltype(peekSite(v, c)) s;
+            const int64_t b = cflat(c) * NB;
+            for (int i = 0; i < NB; ++i) s(i) = in[b + i];
+            pokeSite(s, v, c);
+          }
+  };
+#if defined(GRID_CUDA) && defined(GRID_HAVE_QUDA)
+  struct CoarseDirect {
+    int N = 0, dev = 1;
+    cusolverDnHandle_t h = nullptr;
+    cuDoubleComplex *dA = nullptr, *dWork = nullptr, *dB = nullptr;
+    int *dPiv = nullptr, *dInfo = nullptr;
+    bool ready = false;
+    void Factor(std::vector<std::complex<double>> &Dcol, int n) {
+      N = n;
+      int dev0 = 0;
+      cudaGetDevice(&dev0);
+      cudaSetDevice(dev);
+      if (ready) {  // bootstrap re-factor: free the previous factorization
+        cudaFree(dA);
+        cudaFree(dWork);
+        cudaFree(dPiv);
+        cudaFree(dInfo);
+        cudaFree(dB);
+        cusolverDnDestroy(h);
+        ready = false;
+      }
+      cudaMalloc(&dA, sizeof(cuDoubleComplex) * (size_t)N * N);
+      cudaMemcpy(dA, Dcol.data(), sizeof(cuDoubleComplex) * (size_t)N * N,
+                 cudaMemcpyHostToDevice);
+      cusolverDnCreate(&h);
+      int lwork = 0;
+      cusolverDnZgetrf_bufferSize(h, N, N, dA, N, &lwork);
+      cudaMalloc(&dWork, sizeof(cuDoubleComplex) * (size_t)lwork);
+      cudaMalloc(&dPiv, sizeof(int) * N);
+      cudaMalloc(&dInfo, sizeof(int));
+      cudaMalloc(&dB, sizeof(cuDoubleComplex) * N);
+      cusolverDnZgetrf(h, N, N, dA, N, dWork, dPiv, dInfo);
+      int info = -1;
+      cudaMemcpy(&info, dInfo, sizeof(int), cudaMemcpyDeviceToHost);
+      GRID_ASSERT(info == 0 && "coarse dense LU failed");
+      ready = true;
+      cudaSetDevice(dev0);
+    }
+    void Solve(std::vector<ComplexD> &b) {
+      int dev0 = 0;
+      cudaGetDevice(&dev0);
+      cudaSetDevice(dev);
+      cudaMemcpy(dB, b.data(), sizeof(cuDoubleComplex) * N,
+                 cudaMemcpyHostToDevice);
+      cusolverDnZgetrs(h, CUBLAS_OP_N, N, 1, dA, N, dPiv, dB, N, dInfo);
+      cudaMemcpy(b.data(), dB, sizeof(cuDoubleComplex) * N,
+                 cudaMemcpyDeviceToHost);
+      cudaSetDevice(dev0);
+    }
+    // Solve A_c^dag x = b from the SAME factorization (getrs op=C) — the
+    // dagger V-cycle's coarse correction for left-vector bootstrap.
+    void SolveDag(std::vector<ComplexD> &b) {
+      int dev0 = 0;
+      cudaGetDevice(&dev0);
+      cudaSetDevice(dev);
+      cudaMemcpy(dB, b.data(), sizeof(cuDoubleComplex) * N,
+                 cudaMemcpyHostToDevice);
+      cusolverDnZgetrs(h, CUBLAS_OP_C, N, 1, dA, N, dPiv, dB, N, dInfo);
+      cudaMemcpy(b.data(), dB, sizeof(cuDoubleComplex) * N,
+                 cudaMemcpyDeviceToHost);
+      cudaSetDevice(dev0);
+    }
+  };
+  CoarseDirect cdirect;
+  const bool use_direct = env_int("COARSE_DIRECT", 1) != 0;
+  int best_variant = -1;  // calibrated once, reused by bootstrap re-factors
+  // Assemble + calibrate + LU-factor the CURRENT Ac.  Convention space:
+  // shift sign x link-index transpose x link-site (Grid's coarse _A comes
+  // out of an FT reconstruction whose index conventions are not worth
+  // reverse-engineering — calibrate against Ac.M directly; measured
+  // winner: sign +1, TRANSPOSED indices, link at x).
+  auto build_direct = [&]() {
+    double td0 = usecond();
+    std::vector<std::complex<double>> Dcol;
+    CoarseVectorT tv(&Coarse4d), ty(&Coarse4d);
+    GridParallelRNG CR2(&Coarse4d);
+    CR2.SeedFixedIntegers({71, 72, 73, 74});
+    gaussian(CR2, tv);
+    Ac.M(tv, ty);
+    std::vector<ComplexD> vin, yref;
+    packc(tv, vin);
+    packc(ty, yref);
+    auto assemble = [&](int variant) {
+      const int sign = (variant & 1) ? -1 : +1;
+      const int trans = (variant >> 1) & 1;
+      const int atnbr = (variant >> 2) & 1;
+      Dcol.assign((size_t)Ncc * Ncc, std::complex<double>(0, 0));
+      Coordinate x(Nd);
+      for (x[3] = 0; x[3] < cdims[3]; ++x[3])
+        for (x[2] = 0; x[2] < cdims[2]; ++x[2])
+          for (x[1] = 0; x[1] < cdims[1]; ++x[1])
+            for (x[0] = 0; x[0] < cdims[0]; ++x[0]) {
+              const int64_t rb = cflat(x) * NB;
+              for (int p = 0; p < npoint; ++p) {
+                Coordinate y = x;
+                for (int mu = 0; mu < Nd; ++mu)
+                  y[mu] = (x[mu] + sign * geomp->shifts[p][mu] +
+                           cdims[mu]) % cdims[mu];
+                const int64_t cb = cflat(y) * NB;
+                auto link = peekSite(Ac._A[p], atnbr ? y : x);
+                for (int i = 0; i < NB; ++i)
+                  for (int j = 0; j < NB; ++j) {
+                    const ComplexD z =
+                        TensorRemove(trans ? link(j, i) : link(i, j));
+                    // column-major for cuSOLVER
+                    Dcol[(size_t)(rb + i) + (size_t)Ncc * (cb + j)] +=
+                        std::complex<double>(DtxqcdToStd(z).real(),
+                                             DtxqcdToStd(z).imag());
+                  }
+              }
+            }
+    };
+    auto dense_rel = [&]() -> RealD {
+      RealD dn = 0, yn = 0;
+      for (int r = 0; r < Ncc; ++r) {
+        std::complex<double> acc(0, 0);
+        for (int cidx = 0; cidx < Ncc; ++cidx)
+          acc += Dcol[(size_t)r + (size_t)Ncc * cidx] *
+                 std::complex<double>(DtxqcdToStd(vin[cidx]).real(),
+                                      DtxqcdToStd(vin[cidx]).imag());
+        const std::complex<double> ry(DtxqcdToStd(yref[r]).real(),
+                                      DtxqcdToStd(yref[r]).imag());
+        dn += std::norm(acc - ry);
+        yn += std::norm(ry);
+      }
+      return std::sqrt(dn / yn);
+    };
+    RealD bestrel = 1e30;
+    if (best_variant < 0) {
+      for (int variant = 0; variant < 8; ++variant) {
+        assemble(variant);
+        const RealD rel = dense_rel();
+        std::cout << GridLogMessage << "[mtilde] dense assembly variant "
+                  << variant << " vs Ac.M rel = " << rel << std::endl;
+        if (rel < bestrel) {
+          bestrel = rel;
+          best_variant = variant;
+        }
+        if (rel < 1e-10) break;  // Dcol holds the winner
+      }
+    } else {
+      assemble(best_variant);
+      bestrel = dense_rel();
+    }
+    check("S2b dense assembly matches Ac.M", bestrel, 1e-10);
+    cdirect.Factor(Dcol, Ncc);
+    std::cout << GridLogMessage << "[mtilde] coarse dense LU ready in "
+              << (usecond() - td0) * 1e-6 << " s (N=" << Ncc
+              << ", variant " << best_variant << ", GPU 1)" << std::endl;
+  };
+  if (use_direct) build_direct();
+#else
+  struct CoarseDirect {
+    bool ready = false;
+    void Solve(std::vector<ComplexD> &) {}
+  };
+  CoarseDirect cdirect;
+#endif
+
+  //////////////////////////////////////////////////////////////////////
   // Step 3: two-level solve.  Outer = PGCR (non-Hermitian, flexible) on
   // M~ x = b; preconditioner = V-cycle: MR pre-smooth -> coarse GMRES
   // correction (P Ac^{-1} R) -> MR post-smooth.  MR = minimal-residual
@@ -451,17 +658,26 @@ int main(int argc, char **argv) {
       RealD ctol;
       int cmaxit, crestart;
       int use_coarse;  // MG_COARSE=0: smoother-only (attribution control)
+      int dag = 0;     // dagger V-cycle: AdjOp smoother, A_c^dag coarse,
+                       // aggregates swapped ((U^dag A V)^dag = V^dag A^dag U)
+      std::function<void(const CoarseVector &, CoarseVector &)> csolve;
       VCycle(MtilOpShim &o, LittleDiracOperator &a, Subspace &l, Subspace &r,
              GridCartesian *cg, int si, RealD ct, int cm, int cr, int uc)
           : op(o), ac(a), aggL(l), aggR(r), cgrid(cg), smooth_it(si),
             ctol(ct), cmaxit(cm), crestart(cr), use_coarse(uc) {}
+      void Apply_(const Field &in, Field &out) {
+        if (dag)
+          op.AdjOp(in, out);
+        else
+          op.Op(in, out);
+      }
       void MR_(const Field &r, Field &z) {
         Field rs(r.Grid()), Ar(r.Grid());
         z = Zero();
         z.Checkerboard() = r.Checkerboard();
         rs = r;
         for (int k = 0; k < smooth_it; ++k) {
-          op.Op(rs, Ar);
+          Apply_(rs, Ar);
           ComplexD num = innerProduct(Ar, rs);
           RealD den = norm2(Ar);
           ComplexD alpha = num * (1.0 / std::max(den, 1e-300));
@@ -476,22 +692,30 @@ int main(int argc, char **argv) {
         // pre-smooth
         MR_(r, z);
         if (!use_coarse) return;  // attribution control: smoother only
-        op.Op(z, t);
+        Apply_(z, t);
         resid = r - t;
         // coarse correction
         CoarseVector cr(cgrid), cx(cgrid);
-        aggL.ProjectToSubspace(cr, resid);
+        Subspace &restrictor = dag ? aggR : aggL;
+        Subspace &prolongator = dag ? aggL : aggR;
+        restrictor.ProjectToSubspace(cr, resid);
         cx = Zero();
-        NonHermitianLinearOperator<LittleDiracOperator, CoarseVector> cop(ac);
-        GeneralisedMinimalResidual<CoarseVector> gmres(ctol, cmaxit,
-                                                       crestart, false);
-        gmres(cop, cr, cx);
+        if (csolve) {
+          csolve(cr, cx);  // exact dense LU (or LU^dag) on GPU 1
+        } else {
+          GRID_ASSERT(!dag && "GMRES fallback has no dagger coarse path");
+          NonHermitianLinearOperator<LittleDiracOperator, CoarseVector>
+              cop(ac);
+          GeneralisedMinimalResidual<CoarseVector> gmres(ctol, cmaxit,
+                                                         crestart, false);
+          gmres(cop, cr, cx);
+        }
         Field corr(r.Grid());
         corr.Checkerboard() = r.Checkerboard();
-        aggR.PromoteFromSubspace(cx, corr);
+        prolongator.PromoteFromSubspace(cx, corr);
         z = z + corr;
         // post-smooth
-        op.Op(z, t);
+        Apply_(z, t);
         resid = r - t;
         Field z2(r.Grid());
         z2.Checkerboard() = r.Checkerboard();
@@ -499,10 +723,86 @@ int main(int argc, char **argv) {
         z = z + z2;
       }
     };
+    // Dagger-system shim for the left-vector bootstrap: Op = M~^dag.
+    struct DagShim : public LinearOperatorBase<Field> {
+      MtilOpShim &s;
+      DagShim(MtilOpShim &s_) : s(s_) {}
+      void Op(const Field &in, Field &out) { s.AdjOp(in, out); }
+      void AdjOp(const Field &in, Field &out) { s.Op(in, out); }
+      void HermOp(const Field &in, Field &out) { s.HermOp(in, out); }
+      void HermOpAndNorm(const Field &in, Field &out, RealD &n1, RealD &n2) {
+        s.HermOpAndNorm(in, out, n1, n2);
+      }
+      void OpDiag(const Field &, Field &) { GRID_ASSERT(0); }
+      void OpDir(const Field &, Field &, int, int) { GRID_ASSERT(0); }
+      void OpDirAll(const Field &, std::vector<Field> &) { GRID_ASSERT(0); }
+    };
     VCycle vcyc(shim, Ac, AggL, AggR, &Coarse4d,
                 env_int("SMOOTH_IT", 8), env_real("COARSE_TOL", 1e-2),
                 env_int("COARSE_MAXIT", 2000),
                 env_int("COARSE_RESTART", 64), env_int("MG_COARSE", 1));
+#if defined(GRID_CUDA) && defined(GRID_HAVE_QUDA)
+    if (cdirect.ready)
+      vcyc.csolve = [&](const CoarseVectorT &cr, CoarseVectorT &cx) {
+        std::vector<ComplexD> b;
+        packc(cr, b);
+        cdirect.Solve(b);
+        pokec(b, cx);
+      };
+
+    //////////////////////////////////////////////////////////////////
+    // NV_BOOTSTRAP (default 2): adaptive setup.  Refine the null
+    // vectors THROUGH the current two-level solver (even a
+    // plateau-stalled solve carries full 1/lambda weighting on its
+    // converged components — ~10x band enrichment per round at V-cycle
+    // prices), re-coarsen, re-factor.  Right vectors under M~ (vcyc);
+    // left under M~^dag (dagger V-cycle + A_c^dag LU).
+    //////////////////////////////////////////////////////////////////
+    const int nboot = env_int("NV_BOOTSTRAP", 2);
+    if (nboot > 0 && cdirect.ready) {
+      DagShim dshim(shim);
+      VCycle vcycd(shim, Ac, AggL, AggR, &Coarse4d,
+                   env_int("SMOOTH_IT", 8), 0, 0, 0, 1);
+      vcycd.dag = 1;
+      vcycd.csolve = [&](const CoarseVectorT &cr, CoarseVectorT &cx) {
+        std::vector<ComplexD> b;
+        packc(cr, b);
+        cdirect.SolveDag(b);
+        pokec(b, cx);
+      };
+      const RealD btol = env_real("NV_BOOT_TOL", 0.05);
+      const int bmax = env_int("NV_BOOT_MAXIT", 60);
+      for (int round = 0; round < nboot; ++round) {
+        double tb0 = usecond();
+        size_t ops0 = shim.nops;
+        for (int i = 0; i < NB; ++i) {
+          Field b(&RBGrid), z(&RBGrid);
+          b = AggR.subspace[i];
+          z = Zero();
+          z.Checkerboard() = Even;
+          PrecGeneralisedConjugateResidualNonHermitian<Field> BR(
+              btol, bmax, shim, vcyc, 16, 16);
+          BR(b, z);
+          RealD zn = std::sqrt(norm2(z));
+          AggR.subspace[i] = (1.0 / std::max(zn, 1e-300)) * z;
+          b = AggL.subspace[i];
+          z = Zero();
+          z.Checkerboard() = Even;
+          PrecGeneralisedConjugateResidualNonHermitian<Field> BL(
+              btol, bmax, dshim, vcycd, 16, 16);
+          BL(b, z);
+          zn = std::sqrt(norm2(z));
+          AggL.subspace[i] = (1.0 / std::max(zn, 1e-300)) * z;
+        }
+        Ac.CoarsenOperator(shim, AggL, AggR);
+        build_direct();
+        std::cout << GridLogMessage << "[mtilde] bootstrap round "
+                  << round + 1 << "/" << nboot << ": "
+                  << (shim.nops - ops0) << " fine Ops, "
+                  << (usecond() - tb0) * 1e-6 << " s" << std::endl;
+      }
+    }
+#endif
 
     // The measurement source: gaussian (the reweighting-estimator shape;
     // couples O(1) to the band — the HARD case for plain CG).
