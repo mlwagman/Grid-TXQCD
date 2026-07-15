@@ -64,6 +64,13 @@
 
 #include "params.h"
 #include "dtxqcd_meas_helper.h"
+// DEFORM_ETA>0: coarsen the eta-DEFORMED EO operator Mpc~ (tent profile,
+// source-centered contour).  QUDA builds only — the deform weights ride
+// the device M_device_csf hop corrections (AttachEO asserts the native
+// hop-gauge upload).
+#ifdef GRID_HAVE_QUDA
+#include "dtxqcd_deform_quda.h"
+#endif
 
 #include <cstdlib>
 #include <fstream>
@@ -288,6 +295,10 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
     std::ostringstream tag;
     tag << nbasis << "." << P.geom << ".b" << P.block[0] << P.block[1]
         << P.block[2] << P.block[3];
+    // Deformed setups must never collide with banked undeformed ones.
+    if (env_real("DEFORM_ETA", 0.0) > 0)
+      tag << ".eta" << env_real("DEFORM_ETA", 0.0) << ".t"
+          << env_int("DEFORM_T0", 0);
     setup_tag = tag.str();
     std::string bf = setup_prefix + ".basis." + setup_tag;
     std::string of = setup_prefix + ".ldop." + setup_tag;
@@ -650,7 +661,11 @@ int run_mg(GridCartesian &Grid_, GridBase *FineGrid, int cb,
   // composes with no adapter.
   //////////////////////////////////////////////////////////////////////
   const bool three_level = env_int("THREE_LEVEL", 0) != 0;
-  if constexpr (nbasis == 64) {
+  // nbasis==48 admitted 2026-07-15: at 16^3x48 the deformed-EO fine stack
+  // (QUDA EO + deform legs) leaves <1 GB headroom and the nb64 basis+links
+  // OOM at the _A assembly in every geometry; nb48 frees ~1.7 GB and is
+  // the largest 3-level-capable basis that fits a 40 GB A100 there.
+  if constexpr (nbasis == 64 || nbasis == 48) {
     if (three_level) {
       typedef typename LittleDiracOperator::siteVector CoarseSiteVector;
       constexpr int nbasis2 = 32;
@@ -778,24 +793,33 @@ int run_suite(GridCartesian &Grid_, GridBase *FineGrid, int cb,
   check("gateA norm preservation rel", std::abs(norm2(P) - den) / den, 1e-13);
 
   //////////////////////////////////////////////////////////////////////
-  // Gate B: packed HermOp vs struct-path A†A
+  // Gate B: packed HermOp vs struct-path A†A.  Skipped when the operator
+  // is DEFORMED — the struct path is the UNDEFORMED Mpc and the comparison
+  // is meaningless (the deformed device op is certified by the deform
+  // campaign's own gates: device adjointness, 4^4 Schur synthesis,
+  // solution-level h5 vs full-volume).
   //////////////////////////////////////////////////////////////////////
   LatticeDtxqcdPacked hop_out(FineGrid);
   hop_out.Checkerboard() = P.Checkerboard();
   FineHermOp.HermOp(P, hop_out);
 
-  DTXQCDFermionDoubled t1(FineGrid), t2(FineGrid);
-  mop.M(psi_o, t1);
-  mop.Mdag(t1, t2);
-  LatticeDtxqcdPacked ref_out(FineGrid);
-  DtxqcdPackDoubled(t2, ref_out);
+  if (env_real("DEFORM_ETA", 0.0) > 0) {
+    std::cout << GridLogMessage << "[gridmg] gateB skipped (deformed op; "
+              << "struct reference is undeformed)" << std::endl;
+  } else {
+    DTXQCDFermionDoubled t1(FineGrid), t2(FineGrid);
+    mop.M(psi_o, t1);
+    mop.Mdag(t1, t2);
+    LatticeDtxqcdPacked ref_out(FineGrid);
+    DtxqcdPackDoubled(t2, ref_out);
 #ifdef GRID_HAVE_QUDA
-  const RealD gateb_tol = 1e-9;  // device chain vs Grid reference
+    const RealD gateb_tol = 1e-9;  // device chain vs Grid reference
 #else
-  const RealD gateb_tol = 1e-13;  // identical arithmetic
+    const RealD gateb_tol = 1e-13;  // identical arithmetic
 #endif
-  check("gateB packed HermOp vs struct", packed_rel_diff(hop_out, ref_out),
-        gateb_tol);
+    check("gateB packed HermOp vs struct", packed_rel_diff(hop_out, ref_out),
+          gateb_tol);
+  }
 
   //////////////////////////////////////////////////////////////////////
   // Adapter-overhead micro-benchmark (per-phase ms; see header comment).
@@ -991,8 +1015,33 @@ int main(int argc, char **argv) {
     DTXQCDMpcOpQUDA_EO Mq(Dw, U_inv, Grid_, RBGrid, mass, csw_v, U.sigma,
                           U.pi, U.d, U.n, U.s, U.p);
     DtxqcdPackedMpcHermOp FineHermOp(mpc, Mq, &RBGrid, Odd);
+    // DEFORM_ETA>0: attach the eta-deformation (tent profile centered at
+    // DEFORM_T0) so FineHermOp becomes Mpc~^dag Mpc~ — the same deformed
+    // device HermOp the deflation-campaign eigensolves certified.  The MG
+    // question this enables: does the coarse space capture the dense
+    // deformed mid-band that mode-by-mode deflation structurally cannot
+    // (59,931-iter plain CG at lambda=5 eta=0.8)?
+    const double deform_eta = env_real("DEFORM_ETA", 0.0);
+    std::unique_ptr<DTXQCDMOp> mop_d;
+    std::unique_ptr<DtxqcdPackedFullHermOp> hop_d;
+    std::unique_ptr<DtxqcdDeformQuda> qdef;
+    if (deform_eta > 0) {
+      mop_d.reset(new DTXQCDMOp(Dw));
+      hop_d.reset(new DtxqcdPackedFullHermOp(*mop_d, &Grid_, Even));
+      qdef.reset(new DtxqcdDeformQuda(*hop_d, Grid_, U_inv, latt[Nd - 1]));
+      qdef->AttachEO(FineHermOp, Mq, RBGrid, Dw);
+      qdef->SetTentProfile(deform_eta, env_int("DEFORM_T0", 0));
+      std::cout << GridLogMessage << "[gridmg] DEFORMED EO operator: eta="
+                << deform_eta << " t0=" << env_int("DEFORM_T0", 0)
+                << " (tent profile)" << std::endl;
+    }
 #else
     DtxqcdPackedMpcHermOp FineHermOp(mpc, &RBGrid, Odd);
+    if (env_real("DEFORM_ETA", 0.0) > 0) {
+      std::cout << GridLogMessage
+                << "[gridmg] DEFORM_ETA requires a QUDA build" << std::endl;
+      std::_Exit(1);
+    }
 #endif
     fails = run_suite(Grid_, (GridBase *)&RBGrid, Odd, FineHermOp, mpc, pRNG);
   }

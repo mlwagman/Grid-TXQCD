@@ -269,6 +269,7 @@ Test_dtxqcd_multishift_quda_eo: Test_dtxqcd_multishift_quda_eo.o $(DTXQCD_NATIVE
 # adapter (DTXQCDPackedField.h) — route-(b) coarsening experiment.  Pulls
 # dtxqcd_meas_helper.h -> DTXQCDMpcOpQUDA(_EO) -> native kernel symbols.
 Test_dtxqcd_grid_mg.o: Test_dtxqcd_grid_mg.cc params.h dtxqcd_meas_helper.h \
+  dtxqcd_deform_quda.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h \
   ../Grid/algorithms/multigrid/GeneralCoarsenedMatrixMultiRHS.h \
