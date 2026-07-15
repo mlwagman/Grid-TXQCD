@@ -361,7 +361,12 @@ int main(int argc, char **argv) {
     }
     wGui = ComplexD(1.0, 0.0); wGui = wGui / wGu;
     wGli = ComplexD(1.0, 0.0); wGli = wGli / wGl;
-    if (Qdef) Qdef->SetProfile(eta, [&](int t) { return prof(t); });
+    if (Qdef) {
+      if (tent)
+        Qdef->SetTentProfile(eta, prof_t0);  // tracks t0 for deflation
+      else
+        Qdef->SetProfile(eta, [&](int t) { return prof(t); });
+    }
   };
   auto GApply = [&](F &v, int sign) {
     const LatticeComplex &fu = (sign > 0) ? wGu : wGui;
@@ -683,8 +688,54 @@ int main(int argc, char **argv) {
           const char *tag = "[deform-CG:quda]";
 #ifdef GRID_HAVE_QUDA
           if (use_eo_def && Qdef->HasEO()) {
-            it = Qdef->SolveTilEO(src, y, tol, cgmax, relres);
-            tag = "[deform-CG:quda-EO]";
+            // DTXQCD_DEFORM_EO_DEFLATE=nev: build the eigenbasis lazily at
+            // the FIRST solve's profile (once per config+eta; later t_srcs
+            // are handled by the solve-frame conjugation — even spacings
+            // only).  lambda=5 eta=0.8: nev=16 -> 60k iters -> ~1k.
+            static const int defl_nev =
+                env_int("DTXQCD_DEFORM_EO_DEFLATE", 0);
+            if (defl_nev > 0 && tent && !Qdef->HasDeflation()) {
+              // LO sets the Chebyshev window edge as a FRACTION of
+              // lambda_max and must sit ABOVE the wanted band (modes below
+              // lo are amplified; modes inside [lo,hi] are suppressed and
+              // never converge — job 1301270 ground 0/16 with lo below the
+              // band).  3e-4 * lmax ~ 0.04 lands in the gap between the
+              // deformation band (<~1e-2) and the EO bulk edge (~0.1) for
+              // lambda=5/6 at eta = 0.6-0.9.
+              const int defl_ord = env_int("DTXQCD_DEFORM_EO_DEFLATE_ORD", 301);
+              const RealD defl_lo = env_real("DTXQCD_DEFORM_EO_DEFLATE_LO", 3e-4);
+              const RealD defl_tol = env_real("DTXQCD_DEFORM_EO_DEFLATE_TOL", 1e-3);
+              // DTXQCD_DEFORM_EO_DEFLATE_CACHE=<dir>: reload the ~20-30 min
+              // tight eigensolve if a matching sidecar exists (config
+              // identity guarded by a gauge fingerprint in the header),
+              // else build and save.  The basis is t0-translatable, so one
+              // file per (config, eta) serves every t_src AND the
+              // sign-reweighting estimator (same Mpc~).  ~75 MB x nev.
+              std::string defl_cache;
+              if (const char *cd = std::getenv("DTXQCD_DEFORM_EO_DEFLATE_CACHE"))
+                if (*cd) {
+                  char pre[128];
+                  std::snprintf(pre, sizeof(pre), "/tr%d_lam%.4f_", traj,
+                                (double)lam);
+                  defl_cache = std::string(cd) + pre +
+                               DtxqcdDeformQuda::EODeflationCacheName(
+                                   defl_nev, defl_tol, defl_ord, eta, t_src,
+                                   Grid.GlobalDimensions());
+                }
+              if (defl_cache.empty() || !Qdef->LoadEODeflation(defl_cache)) {
+                Qdef->BuildEODeflation(
+                    defl_nev, pRNG, defl_ord, defl_lo, defl_tol,
+                    env_int("DTXQCD_DEFORM_EO_DEFLATE_RESTARTS", 20));
+                if (!defl_cache.empty()) Qdef->SaveEODeflation(defl_cache);
+              }
+            }
+            if (Qdef->HasDeflation()) {
+              it = Qdef->SolveTilEODeflated(src, y, tol, cgmax, relres);
+              tag = "[deform-CG:quda-EO-defl]";
+            } else {
+              it = Qdef->SolveTilEO(src, y, tol, cgmax, relres);
+              tag = "[deform-CG:quda-EO]";
+            }
           } else
 #endif
           {

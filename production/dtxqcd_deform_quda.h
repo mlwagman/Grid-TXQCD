@@ -42,6 +42,7 @@
 #pragma once
 
 #include <Grid/Grid.h>
+#include <Grid/Grid_Eigen_Dense.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDPackedField.h>
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
@@ -49,7 +50,9 @@
 #endif
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <vector>
 
@@ -136,6 +139,19 @@ class DtxqcdDeformQuda {
       }
     }
 #endif
+  }
+
+  // Tent-profile convenience: remembers (eta, t0) so the deflated EO solve
+  // can switch to the eigenbasis frame and back (t0 shifts are lattice
+  // translations — the deflation basis is built ONCE per (config, eta) and
+  // every solve is conjugated into its frame; see SolveTilEODeflated).
+  void SetTentProfile(double eta, int t0) {
+    cur_eta_ = eta;
+    cur_t0_ = t0;
+    SetProfile(eta, [this, t0](int t) {
+      const int dt = ((t - t0) % T_ + T_) % T_;
+      return (double)std::min(dt, T_ - dt);
+    });
   }
 
   // Rebuild the 4 per-timeslice coefficient masks for profile p(.) at
@@ -324,6 +340,211 @@ class DtxqcdDeformQuda {
   // Single Mpc~ / Mpc~^dag applies on odd struct fields (gates + CGNR).
   void MpcTil(const F &in_o, F &out_o) { EoLeg_(in_o, out_o, false); }
   void MpcTilDag(const F &in_o, F &out_o) { EoLeg_(in_o, out_o, true); }
+
+  // ---- deflated EO solve (the eta=0.8/0.9 unlock) ----------------------
+  // Build NEV lowest eigenpairs of Mpc~^dag Mpc~ ONCE per (config, eta) at
+  // the CURRENT profile (Chebyshev-IRL on the EO adapter's fused device
+  // HermOp — deform corrections included).  lambda=5 eta=0.8 census: the
+  // low spectrum is SPARSE (ev[0]=1.1e-5, x7.5 gap, ev[11]=5e-3), so
+  // nev~12-16 cuts kappa_eff 6.8e6 -> 1.5e4 (60k CGNR iters -> ~1k).
+  void BuildEODeflation(int nev, GridParallelRNG &pRNG, int ord,
+                        RealD lo_frac, RealD irl_tol, int restarts) {
+    GRID_ASSERT(mq_eo_);
+    defl_evec_.clear();
+    defl_eval_.clear();
+    defl_t0_ = cur_t0_;
+    defl_frame_t0_ = cur_t0_;
+    defl_eta_ = cur_eta_;
+    LatticeDtxqcdPacked src(rbgrid_);
+    gaussian(pRNG, src);  // content-random; cb is the adapter's concern
+    src.Checkerboard() = Odd;
+    PowerMethod<LatticeDtxqcdPacked> PM;
+    const RealD lmax = PM(*eo_adapter_, src);
+    std::cout << GridLogMessage << "[deform-defl] lambda_max(Mpc~dagMpc~) ~ "
+              << lmax << std::endl;
+    const RealD lo = lo_frac * lmax, hi = 1.5 * lmax;
+    const int Nstop = nev, Nk = nev + 16, Nm = Nk + std::max(32, Nk);
+    Chebyshev<LatticeDtxqcdPacked> cheb(lo, hi, ord);
+    FunctionHermOp<LatticeDtxqcdPacked> OpCheby(cheb, *eo_adapter_);
+    PlainHermOp<LatticeDtxqcdPacked> Op(*eo_adapter_);
+    ImplicitlyRestartedLanczos<LatticeDtxqcdPacked> IRL(OpCheby, Op, Nstop,
+                                                        Nk, Nm, irl_tol,
+                                                        restarts);
+    std::vector<RealD> eval(Nm);
+    std::vector<LatticeDtxqcdPacked> evec(Nm, rbgrid_);
+    int Nconv = 0;
+    const double t0 = usecond();
+    IRL.calc(eval, evec, src, Nconv);
+    const int nuse = std::min(Nconv, (int)eval.size());
+    defl_eval_.assign(eval.begin(), eval.begin() + nuse);
+    for (int i = 0; i < nuse; ++i) defl_evec_.push_back(evec[i]);
+    std::cout << GridLogMessage << "[deform-defl] " << nuse
+              << " eigenpairs in " << (usecond() - t0) * 1e-6
+              << " s; ev[0]=" << (nuse ? defl_eval_[0] : 0)
+              << " ev[last]=" << (nuse ? defl_eval_[nuse - 1] : 0)
+              << " (t0=" << defl_t0_ << " eta=" << defl_eta_ << ")"
+              << std::endl;
+    // GALERKIN coarse matrix A_c = V^dag (Mpc~^dag Mpc~) V, factored once.
+    // Corrections solve A_c y = V^dag r instead of dividing by the Ritz
+    // values: eigenvalue division amplifies eigenvector error by 1/lambda
+    // (Ritz residual ~1e-3*lambda_MAX vs lambda ~1e-4 => O(1e3) garbage —
+    // the Lambda^-1 guess bought ~1% and the Lambda^-1 projection STALLED
+    // the solve, jobs 1301281/89).  Galerkin is variationally optimal in
+    // span(V) and never divides by an inaccurate eigenvalue.
+    defl_Ac_.resize(nuse, nuse);
+    {
+      LatticeDtxqcdPacked Av(rbgrid_);
+      for (int j = 0; j < nuse; ++j) {
+        eo_adapter_->HermOp(defl_evec_[j], Av);
+        for (int i = 0; i < nuse; ++i) {
+          const ComplexD z = innerProduct(defl_evec_[i], Av);
+          defl_Ac_(i, j) =
+              std::complex<double>(DtxqcdToStd(z).real(),
+                                   DtxqcdToStd(z).imag());
+        }
+      }
+      defl_Ac_lu_.compute(defl_Ac_);
+      std::cout << GridLogMessage << "[deform-defl] Galerkin A_c ("
+                << nuse << "x" << nuse << ") factored" << std::endl;
+    }
+  }
+  bool HasDeflation() const { return !defl_evec_.empty(); }
+
+  // ---- deflation basis cache -------------------------------------------
+  // The tight (tol=1e-5) eigensolve is ~20-30 min per (config, eta) and is
+  // t0-translatable, so it is shared between the propagator solves and the
+  // sign-reweighting estimator (same Mpc~).  Raw binary sidecar, SAME-
+  // MACHINE cache only (native-endian lex-ordered payload, single rank).
+  // Header carries a gauge fingerprint (norm2 of the phased t-link field)
+  // so a stale file can never deflate the wrong config.  Files are ~75 MB
+  // x nev — put the cache dir somewhere with quota headroom.
+  static std::string EODeflationCacheName(int nev, double tol, int ord,
+                                          double eta, int t0,
+                                          const Coordinate &gd) {
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "deform_evecs_L%dx%dx%dx%d_eta%.4f_t0%d_nev%d_tol%.0e_ord%d.evc",
+                  (int)gd[0], (int)gd[1], (int)gd[2], (int)gd[3], eta, t0,
+                  nev, tol, ord);
+    return std::string(buf);
+  }
+  bool SaveEODeflation(const std::string &fn) {
+    if (defl_evec_.empty()) return false;
+    if (grid_._Nprocessors != 1) {
+      std::cout << GridLogMessage
+                << "[deform-defl] cache save skipped (multi-rank)"
+                << std::endl;
+      return false;
+    }
+    GRID_ASSERT(defl_frame_t0_ == defl_t0_ &&
+                "save the basis in its build frame (before any solve "
+                "translates it)");
+    const std::string tmp = fn + ".tmp";
+    std::ofstream f(tmp, std::ios::binary);
+    if (!f) return false;
+    const uint64_t magic = 0x4445464C45563031ULL;  // "DEFLEV01"
+    const int64_t nev = (int64_t)defl_evec_.size();
+    Coordinate gd = grid_.GlobalDimensions();
+    int64_t dims[4] = {gd[0], gd[1], gd[2], gd[3]};
+    const int64_t t0 = defl_t0_;
+    const double eta = defl_eta_;
+    const double fp = norm2(W3_);
+    f.write((const char *)&magic, 8);
+    f.write((const char *)dims, 32);
+    f.write((const char *)&nev, 8);
+    f.write((const char *)&t0, 8);
+    f.write((const char *)&eta, 8);
+    f.write((const char *)&fp, 8);
+    f.write((const char *)defl_eval_.data(), nev * 8);
+    std::vector<std::complex<double>> ac(nev * nev);
+    for (int j = 0; j < nev; ++j)
+      for (int i = 0; i < nev; ++i) ac[j * nev + i] = defl_Ac_(i, j);
+    f.write((const char *)ac.data(), nev * nev * 16);
+    std::vector<typename LatticeDtxqcdPacked::scalar_object> buf(
+        rbgrid_->lSites());
+    for (int64_t i = 0; i < nev; ++i) {
+      unvectorizeToLexOrdArray(buf, defl_evec_[i]);
+      f.write((const char *)buf.data(),
+              buf.size() * sizeof(buf[0]));
+    }
+    f.close();
+    if (!f.good()) { std::remove(tmp.c_str()); return false; }
+    std::rename(tmp.c_str(), fn.c_str());
+    std::cout << GridLogMessage << "[deform-defl] basis cached to " << fn
+              << std::endl;
+    return true;
+  }
+  bool LoadEODeflation(const std::string &fn) {
+    if (grid_._Nprocessors != 1) return false;
+    std::ifstream f(fn, std::ios::binary);
+    if (!f) return false;
+    uint64_t magic = 0;
+    int64_t dims[4] = {0, 0, 0, 0}, nev = 0, t0 = 0;
+    double eta = 0, fp = 0;
+    f.read((char *)&magic, 8);
+    f.read((char *)dims, 32);
+    f.read((char *)&nev, 8);
+    f.read((char *)&t0, 8);
+    f.read((char *)&eta, 8);
+    f.read((char *)&fp, 8);
+    Coordinate gd = grid_.GlobalDimensions();
+    if (magic != 0x4445464C45563031ULL || nev <= 0 || nev > 1024) return false;
+    for (int d = 0; d < 4; ++d)
+      if (dims[d] != (int64_t)gd[d]) return false;
+    if (std::abs(eta - cur_eta_) > 1e-12) return false;
+    const double fp_now = norm2(W3_);
+    if (std::abs(fp - fp_now) > 1e-8 * std::max(1.0, std::abs(fp_now))) {
+      std::cout << GridLogMessage << "[deform-defl] cache " << fn
+                << " REJECTED: gauge fingerprint mismatch (" << fp << " vs "
+                << fp_now << ")" << std::endl;
+      return false;
+    }
+    defl_eval_.resize(nev);
+    f.read((char *)defl_eval_.data(), nev * 8);
+    std::vector<std::complex<double>> ac(nev * nev);
+    f.read((char *)ac.data(), nev * nev * 16);
+    defl_evec_.clear();
+    std::vector<typename LatticeDtxqcdPacked::scalar_object> buf(
+        rbgrid_->lSites());
+    for (int64_t i = 0; i < nev; ++i) {
+      f.read((char *)buf.data(), buf.size() * sizeof(buf[0]));
+      if (!f.good()) { defl_evec_.clear(); return false; }
+      defl_evec_.emplace_back(rbgrid_);
+      vectorizeFromLexOrdArray(buf, defl_evec_.back());
+      defl_evec_.back().Checkerboard() = Odd;
+    }
+    defl_t0_ = (int)t0;
+    defl_frame_t0_ = (int)t0;
+    defl_eta_ = eta;
+    defl_Ac_.resize(nev, nev);
+    for (int j = 0; j < nev; ++j)
+      for (int i = 0; i < nev; ++i) defl_Ac_(i, j) = ac[j * nev + i];
+    defl_Ac_lu_.compute(defl_Ac_);
+    std::cout << GridLogMessage << "[deform-defl] basis loaded from " << fn
+              << " (nev=" << nev << " t0=" << t0 << " eta=" << eta
+              << " ev[0]=" << defl_eval_[0] << ")" << std::endl;
+    return true;
+  }
+
+  // Deflated solve for the CURRENT tent profile (eta must match the basis;
+  // t0 may differ by an EVEN shift).  The solve is ALWAYS on the true
+  // operator at cur_t0_; only the deflation BASIS is translated between
+  // frames.  Conjugating the solve itself (v1 of this routine) is invalid
+  // on a fixed gauge configuration: T^dag M~(t0=0,U) T = M~(dt, T^dag U)
+  // — the translation moves the gauge field too, so the conjugated solve
+  // returned a propagator on a TRANSLATED background (D1 row-24 at 4.4e-3,
+  // unchanged by the APBC sign fix — jobs 1301281/1301298).  A translated
+  // basis is only APPROXIMATE deflation of the true operator (right tent
+  // alignment, wrong gauge modulation), but with exact residual
+  // re-formation that costs iterations, never correctness.
+  int SolveTilEODeflated(const F &src, F &x, RealD tol, int cgmax,
+                         RealD &rel_out) {
+    GRID_ASSERT(HasDeflation());
+    GRID_ASSERT(std::abs(cur_eta_ - defl_eta_) < 1e-12 &&
+                "deflation basis is per-eta");
+    if (cur_t0_ != defl_frame_t0_) TranslateDeflationFrame_(cur_t0_);
+    return SolveTilEO(src, x, tol, cgmax, rel_out);
+  }
 #endif
 
   // CGNR on M~^dag M~ (same loop/semantics as the Grid-path SolveTil).
@@ -420,6 +641,10 @@ class DtxqcdDeformQuda {
   DtxqcdPackedFullHermOp &adapter_;
   GridCartesian &grid_;
   int T_;
+  // Current tent-profile params (SetTentProfile; used by the deflated
+  // solve's frame conjugation).
+  double cur_eta_ = 0;
+  int cur_t0_ = 0;
   // DTXQCD_DEFORM_PROFILE accumulators (us) — see Leg_.
   double p_pack_ = 0, p_base_ = 0, p_unpack_ = 0, p_corr_ = 0;
   long p_n_ = 0;
@@ -431,6 +656,77 @@ class DtxqcdDeformQuda {
   GridRedBlackCartesian *rbgrid_ = nullptr;
   DTXQCDWilsonCloverFermionEO *dw_ = nullptr;
   std::unique_ptr<LatticeDtxqcdPacked> pk_eo_in_, pk_eo_out_;
+  // Deflation state (per config+eta; t0 handled by solve conjugation).
+  std::vector<LatticeDtxqcdPacked> defl_evec_;
+  std::vector<RealD> defl_eval_;
+  int defl_t0_ = -1;        // frame the basis was BUILT in
+  int defl_frame_t0_ = -1;  // frame the basis currently LIVES in
+  double defl_eta_ = -1e9;
+  Eigen::MatrixXcd defl_Ac_;
+  Eigen::LDLT<Eigen::MatrixXcd> defl_Ac_lu_;
+
+  // Translate the deflation basis in place to the frame t0_new (even shift
+  // only — odd flips EO parity).  APBC signed translation: v'(t)=v(t-dt)
+  // via Cshift(v,T,-dt) with a sign flip on the wrapped slab t<dt.  The
+  // per-vector GLOBAL sign from composing shifts is irrelevant (Galerkin
+  // is basis-sign invariant), so in-place composition across frames is
+  // safe.  A_c = V'^dag A V' is rebuilt against the CURRENT operator
+  // (caller must have SetTentProfile'd to t0_new already).
+  void TranslateDeflationFrame_(int t0_new) {
+    GRID_ASSERT(cur_t0_ == t0_new &&
+                "set the tent profile to the target frame first");
+    const int dt = ((t0_new - defl_frame_t0_) % T_ + T_) % T_;
+    if (dt == 0) { defl_frame_t0_ = t0_new; return; }
+    GRID_ASSERT(dt % 2 == 0 &&
+                "odd t0 shift flips EO parity — use even t_src spacing");
+    const double tt0 = usecond();
+    LatticeDtxqcdPacked full(&grid_), shifted(&grid_), half(rbgrid_);
+    for (size_t i = 0; i < defl_evec_.size(); ++i) {
+      full = Zero();
+      setCheckerboard(full, defl_evec_[i]);
+      shifted = Cshift(full, Nd - 1, -dt);
+      shifted = where(tc_ < Integer(dt), LatticeDtxqcdPacked(-shifted),
+                      shifted);
+      pickCheckerboard(Odd, half, shifted);
+      defl_evec_[i] = half;
+    }
+    defl_frame_t0_ = t0_new;
+    const int nuse = (int)defl_evec_.size();
+    defl_Ac_.resize(nuse, nuse);
+    {
+      LatticeDtxqcdPacked Av(rbgrid_);
+      for (int j = 0; j < nuse; ++j) {
+        eo_adapter_->HermOp(defl_evec_[j], Av);
+        for (int i = 0; i < nuse; ++i) {
+          const ComplexD z = innerProduct(defl_evec_[i], Av);
+          defl_Ac_(i, j) =
+              std::complex<double>(DtxqcdToStd(z).real(),
+                                   DtxqcdToStd(z).imag());
+        }
+      }
+      defl_Ac_lu_.compute(defl_Ac_);
+    }
+    std::cout << GridLogMessage << "[deform-defl] basis translated to t0="
+              << t0_new << " + A_c rebuilt in "
+              << (usecond() - tt0) * 1e-6 << " s" << std::endl;
+  }
+
+  // Galerkin coarse correction g = V A_c^-1 V^dag pr (packed odd fields).
+  void GalerkinCorrection_(const LatticeDtxqcdPacked &pr,
+                           LatticeDtxqcdPacked &g) {
+    const int n = (int)defl_evec_.size();
+    Eigen::VectorXcd c(n);
+    for (int i = 0; i < n; ++i) {
+      const std::complex<double> z =
+          DtxqcdToStd(ComplexD(innerProduct(defl_evec_[i], pr)));
+      c(i) = z;
+    }
+    const Eigen::VectorXcd y = defl_Ac_lu_.solve(c);
+    g = Zero();
+    g.Checkerboard() = Odd;
+    for (int i = 0; i < n; ++i)
+      g = g + ComplexD(y(i).real(), y(i).imag()) * defl_evec_[i];
+  }
 
   void PushEOWeights_() {
     if (mq_eo_)
@@ -472,17 +768,77 @@ class DtxqcdDeformQuda {
   int CgnrEO_(const F &src_o, F &x_o, RealD tol, int cgmax, RealD &rel_out) {
     F b(rbgrid_), r(rbgrid_), pv(rbgrid_), t1(rbgrid_), Ap(rbgrid_);
     MpcTilDag(src_o, b);
+    const RealD b2_orig = std::max(fnorm2_(b), 1e-300);  // pre-deflation RHS
     for (int a = 0; a < DtxqcdNf; ++a) {
       x_o.upper.f[a] = Zero();
       x_o.lower.f[a] = Zero();
       x_o.upper.f[a].Checkerboard() = Odd;
       x_o.lower.f[a].Checkerboard() = Odd;
     }
+    // Galerkin initial guess x0 = V A_c^-1 V^dag b (guess-deflation on the
+    // normal equations; the basis must live in the current frame —
+    // SolveTilEODeflated translates it before dispatching here).
+    const bool defl = HasDeflation() && cur_t0_ == defl_frame_t0_ &&
+                      std::abs(cur_eta_ - defl_eta_) < 1e-12;
+    // DTXQCD_DEFORM_EO_DEFLATE_DIAG=1: per-mode source overlaps + the
+    // post-guess residual ratio.  Discriminates "source orthogonal to the
+    // basis" (|r0|/|b| ~ 1, guess correctly inert) from "angle / hidden-
+    // deeper-mode problem" (|r0|/|b| << 1 yet iters unchanged) — the
+    // eta=0.8 tight-basis guess bought +2 iters on 59,931 (job 1301317)
+    // and only this ratio says why.
+    static const bool defl_diag = [] {
+      const char *e = std::getenv("DTXQCD_DEFORM_EO_DEFLATE_DIAG");
+      return e && *e && std::atoi(e) != 0;
+    }();
+    if (defl) {
+      DtxqcdPackDoubled(b, *pk_eo_in_);
+      pk_eo_in_->Checkerboard() = Odd;
+      if (defl_diag) {
+        // NB pk_eo_in_ is clobbered by every MpcTil/MpcTilDag — overlaps
+        // must be taken HERE, while it still holds the pre-guess RHS.
+        for (size_t i = 0; i < defl_evec_.size(); ++i) {
+          const ComplexD c = innerProduct(defl_evec_[i], *pk_eo_in_);
+          std::cout << GridLogMessage << "[deform-defl-diag] |v[" << i
+                    << "]^dag b|/|b| = "
+                    << DtxqcdAbs(c) / std::sqrt(b2_orig)
+                    << "  (eval " << defl_eval_[i] << ")" << std::endl;
+        }
+      }
+      LatticeDtxqcdPacked g(rbgrid_);
+      GalerkinCorrection_(*pk_eo_in_, g);
+      DtxqcdUnpackDoubled(g, x_o);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        x_o.upper.f[a].Checkerboard() = Odd;
+        x_o.lower.f[a].Checkerboard() = Odd;
+      }
+      MpcTil(x_o, t1);
+      MpcTilDag(t1, Ap);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        b.upper.f[a] = b.upper.f[a] - Ap.upper.f[a];
+        b.lower.f[a] = b.lower.f[a] - Ap.lower.f[a];
+      }
+      if (defl_diag) {
+        const RealD r02 = fnorm2_(b);
+        std::cout << GridLogMessage << "[deform-defl-diag] |r0|/|b| = "
+                  << std::sqrt(r02 / b2_orig) << std::endl;
+      }
+    }
     r = b;
     pv = b;
-    RealD r2 = fnorm2_(r), b2 = std::max(fnorm2_(b), 1e-300);
+    RealD r2 = fnorm2_(r);
+    const RealD b2 = b2_orig;
     RealD tol2 = tol * tol * b2;
+    // Periodic coarse re-correction (two-level deflated CG): the guess
+    // alone is defeated by Ritz-pair error (1e-3 of lambda_MAX >> the
+    // eigenvalues themselves — job 1301281: 16-evec guess bought ~1% at
+    // eta=0.6).  Every PROJ_EVERY iterations: x += V L^-1 V^dag r, r
+    // recomputed exactly, CG restarted.  ~+2% matvec cost at 50.
+    static const int proj_every = [] {
+      const char *e = std::getenv("DTXQCD_DEFORM_EO_DEFLATE_PROJ");
+      return (e && *e) ? std::atoi(e) : 50;
+    }();
     int k = 0;
+    int since_proj = 0;
     for (; k < cgmax; ++k) {
       MpcTil(pv, t1);
       MpcTilDag(t1, Ap);
@@ -496,6 +852,35 @@ class DtxqcdDeformQuda {
       }
       RealD rn = fnorm2_(r);
       if (rn < tol2) { r2 = rn; ++k; break; }
+      if (defl && proj_every > 0 && ++since_proj >= proj_every) {
+        since_proj = 0;
+        // Galerkin correction x += V A_c^-1 V^dag r ; r recomputed exactly;
+        // CG restarted.
+        DtxqcdPackDoubled(r, *pk_eo_in_);
+        pk_eo_in_->Checkerboard() = Odd;
+        LatticeDtxqcdPacked g(rbgrid_);
+        GalerkinCorrection_(*pk_eo_in_, g);
+        F dx(rbgrid_);
+        DtxqcdUnpackDoubled(g, dx);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          dx.upper.f[a].Checkerboard() = Odd;
+          dx.lower.f[a].Checkerboard() = Odd;
+          x_o.upper.f[a] = x_o.upper.f[a] + dx.upper.f[a];
+          x_o.lower.f[a] = x_o.lower.f[a] + dx.lower.f[a];
+        }
+        MpcTil(x_o, t1);
+        MpcTilDag(t1, Ap);
+        MpcTilDag(src_o, b);  // re-form the true RHS
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          r.upper.f[a] = b.upper.f[a] - Ap.upper.f[a];
+          r.lower.f[a] = b.lower.f[a] - Ap.lower.f[a];
+        }
+        rn = fnorm2_(r);
+        if (rn < tol2) { r2 = rn; ++k; break; }
+        pv = r;  // restart the Krylov recurrence
+        r2 = rn;
+        continue;
+      }
       RealD beta = rn / r2;
       for (int a = 0; a < DtxqcdNf; ++a) {
         pv.upper.f[a] = r.upper.f[a] + beta * pv.upper.f[a];
