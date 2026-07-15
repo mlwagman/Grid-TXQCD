@@ -282,6 +282,16 @@ Test_dtxqcd_grid_mg: Test_dtxqcd_grid_mg.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_grid_mg.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
 
+Test_dtxqcd_deform_mg_mtilde.o: Test_dtxqcd_deform_mg_mtilde.cc params.h \
+  dtxqcd_meas_helper.h dtxqcd_deform_quda.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_deform_mg_mtilde: Test_dtxqcd_deform_mg_mtilde.o \
+  $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+
 # TXQCD Wilson-vs-Mobius(naive Delta) sign probe -- same dense cuSOLVER
 # machinery as the DTXQCD sibling.
 Test_txqcd_sign_aux_draws.o: Test_txqcd_sign_aux_draws.cc

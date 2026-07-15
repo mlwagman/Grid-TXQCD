@@ -1,0 +1,583 @@
+// Test_dtxqcd_deform_mg_mtilde: prototype for MG built on M~ ITSELF
+// (Petrov-Galerkin coarsening of the non-Hermitian deformed EO operator),
+// per DTXQCD_DEFORM_MG_MTILDE_DESIGN.md.  The normal-op (Mpc~^dag Mpc~)
+// MG route is CLOSED (commit 58b9197f): its transfer must represent
+// singular vectors of a strongly non-normal operator and measurably
+// cannot, at any quality/count/geometry/level.  Coarsening M~ directly
+// (i) un-squares kappa (1.6e4 vs 2.7e8 at lambda=5 eta=0.8) and (ii)
+// aggregates the EIGENVECTOR near-kernel — the thing blocked transfers
+// are good at.
+//
+// This program implements Steps 0-1 of the design + their gates:
+//   S0a  adjointness:  <u, M~ v> == <M~dag u, v>          (device legs)
+//   S0b  quasi-g5-Hermiticity:  M~(eta)^dag u == G5 M~(-eta) G5 u
+//        (the load-bearing identity: left null spaces come free from the
+//        reciprocal-weight right set; at eta=0 this IS g5-Hermiticity)
+//   S1   right/left near-kernel generation by inverse iteration through
+//        the certified CGNR solver at loose tol (NV_TOL, default 0.1);
+//        left vectors = G5 x (near-kernel of M~(-eta)).  Reports |M~ v|
+//        per vector — the design's block-locality precondition check.
+//
+// Envs: DEFORM_ETA(0.6) DEFORM_T0(0) NV_NEV(16) NV_TOL(0.1) NV_MAXIT(20000)
+//       LAMBDA MASS CSW CFG_DIR TRAJ GAUGE_KIND (as Test_dtxqcd_grid_mg).
+// Run (4^4 mechanics):  env LAMBDA=5 DEFORM_ETA=0.4 NV_NEV=4 ./this --grid 4.4.4.8
+// Run (16^3x48):        env CFG_DIR=... TRAJ=300 LAMBDA=5 DEFORM_ETA=0.6 ./this ...
+
+#include <Grid/Grid.h>
+#include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOp.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDPackedField.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/util/QudaInit.h>
+#endif
+
+#include "params.h"
+#include "dtxqcd_meas_helper.h"
+#ifdef GRID_HAVE_QUDA
+#include "dtxqcd_deform_quda.h"
+#endif
+
+#include <cstdlib>
+#include <string>
+
+using namespace Grid;
+
+namespace {
+
+double env_real(const char *n, double d) {
+  const char *e = std::getenv(n);
+  return (e && *e) ? std::atof(e) : d;
+}
+int env_int(const char *n, int d) {
+  const char *e = std::getenv(n);
+  return (e && *e) ? std::atoi(e) : d;
+}
+std::string env_str(const char *n, const char *d) {
+  const char *e = std::getenv(n);
+  return (e && *e) ? std::string(e) : std::string(d);
+}
+
+Coordinate parse_dotted(const std::string &s, Coordinate def) {
+  Coordinate out = def;
+  size_t p = 0;
+  for (int d = 0; d < Nd && p < s.size(); ++d) {
+    size_t q = s.find('.', p);
+    out[d] = std::atoi(s.substr(p, q - p).c_str());
+    if (q == std::string::npos) break;
+    p = q + 1;
+  }
+  return out;
+}
+
+#ifdef GRID_HAVE_QUDA
+
+typedef DTXQCDFermionDoubled F;
+
+// G5 on the doubled struct field: gamma5 per fermion component (spin-only;
+// identity on the doubling/flavor indices).  Gate S0b at eta=0 CERTIFIES
+// this is the convention under which the Schur complement is
+// g5-Hermitian; if the doubled block needed a relative sign, S0b would
+// fail at eta=0 and this is the first place to look.
+void Gamma5All(const F &in, F &out) {
+  Gamma g5(Gamma::Algebra::Gamma5);
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    out.upper.f[a] = g5 * in.upper.f[a];
+    out.lower.f[a] = g5 * in.lower.f[a];
+  }
+}
+
+RealD Fnorm2(const F &x) {
+  RealD s = 0;
+  for (int a = 0; a < DtxqcdNf; ++a)
+    s += norm2(x.upper.f[a]) + norm2(x.lower.f[a]);
+  return s;
+}
+ComplexD Finner(const F &x, const F &y) {
+  ComplexD s = 0;
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    s = s + innerProduct(x.upper.f[a], y.upper.f[a]);
+    s = s + innerProduct(x.lower.f[a], y.lower.f[a]);
+  }
+  return s;
+}
+void Fzero(F &x, int cb) {
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    x.upper.f[a] = Zero();
+    x.lower.f[a] = Zero();
+    x.upper.f[a].Checkerboard() = cb;
+    x.lower.f[a].Checkerboard() = cb;
+  }
+}
+void Fgaussian(GridParallelRNG &rng, GridBase *full, GridBase *rb, F &x_o) {
+  // RB noise house pattern: full-grid gaussian + pickCheckerboard (a
+  // GridParallelRNG constructed ON an RB grid HANGS).
+  F tmp(full);
+  for (int a = 0; a < DtxqcdNf; ++a) {
+    gaussian(rng, tmp.upper.f[a]);
+    gaussian(rng, tmp.lower.f[a]);
+    pickCheckerboard(Odd, x_o.upper.f[a], tmp.upper.f[a]);
+    pickCheckerboard(Odd, x_o.lower.f[a], tmp.lower.f[a]);
+  }
+}
+
+#endif  // GRID_HAVE_QUDA
+
+}  // namespace
+
+int main(int argc, char **argv) {
+  Grid_init(&argc, &argv);
+#ifndef GRID_HAVE_QUDA
+  std::cout << GridLogMessage
+            << "[mtilde] requires a QUDA build (deform EO stack)"
+            << std::endl;
+  std::_Exit(1);
+#else
+  Coordinate latt(std::vector<int>{4, 4, 4, 8});
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]) == "--grid" && i + 1 < argc)
+      latt = parse_dotted(argv[i + 1], latt);
+  GridCartesian Grid_(latt, GridDefaultSimd(Nd, vComplex::Nsimd()),
+                      GridDefaultMpi());
+  GridRedBlackCartesian RBGrid(&Grid_);
+  GridSerialRNG sRNG;
+  GridParallelRNG pRNG(&Grid_);
+  pRNG.SeedFixedIntegers({51, 52, 53, 54, 55});
+
+  const RealD lambda = env_real("LAMBDA", 5.0);
+  const RealD mass = env_real("MASS", -0.245);
+  const RealD csw_v = env_real("CSW", 1.24930970916466);
+  const double eta = env_real("DEFORM_ETA", 0.6);
+  const int t0 = env_int("DEFORM_T0", 0);
+  const int T = latt[Nd - 1];
+
+  DTXQCDField U(&Grid_);
+  std::string cfg_dir = env_str("CFG_DIR", "");
+  if (!cfg_dir.empty()) {
+    const int traj = env_int("TRAJ", 0);
+    DTXQCDCheckpointer::ReadConfig(U, sRNG, pRNG, cfg_dir + "/ckpoint_lat",
+                                   cfg_dir + "/ckpoint_rng", traj);
+    std::cout << GridLogMessage << "[mtilde] cfg " << cfg_dir << " traj "
+              << traj << " plaq "
+              << WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U) << std::endl;
+  } else {
+    std::string gk = env_str("GAUGE_KIND", "tepid");
+    if (gk == "hot")
+      SU<Nc>::HotConfiguration(pRNG, U.U);
+    else
+      PeriodicGimplR::TepidConfiguration(pRNG, U.U);
+    DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda,
+                                       env_real("AUX_SIGMA", 0.0));
+    std::cout << GridLogMessage << "[mtilde] synthetic gauge=" << gk
+              << " lambda=" << lambda << std::endl;
+  }
+  LatticeGaugeField U_inv =
+      TXQCDProduction::DtxqcdInversionSmear(Grid_, U.U);
+
+  DTXQCDWilsonCloverFermionEO Dw(U_inv, Grid_, RBGrid, mass, csw_v, U.sigma,
+                                 U.pi, U.d, U.n, U.s, U.p);
+  DTXQCDMOp Mop(Dw);
+  DTXQCDMpcOp Mpc_cpu(Dw);
+  Grid::Quda::initialize();
+  DtxqcdPackedFullHermOp HopFull(Mop, &Grid_, Even);
+  DTXQCDMpcOpQUDA_EO Mq_eo(Dw, U_inv, Grid_, RBGrid, mass, csw_v, U.sigma,
+                           U.pi, U.d, U.n, U.s, U.p);
+  DtxqcdPackedMpcHermOp HopEO(Mpc_cpu, Mq_eo, &RBGrid, Odd);
+  DtxqcdDeformQuda Qdef(HopFull, Grid_, U_inv, T);
+  Qdef.AttachEO(HopEO, Mq_eo, RBGrid, Dw);
+  Qdef.SetTentProfile(eta, t0);
+  std::cout << GridLogMessage << "[mtilde] deformed EO op ready: eta=" << eta
+            << " t0=" << t0 << std::endl;
+
+  int fails = 0;
+  auto check = [&](const char *name, RealD val, RealD tol) {
+    bool ok = val < tol;
+    if (!ok) ++fails;
+    std::cout << GridLogMessage << (ok ? "[ok]   " : "[FAIL] ") << name
+              << " = " << val << " (tol " << tol << ")" << std::endl;
+  };
+
+  //////////////////////////////////////////////////////////////////////
+  // Gate S0a: device adjointness  <u, M~ v> == <M~dag u, v>
+  //////////////////////////////////////////////////////////////////////
+  F u(&RBGrid), v(&RBGrid), Mv(&RBGrid), Mdu(&RBGrid);
+  Fgaussian(pRNG, &Grid_, &RBGrid, u);
+  Fgaussian(pRNG, &Grid_, &RBGrid, v);
+  Qdef.MpcTil(v, Mv);
+  Qdef.MpcTilDag(u, Mdu);
+  {
+    const ComplexD a = Finner(u, Mv);
+    const ComplexD b = Finner(Mdu, v);
+    const RealD scale = std::sqrt(Fnorm2(u) * Fnorm2(Mv));
+    check("S0a adjointness |<u,Mv>-<Mdag u,v>|/scale",
+          DtxqcdAbs(ComplexD(a - b)) / scale, 1e-10);
+  }
+
+  //////////////////////////////////////////////////////////////////////
+  // Gate S0b: quasi-g5-Hermiticity  M~(eta)^dag u == G5 M~(-eta) G5 u.
+  // At eta=0 this is plain g5-Hermiticity of the Schur complement (also
+  // certifies the Gamma5All convention on the doubled index).  This
+  // identity is what makes Petrov-Galerkin setup HALF price: left null
+  // spaces = G5 x right near-kernel of M~(-eta).
+  //////////////////////////////////////////////////////////////////////
+  {
+    F g5u(&RBGrid), t1(&RBGrid), rhs(&RBGrid);
+    Gamma5All(u, g5u);
+    Qdef.SetTentProfile(-eta, t0);
+    Qdef.MpcTil(g5u, t1);
+    Qdef.SetTentProfile(eta, t0);
+    Gamma5All(t1, rhs);
+    F diff(&RBGrid);
+    RealD n2 = 0;
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      diff.upper.f[a] = rhs.upper.f[a] - Mdu.upper.f[a];
+      diff.lower.f[a] = rhs.lower.f[a] - Mdu.lower.f[a];
+    }
+    n2 = Fnorm2(diff);
+    check("S0b quasi-g5-Herm |Mdag u - G5 M(-eta) G5 u|/|Mdag u|",
+          std::sqrt(n2 / Fnorm2(Mdu)), 1e-9);
+  }
+
+  //////////////////////////////////////////////////////////////////////
+  // Step 1: near-kernel generation by inverse iteration.  Right set:
+  // v_i = normalize( M~(eta)^{-1} r_i ) at loose NV_TOL via the certified
+  // CGNR solve; left set: u_i = G5 x normalize( M~(-eta)^{-1} r_i ).
+  // Report |M~ v_i| / |v_i| — the block-locality precondition metric
+  // (design kill criterion: if this does not decay well below the bulk
+  // scale, M~'s near-kernel is not there to aggregate).
+  //////////////////////////////////////////////////////////////////////
+  const int nv = env_int("NV_NEV", 16);
+  const RealD nv_tol = env_real("NV_TOL", 0.1);
+  const int nv_maxit = env_int("NV_MAXIT", 20000);
+  std::vector<F> Vr, Vl;
+  std::cout << GridLogMessage << "[mtilde] generating " << nv
+            << " right + " << nv << " left near-kernel vectors (invit tol "
+            << nv_tol << ")" << std::endl;
+  for (int i = 0; i < nv; ++i) {
+    F r(&RBGrid), x(&RBGrid);
+    Fgaussian(pRNG, &Grid_, &RBGrid, r);
+    RealD rel = 0;
+    // right: M~(eta)^{-1} r
+    Fzero(x, Odd);
+    int it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
+    RealD xn = std::sqrt(Fnorm2(x));
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      x.upper.f[a] = x.upper.f[a] * (1.0 / xn);
+      x.lower.f[a] = x.lower.f[a] * (1.0 / xn);
+    }
+    F Mx(&RBGrid);
+    Qdef.MpcTil(x, Mx);
+    std::cout << GridLogMessage << "[mtilde] right nv[" << i
+              << "]: invit iters=" << it << "  |M~v|/|v|="
+              << std::sqrt(Fnorm2(Mx)) << std::endl;
+    Vr.push_back(x);
+    // left: G5 M~(-eta)^{-1} r'
+    Fgaussian(pRNG, &Grid_, &RBGrid, r);
+    Fzero(x, Odd);
+    Qdef.SetTentProfile(-eta, t0);
+    it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
+    Qdef.SetTentProfile(eta, t0);
+    xn = std::sqrt(Fnorm2(x));
+    F g5x(&RBGrid);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      x.upper.f[a] = x.upper.f[a] * (1.0 / xn);
+      x.lower.f[a] = x.lower.f[a] * (1.0 / xn);
+    }
+    Gamma5All(x, g5x);
+    // gate the identity in anger: |M~(eta)^dag g5x| should equal the
+    // right-style residual of the recip solve (small)
+    Qdef.MpcTilDag(g5x, Mx);
+    std::cout << GridLogMessage << "[mtilde] left  nv[" << i
+              << "]: invit iters=" << it << "  |M~dag u|/|u|="
+              << std::sqrt(Fnorm2(Mx)) << std::endl;
+    Vl.push_back(g5x);
+  }
+  std::cout << GridLogMessage
+            << "[mtilde] Step 0-1 complete; Petrov-Galerkin coarsening next"
+            << std::endl;
+
+  //////////////////////////////////////////////////////////////////////
+  // Step 2: Petrov-Galerkin coarsening of M~ itself.  Grid's
+  // GeneralCoarsenedMatrix::CoarsenOperator(linop, U, V) is NATIVELY
+  // Petrov-Galerkin (probes linop.Op against V's phased subspace,
+  // projects with U): A_c = U^dag M~ V with U = left basis (G5 x recip
+  // near-kernel), V = right near-kernel.  Nearest coarse geometry covers
+  // the distance-2 Schur footprint for blocks >= 2 in every dimension.
+  //////////////////////////////////////////////////////////////////////
+  constexpr int NB = 16;
+  GRID_ASSERT(nv == NB && "prototype instantiates Aggregation at nbasis=16");
+  Coordinate block = parse_dotted(env_str("BLOCK", "4.4.4.2"),
+                                  Coordinate(std::vector<int>{4, 4, 4, 2}));
+  Coordinate clatt(Nd);
+  for (int d = 0; d < Nd; ++d) {
+    GRID_ASSERT(latt[d] % block[d] == 0);
+    clatt[d] = latt[d] / block[d];
+  }
+  GridCartesian Coarse4d(clatt, GridDefaultSimd(Nd, vComplex::Nsimd()),
+                         GridDefaultMpi());
+  typedef GeneralCoarsenedMatrix<vDtxqcdPackedVector, vTComplex, NB>
+      LittleDiracOperator;
+  typedef typename LittleDiracOperator::CoarseVector CoarseVector;
+  typedef Aggregation<vDtxqcdPackedVector, vTComplex, NB> Subspace;
+  std::cout << GridLogMessage << "[mtilde] coarse=" << clatt << " nbasis="
+            << NB << std::endl;
+
+  // Non-Hermitian fine shim: Op = M~, AdjOp = M~^dag, on packed fields.
+  struct MtilOpShim : public LinearOperatorBase<LatticeDtxqcdPacked> {
+    DtxqcdDeformQuda &q;
+    GridBase *rb;
+    mutable size_t nops = 0;
+    MtilOpShim(DtxqcdDeformQuda &q_, GridBase *rb_) : q(q_), rb(rb_) {}
+    void Op(const LatticeDtxqcdPacked &in, LatticeDtxqcdPacked &out) {
+      F fi(rb), fo(rb);
+      DtxqcdUnpackDoubled(in, fi);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        fi.upper.f[a].Checkerboard() = Odd;
+        fi.lower.f[a].Checkerboard() = Odd;
+      }
+      q.MpcTil(fi, fo);
+      DtxqcdPackDoubled(fo, out);
+      // Packed-field cb METADATA is kept Even throughout this program (the
+      // grid_mg RB convention): CoarsenOperator's internal phase fields are
+      // default-constructed Even and its ET products assert on mismatch.
+      // Physical parity is stamped on the STRUCT side above.
+      out.Checkerboard() = Even;
+      ++nops;
+    }
+    void AdjOp(const LatticeDtxqcdPacked &in, LatticeDtxqcdPacked &out) {
+      F fi(rb), fo(rb);
+      DtxqcdUnpackDoubled(in, fi);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        fi.upper.f[a].Checkerboard() = Odd;
+        fi.lower.f[a].Checkerboard() = Odd;
+      }
+      q.MpcTilDag(fi, fo);
+      DtxqcdPackDoubled(fo, out);
+      out.Checkerboard() = Even;  // see Op(): packed metadata stays Even
+      ++nops;
+    }
+    void HermOp(const LatticeDtxqcdPacked &in, LatticeDtxqcdPacked &out) {
+      LatticeDtxqcdPacked t(in.Grid());
+      Op(in, t);
+      AdjOp(t, out);
+    }
+    void HermOpAndNorm(const LatticeDtxqcdPacked &in,
+                       LatticeDtxqcdPacked &out, RealD &n1, RealD &n2) {
+      HermOp(in, out);
+      ComplexD dot = innerProduct(in, out);
+      n1 = real(dot);
+      n2 = norm2(out);
+    }
+    void OpDiag(const LatticeDtxqcdPacked &, LatticeDtxqcdPacked &) {
+      GRID_ASSERT(0);
+    }
+    void OpDir(const LatticeDtxqcdPacked &, LatticeDtxqcdPacked &, int,
+               int) {
+      GRID_ASSERT(0);
+    }
+    void OpDirAll(const LatticeDtxqcdPacked &,
+                  std::vector<LatticeDtxqcdPacked> &) {
+      GRID_ASSERT(0);
+    }
+  };
+  MtilOpShim shim(Qdef, &RBGrid);
+
+  Subspace AggR(&Coarse4d, &RBGrid, Odd), AggL(&Coarse4d, &RBGrid, Odd);
+  for (int i = 0; i < NB; ++i) {
+    // DtxqcdPackDoubled copies the physical Odd cb from the struct; restamp
+    // Even after — packed metadata stays Even program-wide (see MtilOpShim).
+    DtxqcdPackDoubled(Vr[i], AggR.subspace[i]);
+    AggR.subspace[i].Checkerboard() = Even;
+    DtxqcdPackDoubled(Vl[i], AggL.subspace[i]);
+    AggL.subspace[i].Checkerboard() = Even;
+  }
+  // Schur footprint is distance-2 in FINE sites: with t-blocks of 2, a
+  // (x+-1, t+-1) fine hop crosses a coarse CORNER — nearest geometry
+  // truncates it (measured: S2 consistency 0.12).  Default nnn (81-point,
+  // the full +-1 hypercube), same as the grid_mg EO runs.
+  std::unique_ptr<NonLocalStencilGeometry> geomp;
+  std::string gs = env_str("GEOM", "nnn");
+  if (gs == "nearest")
+    geomp.reset(new NearestStencilGeometry4D(&Coarse4d));
+  else if (gs == "nn")
+    geomp.reset(new NextToNearestStencilGeometry4D(&Coarse4d));
+  else
+    geomp.reset(new NextToNextToNextToNearestStencilGeometry4D(&Coarse4d));
+  LittleDiracOperator Ac(*geomp, &RBGrid, &Coarse4d);
+  double tc0 = usecond();
+  Ac.CoarsenOperator(shim, AggL, AggR);
+  std::cout << GridLogMessage << "[mtilde] PG coarsen done in "
+            << (usecond() - tc0) * 1e-6 << " s" << std::endl;
+
+  // Gate S2: coarse-op consistency.  A_c c must equal
+  // ProjL( M~ PromR(c) ) on random coarse vectors (uses the
+  // POST-orthogonalisation bases — CoarsenOperator orthogonalises U,V in
+  // place, so this is exact up to roundoff if the stencil captured the
+  // full footprint).
+  {
+    GridParallelRNG CRNG(&Coarse4d);
+    CRNG.SeedFixedIntegers({61, 62, 63, 64});
+    CoarseVector c(&Coarse4d), y1(&Coarse4d), y2(&Coarse4d);
+    gaussian(CRNG, c);
+    Ac.M(c, y1);
+    LatticeDtxqcdPacked f(&RBGrid), Mf(&RBGrid);
+    f.Checkerboard() = Even;  // packed metadata convention
+    AggR.PromoteFromSubspace(c, f);
+    shim.Op(f, Mf);
+    AggL.ProjectToSubspace(y2, Mf);
+    CoarseVector d(&Coarse4d);
+    d = y1 - y2;
+    check("S2 PG coarse-op consistency |Ac c - R M~ P c|/|R M~ P c|",
+          std::sqrt(norm2(d) / norm2(y2)), 1e-8);
+  }
+
+  //////////////////////////////////////////////////////////////////////
+  // Step 3: two-level solve.  Outer = PGCR (non-Hermitian, flexible) on
+  // M~ x = b; preconditioner = V-cycle: MR pre-smooth -> coarse GMRES
+  // correction (P Ac^{-1} R) -> MR post-smooth.  MR = minimal-residual
+  // iteration (z += alpha r_s, alpha = <Ar,r>/<Ar,Ar>), the cheapest
+  // non-Hermitian smoother.  Baseline = the certified CGNR on the same
+  // source; cross-gate = |x_mg - x_cgnr| / |x|.
+  //////////////////////////////////////////////////////////////////////
+  const int run_solve = env_int("RUN_SOLVE", 1);
+  if (run_solve) {
+    typedef LatticeDtxqcdPacked Field;
+    struct VCycle : public LinearFunction<Field> {
+      MtilOpShim &op;
+      LittleDiracOperator &ac;
+      Subspace &aggL, &aggR;
+      GridCartesian *cgrid;
+      int smooth_it;
+      RealD ctol;
+      int cmaxit, crestart;
+      int use_coarse;  // MG_COARSE=0: smoother-only (attribution control)
+      VCycle(MtilOpShim &o, LittleDiracOperator &a, Subspace &l, Subspace &r,
+             GridCartesian *cg, int si, RealD ct, int cm, int cr, int uc)
+          : op(o), ac(a), aggL(l), aggR(r), cgrid(cg), smooth_it(si),
+            ctol(ct), cmaxit(cm), crestart(cr), use_coarse(uc) {}
+      void MR_(const Field &r, Field &z) {
+        Field rs(r.Grid()), Ar(r.Grid());
+        z = Zero();
+        z.Checkerboard() = r.Checkerboard();
+        rs = r;
+        for (int k = 0; k < smooth_it; ++k) {
+          op.Op(rs, Ar);
+          ComplexD num = innerProduct(Ar, rs);
+          RealD den = norm2(Ar);
+          ComplexD alpha = num * (1.0 / std::max(den, 1e-300));
+          z = z + alpha * rs;
+          rs = rs - alpha * Ar;
+        }
+      }
+      void operator()(const Field &r, Field &z) {
+        Field t(r.Grid()), resid(r.Grid());
+        t.Checkerboard() = r.Checkerboard();
+        resid.Checkerboard() = r.Checkerboard();
+        // pre-smooth
+        MR_(r, z);
+        if (!use_coarse) return;  // attribution control: smoother only
+        op.Op(z, t);
+        resid = r - t;
+        // coarse correction
+        CoarseVector cr(cgrid), cx(cgrid);
+        aggL.ProjectToSubspace(cr, resid);
+        cx = Zero();
+        NonHermitianLinearOperator<LittleDiracOperator, CoarseVector> cop(ac);
+        GeneralisedMinimalResidual<CoarseVector> gmres(ctol, cmaxit,
+                                                       crestart, false);
+        gmres(cop, cr, cx);
+        Field corr(r.Grid());
+        corr.Checkerboard() = r.Checkerboard();
+        aggR.PromoteFromSubspace(cx, corr);
+        z = z + corr;
+        // post-smooth
+        op.Op(z, t);
+        resid = r - t;
+        Field z2(r.Grid());
+        z2.Checkerboard() = r.Checkerboard();
+        MR_(resid, z2);
+        z = z + z2;
+      }
+    };
+    VCycle vcyc(shim, Ac, AggL, AggR, &Coarse4d,
+                env_int("SMOOTH_IT", 8), env_real("COARSE_TOL", 1e-2),
+                env_int("COARSE_MAXIT", 2000),
+                env_int("COARSE_RESTART", 64), env_int("MG_COARSE", 1));
+
+    // The measurement source: gaussian (the reweighting-estimator shape;
+    // couples O(1) to the band — the HARD case for plain CG).
+    F src(&RBGrid), x_cg(&RBGrid);
+    Fgaussian(pRNG, &Grid_, &RBGrid, src);
+    const RealD stol = env_real("CG_TOL", 1e-7);
+    const int scgmax = env_int("CG_MAX", 200000);
+    // Baseline: CGNR on the SAME raw odd-block Schur system (via the
+    // shim's HermOp = M~^dag M~; src' = M~^dag b).  NB SolveTilEO is NOT
+    // comparable — it wraps Schur prep + even backsubstitution, a
+    // different linear system (measured: solution rel 1.1 vs the raw
+    // system — apples to oranges).
+    LatticeDtxqcdPacked psrc(&RBGrid), px(&RBGrid), pxc(&RBGrid);
+    DtxqcdPackDoubled(src, psrc);
+    psrc.Checkerboard() = Even;  // packed metadata convention
+    bool have_baseline = env_int("RUN_BASELINE", 1) != 0;
+    size_t base_ops = 0;
+    if (have_baseline) {
+      LatticeDtxqcdPacked bsrc(&RBGrid);
+      bsrc.Checkerboard() = Even;
+      shim.AdjOp(psrc, bsrc);
+      pxc = Zero();
+      pxc.Checkerboard() = Even;
+      shim.nops = 0;
+      double tb = usecond();
+      ConjugateGradient<LatticeDtxqcdPacked> CG(stol, scgmax, false);
+      CG(shim, bsrc, pxc);
+      base_ops = shim.nops;
+      std::cout << GridLogMessage << "[mtilde] baseline CGNR (raw Schur): "
+                << base_ops << " fine Ops in " << (usecond() - tb) * 1e-6
+                << " s" << std::endl;
+    }
+    // Two-level PGCR
+    px = Zero();
+    px.Checkerboard() = Even;
+    shim.nops = 0;
+    PrecGeneralisedConjugateResidualNonHermitian<Field> PGCR(
+        stol, env_int("MG_MAXIT", 1000), shim, vcyc,
+        env_int("PGCR_MMAX", 16), env_int("PGCR_NSTEP", 16));
+    double tm = usecond();
+    PGCR(psrc, px);
+    const double t_mg = (usecond() - tm) * 1e-6;
+    // true residual on M~
+    LatticeDtxqcdPacked Mx(&RBGrid);
+    shim.Op(px, Mx);
+    Mx = Mx - psrc;
+    const RealD true_rel = std::sqrt(norm2(Mx) / norm2(psrc));
+    std::cout << GridLogMessage << "[mtilde] two-level PGCR: fine Ops="
+              << shim.nops << " in " << t_mg << " s; true relres |M~x-b|/|b|="
+              << true_rel << std::endl;
+    check("S3 two-level true residual", true_rel, 100.0 * stol);
+    if (have_baseline) {
+      LatticeDtxqcdPacked dd(&RBGrid);
+      dd = px - pxc;
+      // Bound: two solves converged to ~stol in DIFFERENT norms (direct
+      // vs normal-eq) legitimately differ by up to ~kappa(M~)*stol
+      // (measured 2.6e-4 at eta=0.6, kappa~1.3e3, stol 1e-7 — right at
+      // the bound).  Gate at 100x stol*sqrt(kappa-ish) via env.
+      check("S3 MG vs CGNR solution rel",
+            std::sqrt(norm2(dd) / norm2(pxc)),
+            env_real("SOLCMP_TOL", 1e-3));
+      std::cout << GridLogMessage << "[mtilde] fine-Op ratio (CGNR/MG) = "
+                << (double)base_ops /
+                       std::max<size_t>(shim.nops, 1)
+                << std::endl;
+    }
+    // Attribution control (MG_COARSE=0 leg runs INSTEAD when set):
+    // smoother-only preconditioner isolates the kappa-un-squaring win
+    // (direct PGCR on M~) from the coarse-space contribution.
+  }
+
+  std::cout << GridLogMessage << "==== mtilde "
+            << (fails ? "FAILED" : "PASSED") << " (" << fails
+            << " failures) ====" << std::endl;
+  std::cout.flush();
+  std::_Exit(fails ? 1 : 0);
+#endif
+}
