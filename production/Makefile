@@ -354,7 +354,7 @@ meas_baryon_deform_dtxqcd.o: meas_baryon_deform_dtxqcd.cc params.h \
 
 meas_baryon_deform_dtxqcd: meas_baryon_deform_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ meas_baryon_deform_dtxqcd.o \
-	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS)
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
 # eta-spectrum probe: lowest evals of M~^dag M~ vs eta (deform hardness map).
 probe_deform_spectrum.o: probe_deform_spectrum.cc dtxqcd_deform_quda.h \

@@ -52,6 +52,9 @@
 // DTXQCD_DEFORM_QUDA=1 fast path.  See the header for the operator identity
 // and the dagger (projector-flip + array-swap) derivation.
 #include "dtxqcd_deform_quda.h"
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+#include "dtxqcd_deform_mg.h"
+#endif
 
 using namespace Grid;
 
@@ -716,8 +719,39 @@ int main(int argc, char **argv) {
   // flavor x spin x t_src set (NTSRC=1 still means 4 solves).
   const int max_solves = env_int("MEAS_BARYON_MAXSOLVES", 0);
   int n_solved = 0;
+  // ---- DTXQCD_DEFORM_MG: the two-level deform multigrid as the odd-block
+  // solver (dtxqcd_deform_mg.h).  Default follows the measured validity
+  // domain: ON for eta >= 0.6 on SMOOTH profiles (cos / tent_rounded*) —
+  // where it beats plain CG (cos eta=0.6: 5,187 fine Ops vs 26,761 CGNR
+  // iters) — OFF below (plain CG already ~1-2k iters) and ALWAYS off for
+  // sharp tents (wall-mode localization defeats the transfer).  Setup is
+  // per (config, profile, t0): with per-source contours (PROF_T0 unset)
+  // it re-runs each t_src (~6 min) — worthwhile only for many solves per
+  // source; a fixed contour (PROF_T0>=0) sets up once.  =0/1 overrides.
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  const bool prof_smooth = prof_cos || prof_rounded;
+  const int use_mg = env_int("DTXQCD_DEFORM_MG",
+                             (eta >= 0.6 && prof_smooth) ? 1 : 0);
+  std::unique_ptr<DtxqcdDeformMG<16>> mg;
+  int mg_t0 = -12345;
+  if (use_mg && use_eo_def && Qdef) {
+    std::cout << GridLogMessage << "[baryon-def] deform-MG ENABLED "
+              << "(two-level PG, dense coarse on GPU 1)" << std::endl;
+    mg.reset(new DtxqcdDeformMG<16>(*Qdef, Grid, RBGrid));
+  }
+#endif
   for (int t_src : tsrc_list) {
     BuildDeformWeights(t_src);   // source-centered contour for this t_src
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    if (mg && prof_t0 != mg_t0) {
+      mg->Setup(pRNG);  // per (config, profile, t0)
+      mg_t0 = prof_t0;
+      Qdef->SetOddSolver([&](const F &b, F &x2, RealD tol2, int mx,
+                             RealD &r2) {
+        return mg->Solve(b, x2, tol2, mx, r2);
+      });
+    }
+#endif
     for (int fi = 0; fi < NF; ++fi)
       for (int si = 0; si < NS; ++si) {
         if (max_solves > 0 && n_solved >= max_solves) continue;

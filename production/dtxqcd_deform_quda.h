@@ -318,9 +318,13 @@ class DtxqcdDeformQuda {
       b_o.upper.f[a] = b_o.upper.f[a] - t_o.upper.f[a];
       b_o.lower.f[a] = b_o.lower.f[a] - t_o.lower.f[a];
     }
-    // Odd-block CGNR on the device Mpc~.
+    // Odd-block solve: CGNR by default, or the pluggable solver (the
+    // two-level deform MG — dtxqcd_deform_mg.h — installs itself here via
+    // SetOddSolver; the Schur prep/backsub sandwich is identical).
     F xo(rbgrid_);
-    const int it = CgnrEO_(b_o, xo, tol, cgmax, rel_out);
+    const int it = odd_solver_
+                       ? odd_solver_(b_o, xo, tol, cgmax, rel_out)
+                       : CgnrEO_(b_o, xo, tol, cgmax, rel_out);
     // Backsub: x_e = Mee^{-1}( b_e - pick_e( M~ (0 ⊕ x_o) ) ).
     ZeroExtend_(xo, ze);
     Mtil(ze, tmp);
@@ -340,6 +344,13 @@ class DtxqcdDeformQuda {
   // Single Mpc~ / Mpc~^dag applies on odd struct fields (gates + CGNR).
   void MpcTil(const F &in_o, F &out_o) { EoLeg_(in_o, out_o, false); }
   void MpcTilDag(const F &in_o, F &out_o) { EoLeg_(in_o, out_o, true); }
+
+  // Pluggable odd-block solver (b_o, x_o, tol, maxit, rel_out) -> iters.
+  void SetOddSolver(
+      std::function<int(const F &, F &, RealD, int, RealD &)> s) {
+    odd_solver_ = std::move(s);
+  }
+  void ClearOddSolver() { odd_solver_ = nullptr; }
 
   // ---- deflated EO solve (the eta=0.8/0.9 unlock) ----------------------
   // Build NEV lowest eigenpairs of Mpc~^dag Mpc~ ONCE per (config, eta) at
@@ -685,6 +696,7 @@ class DtxqcdDeformQuda {
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
   // ---- EO members / helpers ----
   DtxqcdPackedMpcHermOp *eo_adapter_ = nullptr;
+  std::function<int(const F &, F &, RealD, int, RealD &)> odd_solver_;
   DTXQCDMpcOpQUDA_EO *mq_eo_ = nullptr;
   GridRedBlackCartesian *rbgrid_ = nullptr;
   DTXQCDWilsonCloverFermionEO *dw_ = nullptr;
