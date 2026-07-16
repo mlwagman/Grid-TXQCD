@@ -167,7 +167,7 @@ int main(int argc, char **argv) {
 
   std::cout << GridLogMessage << "==== meas_baryon_deform_dtxqcd ====" << std::endl;
   std::cout << GridLogMessage << " traj=" << traj << " eta=" << eta
-            << " profile=" << (tent ? "tent" : "linear")
+            << " profile=" << env_str("PROFILE", "tent")
             << " ntsrc=" << n_tsrc << " cfg=" << cfg_dir << std::endl;
 
   GridSerialRNG sRNG;
