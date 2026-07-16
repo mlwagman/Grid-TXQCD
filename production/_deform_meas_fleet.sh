@@ -10,27 +10,36 @@
 #SBATCH --exclusive
 #SBATCH --time=08:00:00
 #SBATCH --output=/lustre2/nplqcd/Grid-DTXQCD/production/slurm-logs/dtx_deform_fleet.%j.out
-# Deformed aux baryon fleet: 5 lambda=4 configs, source-centered tent
-# eta=0.2, NTSRC=4 (16 solves ~ 2h/config), one config per GPU, resumable.
+# Deformed aux baryon fleet: source-centered tent, NTSRC=4 (16 solves per
+# config), one config per GPU, resumable via h5-skip.  Parametrized:
+#   DEFETA (0.2)     eta
+#   LAM (4)          lambda -- picks cfg stream, baryon8 partner dir, output
+#   DEFTRAJS         explicit traj list (default: all baryon8 partners)
+#   DEFCGMAX (20000) CG_MAX (eta=0.6 sharp tent needs ~60000)
+# Fast path: meas defaults DTXQCD_DEFORM_QUDA=1 (5.7x/iter) and
+# DTXQCD_DEFORM_EO=1 at lambda>=5; MG auto-policy (off for sharp tent).
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh
 P=/lustre2/nplqcd/Grid-DTXQCD/production
 DEFETA=${DEFETA:-0.2}
+LAM=${LAM:-4}
+DEFCGMAX=${DEFCGMAX:-20000}
 ETATAG=$(echo "$DEFETA" | tr '.' 'p')
-OUT=$P/meas_2pt/dtxqcd_lam4_deform_eta${ETATAG}
+OUT=$P/meas_2pt/dtxqcd_lam${LAM}_deform_eta${ETATAG}
+CFG=$P/cfgs/dtxqcd_lam${LAM}.0000_tla_fromchroma_cw
+PAIR=$P/meas_2pt/dtxqcd_lam${LAM}_baryon8
 mkdir -p "$OUT"
-# All lambda=4 configs with an UNDEFORMED partner (pairing requirement):
-# enumerate the baryon8 h5s.  Resumable via the h5-skip below.
-# DEFTRAJS="100 200 ..." overrides with an explicit list (eta-scan subsets).
+# All configs with an UNDEFORMED partner (pairing requirement): enumerate
+# the baryon8 h5s.  DEFTRAJS="100 200 ..." overrides (eta-scan subsets).
 if [ -n "$DEFTRAJS" ]; then
   TRAJS=($DEFTRAJS)
 else
   TRAJS=()
-  for f in $(ls -v $P/meas_2pt/dtxqcd_lam4_baryon8/baryon_dtxqcd_*.h5 2>/dev/null); do
+  for f in $(ls -v $PAIR/baryon_dtxqcd_*.h5 2>/dev/null); do
     t=$(basename "$f"); t=${t#baryon_dtxqcd_}; t=${t%.h5}
     TRAJS+=("$t")
   done
 fi
-echo "=== deform fleet eta=$DEFETA: ${#TRAJS[@]} paired configs ==="
+echo "=== deform fleet lam=$LAM eta=$DEFETA cgmax=$DEFCGMAX: ${#TRAJS[@]} paired configs ==="
 declare -a SLOT_PID
 launch() {
   local traj=$1 gpu=$2
@@ -38,8 +47,8 @@ launch() {
   srun --overlap --mpi=pmix -N1 -n1 -c16 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES=$gpu \
         LATT=16.16.16.48 ETA=$DEFETA PROFILE=tent MEAS_BARYON_NTSRC=4 \
-        CG_TOL=1e-7 LAMBDA_DTXQCD=4 \
-        CFG_DIR=$P/cfgs/dtxqcd_lam4.0000_tla_fromchroma_cw DATA_DIR=$OUT \
+        CG_TOL=1e-7 CG_MAX=$DEFCGMAX LAMBDA_DTXQCD=$LAM \
+        CFG_DIR=$CFG DATA_DIR=$OUT \
         OMP_NUM_THREADS=16 \
     $P/meas_baryon_deform_dtxqcd "$traj" --grid 16.16.16.48 --mpi 1.1.1.1 \
     --shm 512 --shm-mpi 1 > "$OUT/deform.$traj.log" 2>&1 &
