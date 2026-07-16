@@ -34,6 +34,15 @@
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDCheckpointer.h>
+#ifdef GRID_HAVE_QUDA
+#include <Grid/util/QudaInit.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA_EO.h>
+#endif
+#include "dtxqcd_deform_quda.h"
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+#include "dtxqcd_deform_mg.h"
+#endif
 
 using namespace Grid;
 
@@ -68,17 +77,27 @@ int main(int argc, char **argv) {
   RealD tol   = env_real("CG_TOL", 1e-8);
   int cgmax   = env_int("CG_MAX", 20000);
   int traj    = env_int("TRAJ", 250);
-  const bool tent = [&] {
+  // PROFILE=tent|linear|tent_rounded|tent_rounded2|cos — the same dispatch
+  // (and the same lambda) as meas_baryon_deform_dtxqcd, so the ΔlogPf
+  // computed here is on EXACTLY the contour the propagators were solved on.
+  const std::string prof_kind = [&] {
     const char *v = std::getenv("PROFILE");
-    return !v || std::string(v) != "linear";   // tent is the default
+    return v ? std::string(v) : std::string("tent");
   }();
+  const bool tent = prof_kind != "linear";
+  const bool prof_rounded = prof_kind == "tent_rounded" ||
+                            prof_kind == "tent_rounded2";
+  const bool prof_round_src = prof_kind == "tent_rounded2";
+  const bool prof_cos = prof_kind == "cos";
+  const double prof_w = env_real("PROFILE_W", 4.0);
+  const double prof_w_src = env_real("PROFILE_W_SRC", prof_w);
   std::string cfg_dir = "/lustre2/nplqcd/Grid-DTXQCD/production/cfgs/"
                         "dtxqcd_lam4.0000_4t4_signhop_lam4";
   if (const char *d = std::getenv("CFG_DIR"); d && *d) cfg_dir = d;
 
   std::cout << GridLogMessage << "==== Test_dtxqcd_eta_stoch_pf ====" << std::endl;
   std::cout << GridLogMessage << " cfg=" << cfg_dir << " traj=" << traj
-            << " eta=" << eta << " profile=" << (tent ? "tent" : "linear")
+            << " eta=" << eta << " profile=" << prof_kind
             << " N_NOISE=" << n_noise << " N_GL=" << n_gl << std::endl;
 
   GridSerialRNG sRNG;
@@ -102,6 +121,57 @@ int main(int argc, char **argv) {
                                  U.sigma, U.pi, U.d, U.n, U.s, U.p);
   DTXQCDMOp Mop(Dw);
 
+  // ---- fast deformed-solve stack (mirrors meas_baryon_deform_dtxqcd) ----
+  // DTXQCD_DEFORM_QUDA=1 (default): quadrature solves go through the
+  // DtxqcdDeformQuda M~ (StyleC hop corrections; EO Schur when
+  // DTXQCD_DEFORM_EO, default lam >= 5).  Requires CHEMPOT_FRAME=1 (default)
+  // — the device M~ IS the chemical-potential-frame operator, so a
+  // CHEMPOT_FRAME=0 run falls back to the host CGNR reference path.
+  const RealD lam = env_real("LAMBDA_DTXQCD", 4.0);
+  const bool use_qdef = env_int("DTXQCD_DEFORM_QUDA", 1) != 0;
+  const bool use_eo_def =
+      env_int("DTXQCD_DEFORM_EO", (lam >= 5.0) ? 1 : 0) != 0;
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<DTXQCDMpcOpQUDA> Mq;
+#endif
+  std::unique_ptr<DtxqcdPackedFullHermOp> Hop;
+  std::unique_ptr<DtxqcdDeformQuda> Qdef;
+  if (use_qdef) {
+#ifdef GRID_HAVE_QUDA
+    Grid::Quda::initialize();  // idempotent
+    if (!use_eo_def) {
+      Mq.reset(new DTXQCDMpcOpQUDA(Usm, Grid, RBGrid, mass, csw,
+                                   U.sigma, U.pi, U.d, U.n, U.s, U.p));
+      Mq->SetAuxStatic(true);
+      Hop.reset(new DtxqcdPackedFullHermOp(Mop, *Mq, &Grid, Even));
+    } else {
+      Hop.reset(new DtxqcdPackedFullHermOp(Mop, &Grid, Even));
+    }
+#else
+    Hop.reset(new DtxqcdPackedFullHermOp(Mop, &Grid, Even));
+#endif
+    Qdef.reset(new DtxqcdDeformQuda(*Hop, Grid, Usm, T));
+    std::cout << GridLogMessage << "[stochpf] backend=QUDA-hopcorr"
+#ifndef GRID_HAVE_QUDA
+              << " (non-QUDA build: struct-path reference fallback)"
+#endif
+              << std::endl;
+  }
+#ifdef GRID_HAVE_QUDA
+  std::unique_ptr<DTXQCDMpcOpQUDA_EO> Mq_eo;
+  std::unique_ptr<DTXQCDMpcOp> Mpc_cpu;
+  std::unique_ptr<DtxqcdPackedMpcHermOp> HopEO;
+  if (use_eo_def && Qdef) {
+    Mq_eo.reset(new DTXQCDMpcOpQUDA_EO(Dw, Usm, Grid, RBGrid, mass, csw,
+                                       U.sigma, U.pi, U.d, U.n, U.s, U.p));
+    Mpc_cpu.reset(new DTXQCDMpcOp(Dw));
+    HopEO.reset(new DtxqcdPackedMpcHermOp(*Mpc_cpu, *Mq_eo, &RBGrid, Odd));
+    Qdef->AttachEO(*HopEO, *Mq_eo, RBGrid, Dw);
+    std::cout << GridLogMessage << "[stochpf] EO Schur solve ENABLED"
+              << std::endl;
+  }
+#endif
+
   // t-profile weight applied to a d/n-type aux field: out = f(t) * field.
   // PROF_T0 (default 0): profile offset -- p(t) = tent/linear of (t - t0)
   // mod T.  Matches meas_baryon_deform_dtxqcd's source-centered contours:
@@ -111,7 +181,21 @@ int main(int argc, char **argv) {
   LatticeCoordinate(tc, Nd - 1);
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
-    return tent ? (double)std::min(dt, T - dt) : (double)dt;
+    if (!tent) return (double)dt;
+    const double d = (double)dt;
+    if (prof_cos)
+      return 0.25 * (double)T * (1.0 - std::cos(2.0 * M_PI * d / (double)T));
+    double v = std::min(d, (double)T - d);
+    if (!prof_rounded) return v;
+    const double a = std::abs(d - 0.5 * T);
+    if (a < prof_w)
+      v = 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
+    if (prof_round_src && prof_w_src > 0) {
+      const double b = std::min(d, (double)T - d);
+      if (b < prof_w_src)
+        v = 0.5 * prof_w_src + b * b / (2.0 * prof_w_src);
+    }
+    return v;
   };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;
@@ -303,7 +387,23 @@ int main(int argc, char **argv) {
   };
 
   // Custom CG on Mdef^dag Mdef (pattern of dtxqcd_diag.h compute_trminv).
+  // Fast path: x = M~^{-1} src via the device Qdef (Schur EO when attached)
+  // — identical solution to the CGNR below, ~10-25x the throughput.  The
+  // caller must have synced Qdef's profile to the current node (SyncQdef).
   auto SolveDef = [&](const F &src, F &x) {
+    if (Qdef && chempot) {
+      RealD relres = 0;
+      int it;
+#ifdef GRID_HAVE_QUDA
+      if (use_eo_def && Qdef->HasEO())
+        it = Qdef->SolveTilEO(src, x, tol, cgmax, relres);
+      else
+#endif
+        it = Qdef->SolveTil(src, x, tol, cgmax, relres);
+      std::cout << GridLogMessage << "[stochpf-CG:quda] iters=" << it
+                << " relres=" << relres << std::endl;
+      return;
+    }
     F b(&Grid), r(&Grid), p(&Grid), t1(&Grid), Ap(&Grid);
     MtilDag(src, b);
     x = Zero();
@@ -445,7 +545,7 @@ int main(int argc, char **argv) {
         scale = std::max(scale, std::abs(yd[i]));
       }
       std::cout << GridLogMessage << "OPCHECK " << (pass ? "Mdag" : "M   ")
-                << " eta=" << eta << " profile=" << (tent ? "tent" : "linear")
+                << " eta=" << eta << " profile=" << prof_kind
                 << ": max|lattice-dense| = " << dmax << "  (scale " << scale
                 << ")  " << (dmax < 1e-8 * scale ? "MATCH" : "MISMATCH")
                 << std::endl;
@@ -482,7 +582,7 @@ int main(int argc, char **argv) {
       nrm += norm2(yd.upper.f[a]) + norm2(yd.lower.f[a]);
     }
     std::cout << GridLogMessage << "DERIVCHECK eta=" << eta
-              << " profile=" << (tent ? "tent" : "linear")
+              << " profile=" << prof_kind
               << ": |dMhop - FD(Mtil)| / |FD| = "
               << std::sqrt(dev / nrm)
               << (std::sqrt(dev / nrm) < 1e-6 ? "   MATCH" : "   MISMATCH")
@@ -499,12 +599,98 @@ int main(int argc, char **argv) {
                                  0.18134189, 0.15685332, 0.11119052, 0.05061427};
   GRID_ASSERT(n_gl >= 1 && n_gl <= 8);
 
+  // ---- DTXQCD_DEFORM_MG: the two-level deform multigrid as the odd-block
+  // solver.  Default follows the measured validity domain (same policy as
+  // meas_baryon_deform_dtxqcd): ON for eta >= 0.6 on SMOOTH profiles
+  // (cos / tent_rounded*), OFF below, always off for sharp tents.  The
+  // quadrature visits nodes ep = eta*gl_x[q] < eta, so setup only runs for
+  // nodes with ep >= DTXQCD_DEFORM_MG_ETAMIN (default 0.5) — below that
+  // plain EO CG is already cheap and a ~min setup per node cannot amortize
+  // over 4*N_NOISE solves.  NOTE: Setup draws from pRNG, so the Hutchinson
+  // noise sequence differs between MG and non-MG runs (both unbiased).
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  const bool prof_smooth = prof_cos || prof_rounded;
+  const int use_mg = env_int("DTXQCD_DEFORM_MG",
+                             (eta >= 0.6 && prof_smooth) ? 1 : 0);
+  const RealD mg_etamin = env_real("DTXQCD_DEFORM_MG_ETAMIN", 0.5);
+  std::unique_ptr<DtxqcdDeformMG<16>> mg;
+  if (use_mg && use_eo_def && Qdef && Qdef->HasEO()) {
+    std::cout << GridLogMessage << "[stochpf] deform-MG ENABLED for nodes "
+              << "ep >= " << mg_etamin << std::endl;
+    mg.reset(new DtxqcdDeformMG<16>(*Qdef, Grid, RBGrid));
+  }
+#endif
+
   ComplexD dlogdet(0.0, 0.0), dlogdet_var(0.0, 0.0);
   for (int q = 0; q < n_gl; ++q) {
     const double ep = eta * gl_x[q];
     BuildWeights(ep);
     if (chempot) BuildGWeights(ep);
     if (hop_insert) BuildHopWeights(ep);
+    // Sync the device M~ to this node's contour.  Generic SetProfile always
+    // (REQUIRED for rounded/cos — SetTentProfile bakes the sharp tent; no
+    // deflation cache is used here, so tent loses nothing by going generic).
+    if (Qdef) Qdef->SetProfile(ep, [&](int t) { return prof(t); });
+    // One-time M~ / M~^dag identity gate vs the host sandwich at the first
+    // node's contour (catches convention/frame errors at any volume).
+    // DTXQCD_DEFORM_QUDA_CHECK=0 skips.
+    if (q == 0 && Qdef && chempot &&
+        env_int("DTXQCD_DEFORM_QUDA_CHECK", 1) != 0) {
+#ifdef GRID_HAVE_QUDA
+      // Warm the EO device pools before Grid temporaries grow the elastic
+      // MemoryManager cache (the meas_baryon OOM trap, jobs 1301152/84/96).
+      if (use_eo_def && Qdef->HasEO()) {
+        F w1(&RBGrid), w2(&RBGrid);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          w1.upper.f[a] = Zero(); w1.lower.f[a] = Zero();
+          w1.upper.f[a].Checkerboard() = Odd;
+          w1.lower.f[a].Checkerboard() = Odd;
+        }
+        Qdef->MpcTil(w1, w2);
+      }
+#endif
+      // Own RNG: drawing from pRNG here would shift the Hutchinson noise
+      // sequence vs a DTXQCD_DEFORM_QUDA=0 run and break the A/B gate.
+      GridParallelRNG QR(&Grid);
+      QR.SeedFixedIntegers({77, 13, 999, 4242});
+      F v(&Grid), ag(&Grid), aq(&Grid), dg(&Grid), dq(&Grid);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        gaussian(QR, v.upper.f[a]);
+        gaussian(QR, v.lower.f[a]);
+      }
+      Mtil(v, ag);
+      Qdef->Mtil(v, aq);
+      MtilDag(v, dg);
+      Qdef->MtilDag(v, dq);
+      RealD nm = 0, nd = 0, nmd = 0, ndd = 0;
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        nm += norm2(LatticeFermion(ag.upper.f[a] - aq.upper.f[a])) +
+              norm2(LatticeFermion(ag.lower.f[a] - aq.lower.f[a]));
+        nd += norm2(ag.upper.f[a]) + norm2(ag.lower.f[a]);
+        nmd += norm2(LatticeFermion(dg.upper.f[a] - dq.upper.f[a])) +
+               norm2(LatticeFermion(dg.lower.f[a] - dq.lower.f[a]));
+        ndd += norm2(dg.upper.f[a]) + norm2(dg.lower.f[a]);
+      }
+      const RealD rM = std::sqrt(nm / nd), rD = std::sqrt(nmd / ndd);
+      std::cout << GridLogMessage << "[stochpf-qcheck] |M~_dev - M~_host| "
+                << rM << "  dagger " << rD
+                << ((rM < 1e-10 && rD < 1e-10) ? "   OK" : "   ** FAIL **")
+                << std::endl;
+      GRID_ASSERT(rM < 1e-10 && rD < 1e-10);
+    }
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    if (mg) {
+      if (ep >= mg_etamin) {
+        mg->Setup(pRNG);  // per-node basis: the operator changes with ep
+        Qdef->SetOddSolver([&](const F &b2, F &x2, RealD tol2, int mx,
+                               RealD &r2) {
+          return mg->Solve(b2, x2, tol2, mx, r2);
+        });
+      } else {
+        Qdef->ClearOddSolver();
+      }
+    }
+#endif
     // Hutchinson: Tr[Mdef^{-1} dM] = E<v, Mdef^{-1} dM v> / 2 (gaussian).
     ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
     for (int h = 0; h < n_noise; ++h) {

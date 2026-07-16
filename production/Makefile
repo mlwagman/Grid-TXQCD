@@ -365,6 +365,19 @@ meas_baryon_deform_dtxqcd: meas_baryon_deform_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS
 	$(LINKER) $(CXXFLAGS) -o $@ meas_baryon_deform_dtxqcd.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
+# Signed-Pfaffian reweighting estimator: dlogPf/deta by Hutchinson +
+# Gauss-Legendre.  Ported to the fast Qdef path (EO Schur + optional
+# deform-MG) 2026-07-16 -> same deps as meas_baryon_deform.
+Test_dtxqcd_eta_stoch_pf.o: Test_dtxqcd_eta_stoch_pf.cc params.h \
+  dtxqcd_deform_quda.h dtxqcd_deform_mg.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
+  ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_eta_stoch_pf: Test_dtxqcd_eta_stoch_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_eta_stoch_pf.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 # eta-spectrum probe: lowest evals of M~^dag M~ vs eta (deform hardness map).
 probe_deform_spectrum.o: probe_deform_spectrum.cc dtxqcd_deform_quda.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
