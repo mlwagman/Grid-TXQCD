@@ -93,10 +93,23 @@ Two-level Petrov--Galerkin multigrid on $\Mt_{\rm pc}$ \emph{itself}
 than singular-vector transfer --- the normal-operator route fails at every
 blocking).
 \begin{itemize}
-\item \textbf{Right basis} $V$: $n_b$ inverse iterations
-$v_i=\Mt^{-1}r_i$ at loose tolerance ($10^{-3}$, a few hundred CGNR
-iterations each), blocked over $4^3\times2$ (or $4^4$) sites with all 48
-internal components kept per site.
+\item \textbf{Right basis} $V$: $n_b$ \emph{masked} inverse iterates.
+A na\"ively converged inverse iterate is the \emph{wrong} test vector:
+solving $\Mt v=r$ from white noise to even $10^{-3}$ collapses every
+$v_i$ onto the supercritical band
+($\|\Mt v\|/\|v\|=2.86$ vs.\ the bulk value $4.38$), the block
+aggregation loses span, and the V-cycle \emph{amplifies} residuals
+(probe $3.9$) --- measured on a controlled depth ladder
+(converged\,$\to$\,$2.86/3.9$; 23 iterations\,$\to$\,$3.20/1.6$; 6
+iterations\,$\to$\,$3.63/0.60$ but with a slow outer solve).  The
+working basis applies $\sim130$ CGNR iterations and then a checkerboard
+\emph{mask}: the vector is restored to the white-noise Rayleigh
+quotient ($4.38$) --- spectrally re-whitened --- while retaining the
+band's \emph{spatial envelope}.  Block over $4^3\times2$ (or $4^4$)
+sites with all 48 internal components kept per site.  (Historically the
+mask was discovered by accident --- a red--black-allocated field routed
+through a full-grid checkerboard pick --- and then certified as the
+recipe; the clean-recipe dial is retained for study.)
 \item \textbf{Left basis for free}: the deformed operator obeys the
 quasi-$\gamma_5$ identity
 $\Gamma_5\,\Mt(\eta)\,\Gamma_5=\Mt(-\eta)^\dagger$ (machine-exact,
@@ -129,13 +142,30 @@ no sharp profile possesses.  Setup ($\sim6$\,min) amortizes over the
 $\sim192$ solves per configuration.
 
 \medskip
+\noindent\textbf{Production certification.}  The scheme is packaged as a
+pluggable odd-block solver
+(\texttt{production/dtxqcd\_deform\_mg.h}\,$\to$\,\texttt{SetOddSolver})
+and certified end-to-end in the measurement code at cosine $\eta=0.6$:
+Gaussian (Hutchinson-class) solve $4{,}501$ fine operator applications;
+wall-source propagator $8{,}695$ (vs.\ $26{,}761$ plain CG, $3.1\times$);
+full baryon-correlator A/B against the plain-CG reference agrees to
+$8\times10^{-7}$.  Every setup is gated in place: coarse-operator
+consistency $A_c c = U^\dagger\Mt V c$ to $10^{-13}$, per-vector Rayleigh
+prints, LU-diagonal conditioning, and a one-V-cycle contraction probe
+($0.13$ healthy; $>1$ flags a collapsed basis before any solve is
+attempted).
+
+\medskip
 \noindent\textbf{Window-volume law.}  At $n_b=16$ the coarse space holds
 the supercritical band up to $\sim6$ slices of $|\mu|>\muc$: cosine
 $\eta=0.6$ ($\sim6$ slices) converges; $\eta=0.7$ ($\sim13$) and $0.8$
 ($\sim17$) stall; the rounded tent at $\eta=1.2$ (a 7-slice triangle
-peak) converges slowly.  Whether $n_b$ scales the law (dial vs.\ wall) is
-the one open solver question at the time of writing ($n_b=32/48$ runs in
-flight).
+peak) converges slowly.  The $n_b$ dial is now closed: $n_b=32/48$ and
+deeper setup solves ($10^{-4}$/$10^{-5}$) do not dent the $\eta\geq0.7$
+shell, and $n_b=128$ is infeasible in \texttt{GeneralCoarsenedMatrix}
+(the $128^2$ per-site coarse tensor exceeds GPU kernel-launch limits) ---
+$n_b=48$ is the practical span ceiling, so cosine $\eta\geq0.7$ stands as
+a genuine wall of this two-level scheme.
 
 \section{Bottom line}
 Relative to the original Grid-sandwich deformed solves, the combined
@@ -146,6 +176,10 @@ grading reach the smooth-profile multigrid beats every plain-CG operating
 point.  The correlator inherits the profile grading analytically, so the
 choice of profile is purely a (solver cost) $\times$ (SNR reach)
 optimization --- with the cosine profile at $\eta\simeq0.6$--$0.75$
-tangent to the ideal $\eta=0.9$ decay rate of the propagator part, the
-remaining gap to SNR-ideal is the $n_b$-scaling question.
+tangent to the ideal $\eta=0.9$ decay rate of the propagator part.  With
+the $n_b$ dial closed, cosine $\eta=0.6$ + MG is the certified
+production operating point; reaching the tangency region
+$\eta\simeq0.7$--$0.75$ would need a qualitatively different coarse
+space (e.g.\ deliberate multi-mask test vectors or $t$-adapted blocking),
+not more of the same dial.
 \end{document}

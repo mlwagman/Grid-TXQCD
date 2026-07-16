@@ -29,6 +29,33 @@ DTXQCD_DEFORM_MG_NOTE.tex, DTXQCD_DEFORM_MG_MTILDE_DESIGN.md, commits
 memory.  §5b (EO reweighting estimator) remains the next consumer and
 adopts the EO deformed solve + profiles as-is.
 
+**PRODUCTION CERTIFICATION (2026-07-16 evening, commits 6f5b32b8/e3f24bf7).**
+The M̃-MG is production-certified inside `meas_baryon_deform_dtxqcd`
+(`DTXQCD_DEFORM_MG`, default ON for η≥0.6 smooth profiles) and wired into
+the ported reweighting estimator `Test_dtxqcd_eta_stoch_pf` (fast Qdef EO
+quadrature solves verified to 2e-16/1e-9 vs host, 46 s → 6.5 s at 4⁴).
+Gate job 1301895 (cos η=0.6, λ=5, traj 300): gaussian selftest **4,501
+fine Ops** (standalone: 5,187), wall solve **8,695** vs 26,761 plain CGNR
+(3.1× iters), h5 A/B vs banked reference WORST 7.9e-7 (thr 1e-4) **PASS**.
+The porting saga produced the campaign's most important algorithmic
+finding, the **masked-basis NV law**: CONVERGED inverse iterates are the
+wrong transfer basis — at NVTOL=1e-3 they collapse onto the supercritical
+band (Rayleigh |M̃v|/|v| = 2.86 vs bulk 4.38) and the V-cycle AMPLIFIES
+(probe 3.9); shallow clean iterates (6 its, 3.63) contract on random
+vectors (0.60) but under-resolve the band.  The winning basis is a
+**checkerboard-MASKED deep iterate** — the standalone's RB-allocated
+struct fields made SolveTilEO's internal pickCheckerboard iterate the
+wrong grid, partially masking the solve back to the white-noise Rayleigh
+value while keeping the band's spatial envelope — replicated verbatim as
+`DTXQCD_MG_NV_RBQUIRK=1` (default).  Every Setup is now gated: S2
+coarse-op consistency (7e-14), per-vector Rayleigh prints, A_c LU-diag
+health, and a one-V-cycle contraction probe (0.13 healthy / >1 broken).
+Localization methodology for the record: 3-arm single-flip discriminator
+on the validated standalone + a clean-recipe depth ladder; and the
+operational law learned twice in one day — **bit-identical results across
+a supposed change mean the change never ran** (missing header dep, env
+whitelist; every knob now has a proof-of-life print).
+
 **Date:** 2026-07-13. **Audience:** the QUDA/MG fork (the one that built the
 StyleC device CG, `DTXQCD_MULTISHIFT_QUDA`/`HYBRID`, and the Grid-MG
 coarsening work). **Goal:** put QUDA under the η-deformed operator solves.
