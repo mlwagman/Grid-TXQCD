@@ -333,6 +333,11 @@ int main(int argc, char **argv) {
   // instead of G5 x the recip-profile solve.
   const int nv_rhs_full = env_int("NV_RHS_FULL", 0);
   const int nv_left_dag = env_int("NV_LEFT_DAG", 0);
+  // Proof-of-life: a discriminator arm whose log lacks this line (or shows
+  // 0/0) ran a stale binary or a dropped env — treat its result as VOID
+  // (the 2026-07-16 phantom-build/phantom-env lessons, twice in one day).
+  std::cout << GridLogMessage << "[mtilde] NV discriminators: NV_RHS_FULL="
+            << nv_rhs_full << " NV_LEFT_DAG=" << nv_left_dag << std::endl;
   for (int i = 0; i < nv; ++i) {
     F r(&RBGrid), x(&RBGrid);
     RealD rel = 0;

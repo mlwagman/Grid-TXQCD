@@ -22,7 +22,7 @@
 # ============================================================================
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh
 P=/lustre2/nplqcd/Grid-DTXQCD/production
-for ARM in A B C; do
+for ARM in ${ARMS:-A B C}; do
   case $ARM in
     A) EX="" ;;
     B) EX="NV_RHS_FULL=1" ;;
