@@ -356,7 +356,7 @@ meas_conn_dtxqcd: meas_conn_dtxqcd.o $(DTXQCD_NATIVE_IMPL_OBJS)
 # eta-deformed aux baryon: DTXQCD_DEFORM_QUDA=1 rides the StyleC device op
 # (via the packed adapter's single-leg applies) -> needs the native-impl objs.
 meas_baryon_deform_dtxqcd.o: meas_baryon_deform_dtxqcd.cc params.h \
-  dtxqcd_deform_quda.h \
+  dtxqcd_deform_quda.h dtxqcd_deform_mg.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDMpcOpQUDA.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
