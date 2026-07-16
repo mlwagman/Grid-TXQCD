@@ -326,6 +326,12 @@ int main(int argc, char **argv) {
   // grading RATE reduced only within w slices of the source (short
   // separations, where S/N is best) + the same uniform w/2 offset.
   const bool prof_round_src = prof_kind == "tent_rounded2";
+  // PROFILE_W_SRC: independent trough half-width (default = PROFILE_W).
+  // The grading DIFFERENTIAL is eta*(T/2 - (w_apex + w_src)/2): the trough
+  // lifts p(source) by w_src/2 and the apex drops by w_apex/2.  The trough
+  // state may lift with narrower rounding than the apex state — asymmetric
+  // geometry buys differential back at fixed CG relief.
+  const double prof_w_src = env_real("PROFILE_W_SRC", prof_w);
   // PROFILE=cos (mwagman 2026-07-16): p(t) = (T/4)(1 - cos(2 pi t / T)).
   // Both mu-walls maximally smoothed (mu -> 0 LINEARLY at source and
   // antipode) with p_max = T/2 exactly preserved — full dynamic range, no
@@ -342,11 +348,11 @@ int main(int argc, char **argv) {
     const double a = std::abs(d - 0.5 * T);
     if (a < prof_w)  // apex parabola, slope-matched at |d-T/2| = w
       v = 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
-    if (prof_round_src) {
+    if (prof_round_src && prof_w_src > 0) {
       const double b = std::min(d, (double)T - d);  // distance to source
-      if (b < prof_w)  // trough parabola (offset w/2 kept: only
-                       // differences enter weights and grading)
-        v = 0.5 * prof_w + b * b / (2.0 * prof_w);
+      if (b < prof_w_src)  // trough parabola (offset w_src/2 kept: only
+                           // differences enter weights and grading)
+        v = 0.5 * prof_w_src + b * b / (2.0 * prof_w_src);
     }
     return v;
   };

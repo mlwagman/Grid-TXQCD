@@ -188,9 +188,47 @@ int main(int argc, char **argv) {
   DtxqcdPackedMpcHermOp HopEO(Mpc_cpu, Mq_eo, &RBGrid, Odd);
   DtxqcdDeformQuda Qdef(HopFull, Grid_, U_inv, T);
   Qdef.AttachEO(HopEO, Mq_eo, RBGrid, Dw);
-  Qdef.SetTentProfile(eta, t0);
+  // PROFILE support (2026-07-16): tent (default) | tent_rounded |
+  // tent_rounded2 | cos, with PROFILE_W / PROFILE_W_SRC — same lambda as
+  // the meas/probe programs.  The MG question for SMOOTH profiles: their
+  // deep modes near ignition are WIDE supercritical-window states (not
+  // wall-localized) — exactly what defeated the sharp-tent MG is absent.
+  // SetProf(+-eta) replaces all SetTentProfile sites (recip = -eta works
+  // for ANY profile: the weights are e^{-+eta dp/2}).
+  const std::string prof_kind = env_str("PROFILE", "tent");
+  const double prof_w = env_real("PROFILE_W", 12.0);
+  const double prof_w_src = env_real("PROFILE_W_SRC", prof_w);
+  const bool prof_rounded =
+      prof_kind == "tent_rounded" || prof_kind == "tent_rounded2";
+  const bool prof_round_src = prof_kind == "tent_rounded2";
+  const bool prof_cos = prof_kind == "cos";
+  auto prof = [&](int t) {
+    const int dt = ((t - t0) % T + T) % T;
+    const double d = (double)dt;
+    if (prof_cos)
+      return 0.25 * (double)T * (1.0 - std::cos(2.0 * M_PI * d / (double)T));
+    double v = std::min(d, (double)T - d);
+    if (!prof_rounded) return v;
+    const double a = std::abs(d - 0.5 * T);
+    if (a < prof_w)
+      v = 0.5 * (double)T - 0.5 * prof_w - a * a / (2.0 * prof_w);
+    if (prof_round_src && prof_w_src > 0) {
+      const double b = std::min(d, (double)T - d);
+      if (b < prof_w_src)
+        v = 0.5 * prof_w_src + b * b / (2.0 * prof_w_src);
+    }
+    return v;
+  };
+  auto SetProf = [&](double e) {
+    if (prof_kind == "tent")
+      Qdef.SetTentProfile(e, t0);
+    else
+      Qdef.SetProfile(e, prof);
+  };
+  SetProf(eta);
   std::cout << GridLogMessage << "[mtilde] deformed EO op ready: eta=" << eta
-            << " t0=" << t0 << std::endl;
+            << " t0=" << t0 << " profile=" << prof_kind << " w=" << prof_w
+            << "/" << prof_w_src << std::endl;
 
   int fails = 0;
   auto check = [&](const char *name, RealD val, RealD tol) {
@@ -226,9 +264,9 @@ int main(int argc, char **argv) {
   {
     F g5u(&RBGrid), t1(&RBGrid), rhs(&RBGrid);
     Gamma5All(u, g5u);
-    Qdef.SetTentProfile(-eta, t0);
+    SetProf(-eta);
     Qdef.MpcTil(g5u, t1);
-    Qdef.SetTentProfile(eta, t0);
+    SetProf(eta);
     Gamma5All(t1, rhs);
     F diff(&RBGrid);
     RealD n2 = 0;
@@ -277,9 +315,9 @@ int main(int argc, char **argv) {
     // left: G5 M~(-eta)^{-1} r'
     Fgaussian(pRNG, &Grid_, &RBGrid, r);
     Fzero(x, Odd);
-    Qdef.SetTentProfile(-eta, t0);
+    SetProf(-eta);
     it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
-    Qdef.SetTentProfile(eta, t0);
+    SetProf(eta);
     xn = std::sqrt(Fnorm2(x));
     F g5x(&RBGrid);
     for (int a = 0; a < DtxqcdNf; ++a) {

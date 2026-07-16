@@ -171,6 +171,7 @@ int main(int argc, char **argv) {
   const bool prof_rounded = prof_kind == "tent_rounded" ||
                             prof_kind == "tent_rounded2";
   const bool prof_round_src = prof_kind == "tent_rounded2";  // both walls
+  const double prof_w_src = env_real("PROFILE_W_SRC", prof_w);
   const bool prof_cos = prof_kind == "cos";  // (T/4)(1-cos), full range
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
@@ -183,10 +184,10 @@ int main(int argc, char **argv) {
     const double a = std::abs(d - 0.5 * T);
     if (a < prof_w)
       v = 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
-    if (prof_round_src) {
+    if (prof_round_src && prof_w_src > 0) {
       const double b = std::min(d, (double)T - d);
-      if (b < prof_w)
-        v = 0.5 * prof_w + b * b / (2.0 * prof_w);
+      if (b < prof_w_src)
+        v = 0.5 * prof_w_src + b * b / (2.0 * prof_w_src);
     }
     return v;
   };
