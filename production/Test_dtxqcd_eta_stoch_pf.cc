@@ -592,12 +592,30 @@ int main(int argc, char **argv) {
     std::_Exit(0);
   }
 
-  // 8-node Gauss-Legendre on [0,1] (rescaled to [0,eta]); truncate to n_gl.
-  static const double gl_x[8] = {0.01985507, 0.10166676, 0.23723379, 0.40828268,
-                                 0.59171732, 0.76276621, 0.89833324, 0.98014493};
-  static const double gl_w[8] = {0.05061427, 0.11119052, 0.15685332, 0.18134189,
-                                 0.18134189, 0.15685332, 0.11119052, 0.05061427};
-  GRID_ASSERT(n_gl >= 1 && n_gl <= 8);
+  // PROPER n-point Gauss-Legendre rules on [0,1] (rescaled to [0,eta]).
+  // The original code TRUNCATED the 8-point rule to the first n_gl nodes
+  // (weights summing to <1, nodes clustered near 0) — every N_GL<8 run
+  // before 2026-07-14 integrated a fraction of [0,eta], not the integral
+  // (per-node GLNODE integrand samples unaffected).  N_GL now selects a
+  // genuine 1/2/4/8-point rule; the audit showed the integrand is smooth,
+  // so N_GL=2-4 with the noise budget spent per node is the efficient split.
+  static const double gl_x1[1] = {0.5};
+  static const double gl_w1[1] = {1.0};
+  static const double gl_x2[2] = {0.21132486540518713, 0.78867513459481290};
+  static const double gl_w2[2] = {0.5, 0.5};
+  static const double gl_x4[4] = {0.06943184420297371, 0.33000947820757187,
+                                  0.66999052179242810, 0.93056815579702629};
+  static const double gl_w4[4] = {0.17392742256872693, 0.32607257743127307,
+                                  0.32607257743127307, 0.17392742256872693};
+  static const double gl_x8[8] = {0.01985507, 0.10166676, 0.23723379, 0.40828268,
+                                  0.59171732, 0.76276621, 0.89833324, 0.98014493};
+  static const double gl_w8[8] = {0.05061427, 0.11119052, 0.15685332, 0.18134189,
+                                  0.18134189, 0.15685332, 0.11119052, 0.05061427};
+  GRID_ASSERT(n_gl == 1 || n_gl == 2 || n_gl == 4 || n_gl == 8);
+  const double *gl_x = (n_gl == 1) ? gl_x1 : (n_gl == 2) ? gl_x2
+                       : (n_gl == 4) ? gl_x4 : gl_x8;
+  const double *gl_w = (n_gl == 1) ? gl_w1 : (n_gl == 2) ? gl_w2
+                       : (n_gl == 4) ? gl_w4 : gl_w8;
 
   // ---- DTXQCD_DEFORM_MG: the two-level deform multigrid as the odd-block
   // solver.  Default follows the measured validity domain (same policy as
