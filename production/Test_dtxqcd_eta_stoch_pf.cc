@@ -402,6 +402,14 @@ int main(int argc, char **argv) {
         it = Qdef->SolveTil(src, x, tol, cgmax, relres);
       std::cout << GridLogMessage << "[stochpf-CG:quda] iters=" << it
                 << " relres=" << relres << std::endl;
+      if (relres > tol) {
+        std::cout << GridLogMessage << "[stochpf-CG:quda] NOT CONVERGED at "
+                  << "CG_MAX=" << cgmax << " (relres " << relres << " > tol "
+                  << tol << ") -- aborting: an unconverged solve BIASES the "
+                  << "trace estimate" << std::endl;
+        Grid_finalize();
+        std::_Exit(3);
+      }
       return;
     }
     F b(&Grid), r(&Grid), p(&Grid), t1(&Grid), Ap(&Grid);
@@ -430,6 +438,15 @@ int main(int argc, char **argv) {
         p.lower.f[a] = r.lower.f[a] + beta * p.lower.f[a];
       }
       r2 = rn;
+    }
+    const RealD relres_h = std::sqrt(norm2(r) / b2);
+    if (relres_h > tol) {
+      std::cout << GridLogMessage << "[stochpf-CG] NOT CONVERGED at CG_MAX="
+                << cgmax << " (relres " << relres_h << " > tol " << tol
+                << ") -- aborting: an unconverged solve BIASES the trace "
+                << "estimate" << std::endl;
+      Grid_finalize();
+      std::_Exit(3);
     }
   };
 
