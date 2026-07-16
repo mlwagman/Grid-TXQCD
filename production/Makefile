@@ -305,6 +305,15 @@ Test_dtxqcd_deform_mg_mtilde_nb48.o: Test_dtxqcd_deform_mg_mtilde.cc \
   params.h dtxqcd_meas_helper.h dtxqcd_deform_quda.h
 	$(CXX) $(CXXFLAGS) -DMTILDE_NB=48 -c -o $@ $<
 
+Test_dtxqcd_deform_mg_mtilde_nb128.o: Test_dtxqcd_deform_mg_mtilde.cc \
+  params.h dtxqcd_meas_helper.h dtxqcd_deform_quda.h
+	$(CXX) $(CXXFLAGS) -DMTILDE_NB=128 -c -o $@ $<
+
+Test_dtxqcd_deform_mg_mtilde_nb128: Test_dtxqcd_deform_mg_mtilde_nb128.o \
+  $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde_nb128.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 Test_dtxqcd_deform_mg_mtilde_nb48: Test_dtxqcd_deform_mg_mtilde_nb48.o \
   $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde_nb48.o \
