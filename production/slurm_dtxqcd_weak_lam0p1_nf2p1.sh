@@ -31,7 +31,7 @@ ADD_STRANGE=1 \
 MASS_STRANGE=-0.245 \
 DTXQCD_SUFFIX="_weak_nf2p1" \
 TRAJ=200 \
-NO_METROP=100 \
+NO_METROP=10 \
 N_SKIP=10 \
   /lustre2/nplqcd/Grid-DTXQCD/production/run_dtxqcd_gencfgs.sh
 

@@ -32,7 +32,10 @@
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDMOp.h>
 #include <Grid/qcd/action/dtxqcd/DTXQCDSiteMatrix.h>
+#include <Grid/qcd/action/dtxqcd/DTXQCDAuxGaussianAction.h>
 #include <Grid/qcd/utils/WilsonLoops.h>
+#include <cstdio>   // GAUGE_FILE magic sniff
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -96,7 +99,55 @@ int main(int argc, char **argv) {
   if (gk == "unit")       DTXQCDCompositeImpl::ColdConfiguration(pRNG, U);
   else if (gk == "weak")  DTXQCDCompositeImpl::GenerateWeakFieldGauge(pRNG, U, 0.1);
   else if (gk == "tepid") DTXQCDCompositeImpl::TepidConfiguration(pRNG, U);
+  else if (gk == "file") {
+    // GAUGE_FILE: equilibrated gauge config (NERSC or, with HAVE_LIME, ILDG).
+    const char *gf = std::getenv("GAUGE_FILE");
+    GRID_ASSERT(gf && *gf);
+    std::FILE *fp = std::fopen(gf, "rb");
+    char magic[16] = {0};
+    if (fp) { (void)std::fread(magic, 1, sizeof(magic), fp); std::fclose(fp); }
+    FieldMetaData header;
+    if (std::memcmp(magic, "BEGIN_HEADER", 12) == 0) {
+      typedef GaugeStatistics<PeriodicGimplR> GaugeStats;
+      NerscIO::readConfiguration<GaugeStats>(U.U, header, std::string(gf));
+    } else {
+#ifdef HAVE_LIME
+      IldgReader IR;
+      IR.open(std::string(gf));
+      IR.readConfiguration(U.U, header);
+      IR.close();
+#else
+      std::cout << GridLogError << "GAUGE_FILE not NERSC and no HAVE_LIME" << std::endl;
+      GRID_ASSERT(0);
+#endif
+    }
+    std::cout << GridLogMessage << "[sign-draws] GAUGE_FILE=" << gf << std::endl;
+  }
   else                    SU<Nc>::HotConfiguration(pRNG, U.U);
+  // STOUT_NSMEAR (default 0): smear the loaded gauge so the dense M48 sees the
+  // production (stout, csw=1.249) operator, not bare rough links.
+  {
+    const int n_stout = env_int("STOUT_NSMEAR", 0);
+    const RealD rho = env_real("STOUT_RHO", 0.125);
+    std::cout << GridLogMessage << "[sign-draws] plaq(raw) = "
+              << WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U)
+              << "  STOUT_NSMEAR=" << n_stout << std::endl;
+    if (n_stout > 0) {
+      Smear_Stout<PeriodicGimplR> stout(rho);
+      LatticeGaugeField Usm(&Grid);
+      for (int i = 0; i < n_stout; ++i) { stout.smear(Usm, U.U); U.U = Usm; }
+      std::cout << GridLogMessage << "[sign-draws] plaq(stout) = "
+                << WilsonLoops<PeriodicGimplR>::avgPlaquette(U.U) << std::endl;
+    }
+  }
+  // SEED (optional): reseed AFTER gauge setup so parallel streams share the
+  // gauge (same GAUGE_KIND/FILE) but draw independent aux.  Unset = legacy
+  // stream, bit-compatible with the 2026-07-01 runs.
+  if (const char *sv = std::getenv("SEED"); sv && *sv) {
+    const int sd = std::atoi(sv);
+    pRNG.SeedFixedIntegers({sd, sd + 11, sd + 23, sd + 37, sd + 41});
+    std::cout << GridLogMessage << "[sign-draws] aux SEED=" << sd << std::endl;
+  }
   std::cout << GridLogMessage << "[sign-draws] gauge=" << gk << " mass=" << mass
             << " csw=" << csw << " ndraw=" << ndraw
             << " sigma_shift=" << sigma_shift
@@ -187,124 +238,172 @@ int main(int argc, char **argv) {
   std::vector<std::complex<double>> H((size_t)dim * dim);
   std::vector<double> evals(dim);
 
+  // ---- dense spectrum of gamma5.M48(Ux): the assembly + cuSOLVER solve,
+  // callable repeatedly per draw (base + flip-move variants). ----
+  struct DenseSpec {
+    int n_neg; int sgn; double logabsdet, min_abs, pair_split_max, herm_max;
+  };
+  auto dense_spec = [&](DTXQCDField &Ux) -> DenseSpec {
+    DTXQCDWilsonCloverFermionEO Dw(Ux.U, Grid, RBGrid, mass, csw,
+                                   Ux.sigma, Ux.pi, Ux.d, Ux.n, Ux.s, Ux.p);
+    DTXQCDMOp Mop(Dw);
+    DTXQCDFermionDoubled e(&Grid), y(&Grid);
+    std::vector<FSobj> col_arr(V);
+    for (int site = 0; site < V; ++site) {
+      Coordinate c; site_coor(site, c);
+      for (int blk = 0; blk < 2; ++blk)
+        for (int a = 0; a < DtxqcdNf; ++a)
+          for (int sp = 0; sp < Ns; ++sp)
+            for (int co = 0; co < Nc; ++co) {
+              const int j = row_idx(site, blk, a, sp, co);
+              for (int aa = 0; aa < DtxqcdNf; ++aa) {
+                e.upper.f[aa] = Zero();
+                e.lower.f[aa] = Zero();
+              }
+              FSobj one; one = Zero();
+              one()(sp)(co) = ComplexD(1.0, 0.0);
+              if (blk == 0) pokeSite(one, e.upper.f[a], c);
+              else          pokeSite(one, e.lower.f[a], c);
+              Mop.M(e, y);
+              Gamma5Doubled(y);
+              for (int blk2 = 0; blk2 < 2; ++blk2)
+                for (int a2 = 0; a2 < DtxqcdNf; ++a2) {
+                  const LatticeFermion &f =
+                      (blk2 == 0) ? y.upper.f[a2] : y.lower.f[a2];
+                  unvectorizeToLexOrdArray(col_arr, f);
+                  for (int s2 = 0; s2 < V; ++s2)
+                    for (int sp2 = 0; sp2 < Ns; ++sp2)
+                      for (int co2 = 0; co2 < Nc; ++co2) {
+                        const int i = row_idx(s2, blk2, a2, sp2, co2);
+                        auto z = col_arr[s2]()(sp2)(co2);
+                        H[(size_t)j * dim + i] =
+                            std::complex<double>(z.real(), z.imag());
+                      }
+                }
+            }
+    }
+    DenseSpec r;
+    r.herm_max = 0.0;
+    for (unsigned long t = 0; t < 2000; ++t) {
+      int i = (int)((1103515245UL * t + 12345UL) % (unsigned long)dim);
+      int j = (int)((69069UL * t + 1UL) % (unsigned long)dim);
+      auto dlt = H[(size_t)j * dim + i] - std::conj(H[(size_t)i * dim + j]);
+      r.herm_max = std::max(r.herm_max, std::abs(dlt));
+    }
+#ifdef GRID_CUDA
+    cuDoubleComplex *dA;
+    double *dW; int *dInfo;
+    GRID_ASSERT(cudaMalloc(&dA, sizeof(cuDoubleComplex) * (size_t)dim * dim) == cudaSuccess);
+    GRID_ASSERT(cudaMalloc(&dW, sizeof(double) * dim) == cudaSuccess);
+    GRID_ASSERT(cudaMalloc(&dInfo, sizeof(int)) == cudaSuccess);
+    GRID_ASSERT(cudaMemcpy(dA, H.data(), sizeof(cuDoubleComplex) * (size_t)dim * dim,
+                           cudaMemcpyHostToDevice) == cudaSuccess);
+    int lwork = 0;
+    GRID_ASSERT(cusolverDnZheevd_bufferSize(cus, CUSOLVER_EIG_MODE_NOVECTOR,
+                CUBLAS_FILL_MODE_LOWER, dim, dA, dim, dW, &lwork)
+                == CUSOLVER_STATUS_SUCCESS);
+    cuDoubleComplex *dWork;
+    GRID_ASSERT(cudaMalloc(&dWork, sizeof(cuDoubleComplex) * (size_t)lwork) == cudaSuccess);
+    GRID_ASSERT(cusolverDnZheevd(cus, CUSOLVER_EIG_MODE_NOVECTOR,
+                CUBLAS_FILL_MODE_LOWER, dim, dA, dim, dW, dWork, lwork, dInfo)
+                == CUSOLVER_STATUS_SUCCESS);
+    int info = -1;
+    GRID_ASSERT(cudaMemcpy(&info, dInfo, sizeof(int), cudaMemcpyDeviceToHost) == cudaSuccess);
+    GRID_ASSERT(info == 0);
+    GRID_ASSERT(cudaMemcpy(evals.data(), dW, sizeof(double) * dim,
+                           cudaMemcpyDeviceToHost) == cudaSuccess);
+    cudaFree(dA); cudaFree(dW); cudaFree(dInfo); cudaFree(dWork);
+#else
+    std::cout << GridLogError << "non-CUDA build: no dense eigensolver" << std::endl;
+    abort();
+#endif
+    r.n_neg = 0; r.min_abs = 1e300; r.logabsdet = 0.0;
+    for (int i = 0; i < dim; ++i) {
+      if (evals[i] < 0) ++r.n_neg;
+      r.min_abs = std::min(r.min_abs, std::abs(evals[i]));
+      r.logabsdet += std::log(std::abs(evals[i]));
+    }
+    r.pair_split_max = 0.0;
+    for (int i = 0; i + 1 < dim; i += 2) {
+      double s = std::abs(evals[i] - evals[i + 1]) /
+                 std::max(std::abs(evals[i]), 1e-300);
+      r.pair_split_max = std::max(r.pair_split_max, s);
+    }
+    r.sgn = ((r.n_neg / 2) % 2) ? -1 : +1;
+    return r;
+  };
+
+  // ---- FLIP_MOVES=1: per draw, also test the two verified sector-crossing
+  // moves (s_tslice0, negate_sigma; both S_aux-exact) -> per-config eta and
+  // Metropolis log-ratio dlad (accept prob = min(1, e^{dlad/2})). ----
+  const bool flip_moves = env_int("FLIP_MOVES", 0) != 0;
+  LatticeInteger tcoord(&Grid);
+  LatticeCoordinate(tcoord, Nd - 1);
+  auto mv_s_tslice0 = [&](DTXQCDField &F) {
+    LatticeDtxqcdS neg = -F.s;
+    F.s = where(tcoord == Integer(0), neg, F.s);
+  };
+  auto mv_negate_sigma = [&](DTXQCDField &F) { F.sigma = -F.sigma; };
+
   for (RealD lambda : lambdas) {
     std::cout << GridLogMessage << "======== lambda = " << lambda
               << " ========" << std::endl;
     int nflip = 0, sign_first = 0;
     std::vector<int>    sgn_hist, sites_hist, schur_hist;
     std::vector<double> lad_hist;   // log|det(gamma5 M)| = log|det M| per draw
+    // Exact-reweighting instrumentation: with SIGMA_SHIFT>0 the draws come
+    // from the SHIFTED proposal q(x) ~ e^{-S_aux(x-mu)} (the aux-init
+    // distribution), not the prior.  The exact target weight is then
+    //   w = |Pf(x)| e^{-(S_aux(x) - S_aux(x-mu))} = |Pf| e^{-dS}.
+    // Print S_aux(x) and dS per draw so the offline analysis can do both the
+    // unweighted (aux-init ~ equilibrium) and the exact reweighted estimate.
+    DTXQCDAuxiliaryFieldGaussianAction Saux(lambda);
+    DTXQCDField Umean(&Grid), Vres(&Grid);
+    DTXQCDCompositeImpl::FillAuxFields(pRNG, Umean, lambda, sigma_shift,
+                                       /*with_fluct=*/false);  // no RNG use
     for (int d = 0; d < ndraw; ++d) {
-      // Independent prior draw (stream advances every call).
+      // Independent draw from the (possibly shifted) proposal.
       DTXQCDCompositeImpl::FillAuxFields(pRNG, U, lambda, sigma_shift);
+      const double S_x = Saux.S(U);
+      Vres.sigma = U.sigma - Umean.sigma;  Vres.pi = U.pi;
+      Vres.d = U.d;  Vres.n = U.n;
+      Vres.s = U.s - Umean.s;              Vres.p = U.p;
+      const double dS = S_x - Saux.S(Vres);
 
-      DTXQCDWilsonCloverFermionEO Dw(U.U, Grid, RBGrid, mass, csw,
-                                     U.sigma, U.pi, U.d, U.n, U.s, U.p);
-      DTXQCDMOp Mop(Dw);
-
-      // ---- assemble dense H = Gamma5 . M48, column by column ----
       std::cout << GridLogMessage << "[assemble] start draw " << d << std::endl;
-      DTXQCDFermionDoubled e(&Grid), y(&Grid);
-      std::vector<FSobj> col_arr(V);
-      int col_count = 0;
-      for (int site = 0; site < V; ++site) {
-        Coordinate c; site_coor(site, c);
-        for (int blk = 0; blk < 2; ++blk)
-          for (int a = 0; a < DtxqcdNf; ++a)
-            for (int sp = 0; sp < Ns; ++sp)
-              for (int co = 0; co < Nc; ++co) {
-                const int j = row_idx(site, blk, a, sp, co);
-                for (int aa = 0; aa < DtxqcdNf; ++aa) {
-                  e.upper.f[aa] = Zero();
-                  e.lower.f[aa] = Zero();
-                }
-                FSobj one; one = Zero();
-                one()(sp)(co) = ComplexD(1.0, 0.0);
-                if (blk == 0) pokeSite(one, e.upper.f[a], c);
-                else          pokeSite(one, e.lower.f[a], c);
-                Mop.M(e, y);
-                Gamma5Doubled(y);
-                if ((++col_count % 2048) == 0)
-                  std::cout << GridLogMessage << "[assemble] col " << col_count
-                            << "/" << dim << std::endl;
-                // extract column j
-                for (int blk2 = 0; blk2 < 2; ++blk2)
-                  for (int a2 = 0; a2 < DtxqcdNf; ++a2) {
-                    const LatticeFermion &f =
-                        (blk2 == 0) ? y.upper.f[a2] : y.lower.f[a2];
-                    unvectorizeToLexOrdArray(col_arr, f);
-                    for (int s2 = 0; s2 < V; ++s2)
-                      for (int sp2 = 0; sp2 < Ns; ++sp2)
-                        for (int co2 = 0; co2 < Nc; ++co2) {
-                          const int i = row_idx(s2, blk2, a2, sp2, co2);
-                          auto z = col_arr[s2]()(sp2)(co2);
-                          H[(size_t)j * dim + i] =
-                              std::complex<double>(z.real(), z.imag());
-                        }
-                  }
-              }
-      }
-
-      // Hermiticity spot check (H stored column-major: H[j*dim+i] = H_ij)
-      double herm_max = 0.0;
-      for (unsigned long t = 0; t < 2000; ++t) {
-        int i = (int)((1103515245UL * t + 12345UL) % (unsigned long)dim);
-        int j = (int)((69069UL * t + 1UL) % (unsigned long)dim);
-        auto dlt = H[(size_t)j * dim + i] - std::conj(H[(size_t)i * dim + j]);
-        herm_max = std::max(herm_max, std::abs(dlt));
-      }
-
-      std::cout << GridLogMessage << "[assemble] done; herm_check=" << herm_max
-                << "; eigensolve..." << std::endl;
-
-#ifdef GRID_CUDA
-      // ---- dense eigenvalues via cuSOLVER Zheevd ----
-      cuDoubleComplex *dA;
-      double *dW; int *dInfo;
-      GRID_ASSERT(cudaMalloc(&dA, sizeof(cuDoubleComplex) * (size_t)dim * dim) == cudaSuccess);
-      GRID_ASSERT(cudaMalloc(&dW, sizeof(double) * dim) == cudaSuccess);
-      GRID_ASSERT(cudaMalloc(&dInfo, sizeof(int)) == cudaSuccess);
-      GRID_ASSERT(cudaMemcpy(dA, H.data(), sizeof(cuDoubleComplex) * (size_t)dim * dim,
-                             cudaMemcpyHostToDevice) == cudaSuccess);
-      int lwork = 0;
-      GRID_ASSERT(cusolverDnZheevd_bufferSize(cus, CUSOLVER_EIG_MODE_NOVECTOR,
-                  CUBLAS_FILL_MODE_LOWER, dim, dA, dim, dW, &lwork)
-                  == CUSOLVER_STATUS_SUCCESS);
-      cuDoubleComplex *dWork;
-      GRID_ASSERT(cudaMalloc(&dWork, sizeof(cuDoubleComplex) * (size_t)lwork) == cudaSuccess);
-      GRID_ASSERT(cusolverDnZheevd(cus, CUSOLVER_EIG_MODE_NOVECTOR,
-                  CUBLAS_FILL_MODE_LOWER, dim, dA, dim, dW, dWork, lwork, dInfo)
-                  == CUSOLVER_STATUS_SUCCESS);
-      int info = -1;
-      GRID_ASSERT(cudaMemcpy(&info, dInfo, sizeof(int), cudaMemcpyDeviceToHost) == cudaSuccess);
-      GRID_ASSERT(info == 0);
-      GRID_ASSERT(cudaMemcpy(evals.data(), dW, sizeof(double) * dim,
-                             cudaMemcpyDeviceToHost) == cudaSuccess);
-      cudaFree(dA); cudaFree(dW); cudaFree(dInfo); cudaFree(dWork);
-#else
-      std::cout << GridLogError << "non-CUDA build: no dense eigensolver" << std::endl;
-      abort();
-#endif
-
-      // evals ascending from Zheevd.  Kramers-pair check + counts.
-      int n_neg = 0;
-      double min_abs = 1e300, logabsdet = 0.0;
-      for (int i = 0; i < dim; ++i) {
-        if (evals[i] < 0) ++n_neg;
-        min_abs = std::min(min_abs, std::abs(evals[i]));
-        logabsdet += std::log(std::abs(evals[i]));
-      }
-      double pair_split_max = 0.0;
-      for (int i = 0; i + 1 < dim; i += 2) {
-        double s = std::abs(evals[i] - evals[i + 1]) /
-                   std::max(std::abs(evals[i]), 1e-300);
-        pair_split_max = std::max(pair_split_max, s);
-      }
+      const DenseSpec base = dense_spec(U);
+      const int    n_neg = base.n_neg;
+      const double min_abs = base.min_abs, logabsdet = base.logabsdet;
+      const double pair_split_max = base.pair_split_max, herm_max = base.herm_max;
       const bool n_neg_even = (n_neg % 2) == 0;
-      const int  sgn = ((n_neg / 2) % 2) ? -1 : +1;
+      const int  sgn = base.sgn;
+
+      if (flip_moves) {
+        // eta(X) per move: does the move flip signPf on THIS config, and what
+        // is the Metropolis log-ratio dlad = log|det(T(X))| - log|det(X)|
+        // (S_aux exactly invariant for both moves; accept = min(1, e^{dlad/2})).
+        DTXQCDField W(&Grid);
+        W.U = U.U;
+        for (int m = 0; m < 2; ++m) {
+          W.sigma = U.sigma; W.pi = U.pi; W.d = U.d;
+          W.n = U.n; W.s = U.s; W.p = U.p;
+          const char *mname = m ? "negate_sigma" : "s_tslice0";
+          if (m) mv_negate_sigma(W); else mv_s_tslice0(W);
+          const DenseSpec r = dense_spec(W);
+          std::cout << GridLogMessage << "[lam=" << lambda << " draw " << d
+                    << " FLIP " << mname << "]"
+                    << "  eta=" << std::showpos << r.sgn * base.sgn
+                    << std::noshowpos
+                    << "  d_nneg=" << (r.n_neg - base.n_neg)
+                    << "  dlad=" << (r.logabsdet - base.logabsdet)
+                    << "  min|eval|=" << r.min_abs
+                    << std::endl;
+        }
+      }
       if (d == 0) sign_first = sgn;
       if (sgn != sign_first) ++nflip;
       sgn_hist.push_back(sgn);
-      lad_hist.push_back(logabsdet);
+      lad_hist.push_back(logabsdet - 2.0 * dS);  // log(|det| e^{-2dS}): |Pf|e^{-dS} = exp(1/2 of this)
 
       // EO factorization of the sign: full = (even-site-local product) x (Schur).
       int bad_parity = 0;
@@ -321,6 +420,8 @@ int main(int argc, char **argv) {
                 << (bad_parity ? "  (SITE ODD PARITY!)" : "")
                 << "  min|eval|=" << min_abs
                 << "  logabsdet=" << logabsdet
+                << "  S_aux=" << S_x
+                << "  dS=" << dS
                 << "  pair_split_max=" << pair_split_max
                 << "  herm_check=" << herm_max
                 << std::endl;

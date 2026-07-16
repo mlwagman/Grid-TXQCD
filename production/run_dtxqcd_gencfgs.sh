@@ -72,6 +72,11 @@ DTXQCD_RATFORCE_GPU="${DTXQCD_RATFORCE_GPU:-1}"
 # Grid/MP-CG path; =1 routes the EO rational's refresh/S/deriv multishifts
 # through the device-resident Schur op (gates 1-4 green 2026-07-02).
 DTXQCD_MULTISHIFT_QUDA="${DTXQCD_MULTISHIFT_QUDA:-}"
+# Traceless sigma/pi + (3/7) lambda^2 s,p prior (commit 96a6d1ef): integrates
+# out the fermion-blind trace mode exactly (dynamical equivalence verified at
+# lambda=10 over 3 masses).  Unset = legacy action.  NOT checkpoint-compatible
+# across the flip: restart streams fresh when enabling.
+DTXQCD_TRACELESS_AUX="${DTXQCD_TRACELESS_AUX:-}"
 # Mixed-precision multishift CG for the light rational PF (validated 2026-06-23,
 # dH bit-equivalent at cfg.10000 lam=10; per-traj ~17% faster on top of fwdcache).
 DTXQCD_MP_CG="${DTXQCD_MP_CG:-1}"
@@ -163,6 +168,7 @@ srun --overlap --mpi=pmix -N 1 -n "$NTASKS" --cpu-bind=none --gres=gpu:"$NTASKS"
       DTXQCD_MP_CG_CLEANUP="$DTXQCD_MP_CG_CLEANUP" \
       DTXQCD_RATFORCE_GPU="$DTXQCD_RATFORCE_GPU" \
       ${DTXQCD_MULTISHIFT_QUDA:+DTXQCD_MULTISHIFT_QUDA="$DTXQCD_MULTISHIFT_QUDA"} \
+      ${DTXQCD_TRACELESS_AUX:+DTXQCD_TRACELESS_AUX="$DTXQCD_TRACELESS_AUX"} \
       INTEGRATOR="$INTEGRATOR" MDSTEPS="$MDSTEPS" TRAJL="$TRAJL" \
       GAUGE_MULT="$GAUGE_MULT" AUX_MULT="$AUX_MULT" \
       TRAJ="$TRAJ" N_SKIP="$N_SKIP" CG_TOL="$CG_TOL" \

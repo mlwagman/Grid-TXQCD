@@ -508,4 +508,138 @@ inline void RunEigDiagDtxqcd(DTXQCDWilsonCloverFermionEO &Dw, GridBase *grid,
                                          evals_M2, evals_g5M, p.Nev);
 }
 
+// ===========================================================================
+// Deflation basis for the doubled operator (2026-07-06, aux-loop estimator
+// v2).  Same Chebyshev-filtered Lanczos as RunEigDiagDtxqcd, but KEEPS the
+// low subspace and returns proper signed gamma5.M48 eigenpairs:
+//   1. Lanczos on Filter(MdagM) -> Krylov basis V, tridiagonal Ritz.
+//   2. Top-Nev Ritz vectors u_r of the filter (= smallest MdagM subspace).
+//      MdagM = (g5 M)^2 eigenspaces are degenerate across the +-lambda and
+//      Kramers partners, so u_r are arbitrary mixtures within them.
+//   3. Rayleigh-Ritz on g5M in span{u_r}: G_rs = <u_r, g5M u_s> (K x K
+//      Hermitian, Eigen), rotate v_a = sum_r u_r W_ra -> orthonormal signed
+//      eigenpairs (lambda_a, v_a), sorted by |lambda| ascending, with
+//      residuals ||g5M v - lambda v|| reported.
+// The subspace inverse used for deflation is M^-1_low = sum_a lambda_a^-1
+// v_a (g5 v_a)^dag (from g5M v = lambda v).  NOTE unbiasedness: estimators
+// that ADD tr[Gamma M^-1_low] exactly and SUBTRACT the same M^-1_low from the
+// stochastic remainder are exact for ANY vectors -- unconverged modes only
+// cost variance, never bias.
+// Memory: Nm Krylov + Nev Ritz doubled vectors at ~151 MB each on 16^3x48
+// (Nm=160, Nev=100 -> ~39 GB, host-resident via the Grid memory manager; the
+// K^2 rotation is ~10k doubled-field axpys, minutes-scale -- amortized once
+// per config against O(30) solves).
+// ===========================================================================
+struct DtxqcdDeflationBasis {
+  std::vector<DTXQCDFermionDoubled> vecs;   // orthonormal g5M48 eigenvectors
+  std::vector<RealD> evals;                 // signed g5M48 eigenvalues
+  std::vector<RealD> resids;                // ||g5M v - lambda v|| per mode
+};
+
+inline void RunEigDeflationBasisDtxqcd(DTXQCDWilsonCloverFermionEO &Dw,
+                                       GridBase *grid, GridParallelRNG &pRNG,
+                                       const EigDiagParams &p,
+                                       DtxqcdDeflationBasis &out) {
+  EigDtxqcdMdagM MdagM(Dw);
+  EigDtxqcdG5M   G5M(Dw);
+  RealD lmax = EigPowerIterMaxEval<DTXQCDFermionDoubled>(MdagM, pRNG, grid, 30);
+  RealD hi = std::max(p.cheby_hi, 1.2 * lmax);
+  std::cout << GridLogMessage
+            << "[eig_defl DTXQCD] lambda_max(M^dag M)_est=" << lmax
+            << "  cheby=[" << p.cheby_lo << "," << hi << "] ord=" << p.cheby_ord
+            << " Nm=" << p.Nm << " Nev=" << p.Nev << std::endl;
+  EigChebFilter<DTXQCDFermionDoubled> Filter(MdagM, p.cheby_lo, hi, p.cheby_ord);
+
+  // ---- Lanczos, keeping the Krylov basis ----
+  const int Nm = p.Nm;
+  std::vector<DTXQCDFermionDoubled> V; V.reserve(Nm);
+  for (int i = 0; i < Nm; ++i) V.emplace_back(grid);
+  std::vector<RealD> alpha(Nm, 0.0), beta(Nm, 0.0);
+  DTXQCDFermionDoubled w(grid), tmp(grid);
+  eig_random_field(pRNG, V[0]);
+  eig_scale_ip(V[0], 1.0 / std::sqrt(norm2(V[0])));
+  int k_done = 0;
+  for (int k = 0; k < Nm; ++k) {
+    Filter(V[k], w);
+    if (k > 0) eig_axpy_ip(w, ComplexD(-beta[k - 1], 0), V[k - 1]);
+    alpha[k] = innerProduct(V[k], w).real();
+    eig_axpy_ip(w, ComplexD(-alpha[k], 0), V[k]);
+    for (int pass = 0; pass < 2; ++pass)
+      for (int j = 0; j <= k; ++j) {
+        ComplexD c = innerProduct(V[j], w);
+        eig_axpy_ip(w, -c, V[j]);
+      }
+    beta[k] = std::sqrt(norm2(w));
+    k_done = k + 1;
+    if (beta[k] < 1e-12) break;
+    if (k + 1 < Nm) {
+      eig_copy_field(V[k + 1], w);
+      eig_scale_ip(V[k + 1], 1.0 / beta[k]);
+    }
+  }
+  Eigen::MatrixXd T = Eigen::MatrixXd::Zero(k_done, k_done);
+  for (int i = 0; i < k_done; ++i) {
+    T(i, i) = alpha[i];
+    if (i + 1 < k_done) { T(i + 1, i) = beta[i]; T(i, i + 1) = beta[i]; }
+  }
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
+  auto tvecs = es.eigenvectors();
+
+  // ---- Top-Nev Ritz vectors of the filter ----
+  const int K = std::min(p.Nev, k_done);
+  std::vector<DTXQCDFermionDoubled> U; U.reserve(K);
+  for (int r = 0; r < K; ++r) {
+    U.emplace_back(grid);
+    U[r] = Zero();
+    const int idx = k_done - 1 - r;   // largest filter eval = smallest MdagM
+    for (int j = 0; j < k_done; ++j)
+      eig_axpy_ip(U[r], ComplexD(tvecs(j, idx), 0), V[j]);
+    // Modified Gram-Schmidt for safety, then normalize.
+    for (int s = 0; s < r; ++s) {
+      ComplexD c = innerProduct(U[s], U[r]);
+      eig_axpy_ip(U[r], -c, U[s]);
+    }
+    eig_scale_ip(U[r], 1.0 / std::sqrt(norm2(U[r])));
+  }
+  V.clear();  // release Krylov memory before the rotation
+
+  // ---- Rayleigh-Ritz on g5M in span{U} ----
+  // G is Hermitian; build with std::complex (thrust-safe via .real()/.imag()).
+  Eigen::MatrixXcd G = Eigen::MatrixXcd::Zero(K, K);
+  for (int s = 0; s < K; ++s) {
+    G5M(U[s], w);
+    for (int r = 0; r < K; ++r) {
+      ComplexD c = innerProduct(U[r], w);
+      G(r, s) = std::complex<double>(c.real(), c.imag());
+    }
+  }
+  G = 0.5 * (G + G.adjoint().eval());   // enforce exact Hermiticity
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> esg(G);
+  Eigen::VectorXd lam = esg.eigenvalues();
+  Eigen::MatrixXcd W = esg.eigenvectors();
+
+  // Sort modes by |lambda| ascending (deflation wants the near-zero modes).
+  std::vector<int> order(K);
+  for (int i = 0; i < K; ++i) order[i] = i;
+  std::sort(order.begin(), order.end(),
+            [&](int a, int b) { return std::abs(lam(a)) < std::abs(lam(b)); });
+
+  out.vecs.clear(); out.evals.clear(); out.resids.clear();
+  out.vecs.reserve(K);
+  for (int rank = 0; rank < K; ++rank) {
+    const int a = order[rank];
+    out.vecs.emplace_back(grid);
+    DTXQCDFermionDoubled &v = out.vecs.back();
+    v = Zero();
+    for (int r = 0; r < K; ++r) {
+      const std::complex<double> wc = W(r, a);
+      eig_axpy_ip(v, ComplexD(wc.real(), wc.imag()), U[r]);
+    }
+    G5M(v, w);
+    eig_axpy_ip(w, ComplexD(-lam(a), 0), v);
+    out.evals.push_back(lam(a));
+    out.resids.push_back(std::sqrt(norm2(w)));
+  }
+}
+
 }  // namespace TXQCDProduction

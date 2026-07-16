@@ -52,6 +52,7 @@
 #endif
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
+#include "dtxqcd_sign_hop.h"  // 4^4 sign-sector hop heatbath + exact signPf record
 
 using namespace TXQCDProduction;
 
@@ -714,11 +715,27 @@ int main(int argc, char **argv) {
   const RealD parity_heatbath_prob =
       TXQCDProduction::detail::env_real("DTXQCD_PARITY_HEATBATH_PROB", 0.0);
   DTXQCDParityHeatbath parity_heatbath(parity_heatbath_prob);
+  // 4^4 sign-sector hop heatbath (task 2026-07-04): DTXQCD_SIGN_HOP_PROB>0
+  // enables the s_tslice0/negate_sigma Metropolis hops + exact per-traj
+  // signPf record ([SIGNHOP] lines).  Dense gamma5.M48 spectrum per traj:
+  // SMALL VOLUMES + single rank ONLY (ctor asserts).  Before the checkpointer
+  // so saved configs reflect post-hop state.
+  const RealD sign_hop_prob =
+      TXQCDProduction::detail::env_real("DTXQCD_SIGN_HOP_PROB", 0.0);
+  std::unique_ptr<DTXQCDSignHop4t4Observer> sign_hop;
   std::vector<HmcObservable<DTXQCDField> *> Obs;
   if (parity_heatbath_prob > 0.0) {
     std::cout << GridLogMessage << "[DTXQCDParityHeatbath] ENABLED  prob="
               << parity_heatbath_prob << std::endl;
     Obs.push_back(&parity_heatbath);
+  }
+  if (sign_hop_prob > 0.0) {
+    std::cout << GridLogMessage << "[SIGNHOP] ENABLED  prob=" << sign_hop_prob
+              << "  (dense signPf record every traj)" << std::endl;
+    sign_hop = std::make_unique<DTXQCDSignHop4t4Observer>(
+        Grid, RBGrid, mass, csw_, sign_hop_prob,
+        stout_nsmear_inv, stout_rho_inv);
+    Obs.push_back(sign_hop.get());
   }
   Obs.push_back(&ckpt);
   Obs.push_back(&diag);
