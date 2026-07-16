@@ -439,6 +439,12 @@ int main(int argc, char **argv) {
     DtxqcdPackDoubled(Vl[i], AggL.subspace[i]);
     AggL.subspace[i].Checkerboard() = Even;
   }
+  // The struct copies are now redundant — at nb48 they duplicate 7.2 GB of
+  // basis residency and were the 75 MB-short OOM at solve start.
+  Vr.clear();
+  Vr.shrink_to_fit();
+  Vl.clear();
+  Vl.shrink_to_fit();
   // Schur footprint is distance-2 in FINE sites: with t-blocks of 2, a
   // (x+-1, t+-1) fine hop crosses a coarse CORNER — nearest geometry
   // truncates it (measured: S2 consistency 0.12).  Default nnn (81-point,

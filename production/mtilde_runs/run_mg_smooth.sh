@@ -21,5 +21,6 @@ srun --overlap --mpi=pmix -N 1 -n 1 --cpu-bind=none \
       BLOCK=${BLOCK:-4.4.4.2} SMOOTH_IT=8 COARSE_DIRECT=1 \
       NV_BOOTSTRAP=0 \
       CG_TOL=1e-7 MG_MAXIT=3000 RUN_BASELINE=0 \
+      PGCR_MMAX=${MMAX:-16} PGCR_NSTEP=${MMAX:-16} \
   $BIN --grid 16.16.16.48 --mpi 1.1.1.1 \
   --shm 512 --shm-mpi 1
