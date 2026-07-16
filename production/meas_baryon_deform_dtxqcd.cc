@@ -303,9 +303,28 @@ int main(int argc, char **argv) {
   LatticeInteger tc(&Grid);
   LatticeCoordinate(tc, Nd - 1);
   int prof_t0 = (prof_t0_fixed >= 0) ? prof_t0_fixed : 0;
+  // PROFILE=tent_rounded (PROFILE_W half-width, default 4 slices): the
+  // tent apex is a mu-DOMAIN WALL (gradient sign flip) binding the
+  // t-localized near-zero mode that gates every eta=0.8 solver (the
+  // deform-MG campaign's terminal diagnosis).  A quadratic apex spreads
+  // the flip into a linear mu crossing: the bound state LIFTS and WIDENS.
+  // Grading sacrifice: p_max drops by w/2 at the source ANTIPODE only —
+  // the correlator's least-signal region; the SOURCE-side kink stays
+  // sharp (that is where the S/N benefit lives).  This lambda feeds the
+  // hop weights, the G masks, SetProfile, AND the baked correlator
+  // grading — one definition, all consumers.
+  const double prof_w = env_real("PROFILE_W", 4.0);
+  const bool prof_rounded = env_str("PROFILE", "tent") == "tent_rounded";
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
-    return tent ? (double)std::min(dt, T - dt) : (double)dt;
+    if (!tent) return (double)dt;
+    const double d = (double)dt;
+    const double tentv = std::min(d, (double)T - d);
+    if (!prof_rounded) return tentv;
+    const double a = std::abs(d - 0.5 * T);
+    if (a >= prof_w) return tentv;
+    // parabola matched to slope +-1 at |d - T/2| = w
+    return 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
   };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;

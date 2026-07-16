@@ -164,9 +164,19 @@ int main(int argc, char **argv) {
 #endif
   DtxqcdDeformQuda Qdef(Hop, Grid, Usm, T);
 
+  // PROFILE=tent_rounded (PROFILE_W half-width): quadratic apex — see
+  // meas_baryon_deform_dtxqcd.cc for the mu-domain-wall rationale.
+  const double prof_w = env_real("PROFILE_W", 4.0);
+  const bool prof_rounded = env_str("PROFILE", "tent") == "tent_rounded";
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
-    return tent ? (double)std::min(dt, T - dt) : (double)dt;
+    if (!tent) return (double)dt;
+    const double d = (double)dt;
+    const double tentv = std::min(d, (double)T - d);
+    if (!prof_rounded) return tentv;
+    const double a = std::abs(d - 0.5 * T);
+    if (a >= prof_w) return tentv;
+    return 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
   };
 
   PackedDeformNormalOp NOp(Qdef, Grid);
