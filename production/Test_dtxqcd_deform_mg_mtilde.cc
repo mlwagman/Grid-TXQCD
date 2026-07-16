@@ -345,7 +345,14 @@ int main(int argc, char **argv) {
   // near-kernel), V = right near-kernel.  Nearest coarse geometry covers
   // the distance-2 Schur footprint for blocks >= 2 in every dimension.
   //////////////////////////////////////////////////////////////////////
-  constexpr int NB = 16;
+  // Compile-time basis size (Aggregation template).  Build variants via
+  // -DMTILDE_NB=32/48 (Makefile: Test_dtxqcd_deform_mg_mtilde_nb{32,48}).
+  // NB the dense coarse LU is (sites*NB)^2: pair larger NB with coarser
+  // BLOCK (nb32/nb48 @ 4.4.4.4 -> N=24,576/36,864 -> 9.7/21.7 GB on GPU 1).
+#ifndef MTILDE_NB
+#define MTILDE_NB 16
+#endif
+  constexpr int NB = MTILDE_NB;
   GRID_ASSERT(nv == NB && "prototype instantiates Aggregation at nbasis=16");
   Coordinate block = parse_dotted(env_str("BLOCK", "4.4.4.2"),
                                   Coordinate(std::vector<int>{4, 4, 4, 2}));

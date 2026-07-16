@@ -292,6 +292,24 @@ Test_dtxqcd_deform_mg_mtilde: Test_dtxqcd_deform_mg_mtilde.o \
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
+Test_dtxqcd_deform_mg_mtilde_nb32.o: Test_dtxqcd_deform_mg_mtilde.cc \
+  params.h dtxqcd_meas_helper.h dtxqcd_deform_quda.h
+	$(CXX) $(CXXFLAGS) -DMTILDE_NB=32 -c -o $@ $<
+
+Test_dtxqcd_deform_mg_mtilde_nb32: Test_dtxqcd_deform_mg_mtilde_nb32.o \
+  $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde_nb32.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
+Test_dtxqcd_deform_mg_mtilde_nb48.o: Test_dtxqcd_deform_mg_mtilde.cc \
+  params.h dtxqcd_meas_helper.h dtxqcd_deform_quda.h
+	$(CXX) $(CXXFLAGS) -DMTILDE_NB=48 -c -o $@ $<
+
+Test_dtxqcd_deform_mg_mtilde_nb48: Test_dtxqcd_deform_mg_mtilde_nb48.o \
+  $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_deform_mg_mtilde_nb48.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 # TXQCD Wilson-vs-Mobius(naive Delta) sign probe -- same dense cuSOLVER
 # machinery as the DTXQCD sibling.
 Test_txqcd_sign_aux_draws.o: Test_txqcd_sign_aux_draws.cc

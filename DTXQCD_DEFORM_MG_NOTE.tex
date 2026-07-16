@@ -1,0 +1,151 @@
+% DTXQCD deformed-contour solver note: profile design + the M~ multigrid
+% scheme + mode-localization diagnostics.  For inclusion in the final
+% writeup.  Numbers: 16^3x48, lambda=5 tla stream, traj 300, CG_TOL=1e-7,
+% single A100 per solve (dense coarse on a second A100).  2026-07-16.
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,booktabs}
+\usepackage[margin=1.1in]{geometry}
+\newcommand{\Mt}{\widetilde{M}}
+\newcommand{\muc}{\mu_c}
+\title{Solvers for the $\eta$-deformed DTXQCD contour:\\
+profile design and a Petrov--Galerkin multigrid for $\Mt$}
+\author{M.~Wagman (with Claude)}
+\date{July 16, 2026}
+\begin{document}
+\maketitle
+
+\section{Setup}
+The graded contour deformation multiplies the doubled auxiliary couplings by
+$e^{\mp\eta\,p(t)}$, which in the chemical-potential frame is exactly a
+per-timeslice weighting of the temporal hops of the doubled Wilson operator:
+$w_f(t)=e^{-\eta\,\Delta p(t)/2}$ on forward hops (reciprocal backward and on
+the conjugate block), i.e.\ an effective chemical potential
+$\mu(t)=\eta\,p'(t)$ on the charge-conjugate block.  Measurement solves
+invert the even--odd Schur complement $\Mt_{\rm pc}$ of the deformed doubled
+operator; the correlator carries the analytic grading factor
+$e^{-\eta[p(t_k)-p(t_s)]}$, verified to factorize from an
+$\eta$-independent core at the $1$--$2\%$ level across
+$\eta=0.2$--$0.6$ (envelope collapse; same configuration and source).
+
+\section{Mode localization: two mechanisms, two diagnostics}
+
+\subsection{Gradient-sign flips bind wall modes (ramp profiles)}
+Every sign flip of $p'(t)$ is a $\mu$-domain wall.  For the tent profile
+$p=\min(t,T{-}t)$ there are two: the apex ($+\eta\to-\eta$) and the source
+trough ($-\eta\to+\eta$).  Each binds a near-zero quasiparticle of one
+grading block --- a \emph{degenerate pair} (apex: upper block; trough:
+conjugate block).  Diagnostics that established the localization:
+\begin{itemize}
+\item \textbf{Adaptive-setup support collapse.}  Refining multigrid null
+vectors through the solver concentrated their weight onto the wall slices;
+in far blocks the remaining round-off support was renormalized to $O(1)$
+noise by block orthogonalisation and the coarse correction injected it
+volume-wide (solve residual diverged to $6\times10^6$ with a
+well-conditioned coarse matrix).  Mixing refinements ($v\to v+z/\|z\|$)
+restored stability --- the signature of modes narrower than the block.
+\item \textbf{Source orthogonality with block structure.}  Wall-source
+overlaps with the deep modes are $\lesssim10^{-6}$: the apex mode is
+spatially separated from the source; the trough mode sits \emph{on} the
+source slice but in the conjugate-block components.
+\item \textbf{Rounding response.}  Quadratic rounding of half-width $w$ at
+both walls lifts the pair: CG iterations at $\eta=0.8$ fall
+$59{,}931\to 54{,}889/37{,}196/8{,}307/2{,}435$ for $w=2/4/8/12$; rounding
+the apex alone leaves $\sigma_{\min}$ pinned at the trough state
+($\times1.6$ lift only).  The sharp-tent ``onset edge'' at
+$\eta\simeq0.85$ (a $\times66$ collapse of $\sigma_{\min}$ per
+$\Delta\eta=0.05$) is \emph{wall physics}: the rounded profile passes
+through it, reaching $\eta=0.9$ at $3{,}934$ iterations.
+\end{itemize}
+
+\subsection{Supercritical stretches bind extended modes (smooth profiles)}
+With walls removed the remaining constraint is \emph{bulk} criticality:
+wherever $|\mu(t)|=\eta|p'(t)|>\muc\simeq0.85$ over a stretch longer than
+the quasiparticle formation length, near-zero modes form in that window.
+Diagnostics:
+\begin{itemize}
+\item The cosine profile $p=(T/4)(1-\cos 2\pi t/T)$ (both walls maximally
+smooth, full range $p_{\max}=T/2$, peak slope $\pi/2$) is clean while
+subcritical ($756/1{,}149/2{,}113/5{,}204$ iterations at
+$\eta=0.2/0.3/0.4/0.5$) but at $\eta=0.6$ ($\mu_{\max}=0.94$) costs
+$26{,}761$ --- six times \emph{worse} than the sharp tent at equal
+$\eta$ --- with no wall anywhere: the modes live in the supercritical
+mid-regions.
+\item For the rounded tent, $\mu$ is a triangle wave and the supercritical
+exposure is $\Delta t = 2w(1-\muc/\eta)$ slices.  The iteration count
+along $\eta=0.9\to1.2$ at $w=12$ ($3{,}934/7{,}074/16{,}683/49{,}639$)
+ignites as $\Delta t$ crosses the formation length ($\sim$ few slices) ---
+an accelerating exponential, not a cliff, because the exposure is tunable.
+\item The multigrid window-volume law below.
+\end{itemize}
+
+\noindent\textbf{Design rules} (measured): (i) keep
+$\eta\,|p'(t)|\lesssim\muc$ everywhere; (ii) make gradient sign flips
+smooth; (iii) subject to these, reach ($=\eta\times$ the profile
+differential) is maximized by bang-bang slope saturation --- the rounded
+tent family; the cosine spends its criticality budget on a slope peak.
+Rounded-tent differential: $\eta\,(T/2-(w_{\rm apex}+w_{\rm src})/2)$;
+the trough width is not reducible at deep $\eta$
+($w_{\rm src}\!:12\to8$ costs $\times2.4$ at $\eta=0.9$).
+
+\section{The multigrid scheme}
+Two-level Petrov--Galerkin multigrid on $\Mt_{\rm pc}$ \emph{itself}
+(never the normal operator: $\kappa$ un-squared, and eigenvector rather
+than singular-vector transfer --- the normal-operator route fails at every
+blocking).
+\begin{itemize}
+\item \textbf{Right basis} $V$: $n_b$ inverse iterations
+$v_i=\Mt^{-1}r_i$ at loose tolerance ($10^{-3}$, a few hundred CGNR
+iterations each), blocked over $4^3\times2$ (or $4^4$) sites with all 48
+internal components kept per site.
+\item \textbf{Left basis for free}: the deformed operator obeys the
+quasi-$\gamma_5$ identity
+$\Gamma_5\,\Mt(\eta)\,\Gamma_5=\Mt(-\eta)^\dagger$ (machine-exact,
+$4\times10^{-16}$, for every profile tested --- the dagger implementation
+\emph{is} the weight-reciprocal toggle).  Hence left null vectors are
+$u_i=\Gamma_5\,\Mt(-\eta)^{-1}r'_i$: no separate left-space machinery.
+\item \textbf{Coarse operator} $A_c=U^\dagger \Mt V$ via Grid's native
+two-subspace \texttt{CoarsenOperator} (phase-probe reconstruction;
+81-point coarse geometry is required --- the Schur distance-2 footprint
+crosses coarse corners; the stored coarse links are index-transposed,
+calibrated against the operator to $10^{-15}$).
+\item \textbf{Exact coarse solve}: $A_c$ ($N=24{,}576$ at $n_b=16$) is
+LU-factored dense with \texttt{cusolverDnZgetrf} on a second GPU
+($\sim20$\,s once per configuration and profile); each V-cycle correction
+is a $\sim$ms \texttt{getrs}.  This removes the inner-solver variable
+entirely (restarted GMRES does not converge on the inherited-band coarse
+system).
+\item \textbf{Cycle}: minimal-residual smoothing (8 iterations,
+non-Hermitian $z\mathrel{+}=\alpha r$, $\alpha=\langle Ar,r\rangle/\|Ar\|^2$)
+before and after the coarse correction; flexible non-Hermitian PGCR
+outer.
+\end{itemize}
+
+\noindent\textbf{Performance} at the production-relevant point
+(differential $14.4$): cosine $\eta=0.6$ + MG $=5{,}187$ fine operator
+applications ($74$\,s/solve), vs.\ $53{,}522$ for CGNR on the same system
+($10.3\times$) and vs.\ $8{,}958$ for the best plain-CG operating point
+(sharp tent $\eta=0.6$): a $1.7\times$ net win with headroom in reach that
+no sharp profile possesses.  Setup ($\sim6$\,min) amortizes over the
+$\sim192$ solves per configuration.
+
+\medskip
+\noindent\textbf{Window-volume law.}  At $n_b=16$ the coarse space holds
+the supercritical band up to $\sim6$ slices of $|\mu|>\muc$: cosine
+$\eta=0.6$ ($\sim6$ slices) converges; $\eta=0.7$ ($\sim13$) and $0.8$
+($\sim17$) stall; the rounded tent at $\eta=1.2$ (a 7-slice triangle
+peak) converges slowly.  Whether $n_b$ scales the law (dial vs.\ wall) is
+the one open solver question at the time of writing ($n_b=32/48$ runs in
+flight).
+
+\section{Bottom line}
+Relative to the original Grid-sandwich deformed solves, the combined
+kernel + even--odd + profile + multigrid program delivers
+$\sim25$--$30\times$ at small $\eta$, converts $\eta\geq0.8$ from
+unconvergeable to routine ($\eta=0.9$: $\sim2$ min/solve), and at matched
+grading reach the smooth-profile multigrid beats every plain-CG operating
+point.  The correlator inherits the profile grading analytically, so the
+choice of profile is purely a (solver cost) $\times$ (SNR reach)
+optimization --- with the cosine profile at $\eta\simeq0.6$--$0.75$
+tangent to the ideal $\eta=0.9$ decay rate of the propagator part, the
+remaining gap to SNR-ideal is the $n_b$-scaling question.
+\end{document}
