@@ -290,63 +290,8 @@ int main(int argc, char **argv) {
   const int nv = env_int("NV_NEV", 16);
   const RealD nv_tol = env_real("NV_TOL", 0.1);
   const int nv_maxit = env_int("NV_MAXIT", 20000);
-  std::vector<F> Vr, Vl;
-  std::cout << GridLogMessage << "[mtilde] generating " << nv
-            << " right + " << nv << " left near-kernel vectors (invit tol "
-            << nv_tol << ")" << std::endl;
-  for (int i = 0; i < nv; ++i) {
-    F r(&RBGrid), x(&RBGrid);
-    Fgaussian(pRNG, &Grid_, &RBGrid, r);
-    RealD rel = 0;
-    // right: M~(eta)^{-1} r
-    Fzero(x, Odd);
-    int it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
-    RealD xn = std::sqrt(Fnorm2(x));
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      x.upper.f[a] = x.upper.f[a] * (1.0 / xn);
-      x.lower.f[a] = x.lower.f[a] * (1.0 / xn);
-    }
-    F Mx(&RBGrid);
-    Qdef.MpcTil(x, Mx);
-    std::cout << GridLogMessage << "[mtilde] right nv[" << i
-              << "]: invit iters=" << it << "  |M~v|/|v|="
-              << std::sqrt(Fnorm2(Mx)) << std::endl;
-    Vr.push_back(x);
-    // left: G5 M~(-eta)^{-1} r'
-    Fgaussian(pRNG, &Grid_, &RBGrid, r);
-    Fzero(x, Odd);
-    SetProf(-eta);
-    it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
-    SetProf(eta);
-    xn = std::sqrt(Fnorm2(x));
-    F g5x(&RBGrid);
-    for (int a = 0; a < DtxqcdNf; ++a) {
-      x.upper.f[a] = x.upper.f[a] * (1.0 / xn);
-      x.lower.f[a] = x.lower.f[a] * (1.0 / xn);
-    }
-    Gamma5All(x, g5x);
-    // gate the identity in anger: |M~(eta)^dag g5x| should equal the
-    // right-style residual of the recip solve (small)
-    Qdef.MpcTilDag(g5x, Mx);
-    std::cout << GridLogMessage << "[mtilde] left  nv[" << i
-              << "]: invit iters=" << it << "  |M~dag u|/|u|="
-              << std::sqrt(Fnorm2(Mx)) << std::endl;
-    Vl.push_back(g5x);
-  }
-  std::cout << GridLogMessage
-            << "[mtilde] Step 0-1 complete; Petrov-Galerkin coarsening next"
-            << std::endl;
-
-  //////////////////////////////////////////////////////////////////////
-  // Step 2: Petrov-Galerkin coarsening of M~ itself.  Grid's
-  // GeneralCoarsenedMatrix::CoarsenOperator(linop, U, V) is NATIVELY
-  // Petrov-Galerkin (probes linop.Op against V's phased subspace,
-  // projects with U): A_c = U^dag M~ V with U = left basis (G5 x recip
-  // near-kernel), V = right near-kernel.  Nearest coarse geometry covers
-  // the distance-2 Schur footprint for blocks >= 2 in every dimension.
-  //////////////////////////////////////////////////////////////////////
   // Compile-time basis size (Aggregation template).  Build variants via
-  // -DMTILDE_NB=32/48 (Makefile: Test_dtxqcd_deform_mg_mtilde_nb{32,48}).
+  // -DMTILDE_NB=32/48/128 (Makefile: Test_dtxqcd_deform_mg_mtilde_nb*).
   // NB the dense coarse LU is (sites*NB)^2: pair larger NB with coarser
   // BLOCK (nb32/nb48 @ 4.4.4.4 -> N=24,576/36,864 -> 9.7/21.7 GB on GPU 1).
 #ifndef MTILDE_NB
@@ -369,7 +314,134 @@ int main(int argc, char **argv) {
   typedef Aggregation<vDtxqcdPackedVector, vTComplex, NB> Subspace;
   std::cout << GridLogMessage << "[mtilde] coarse=" << clatt << " nbasis="
             << NB << std::endl;
+  // Aggregates constructed BEFORE the generation loop so each vector is
+  // packed the moment it exists — keeping the struct basis (2*NB fields)
+  // resident until a later pack loop was a 19.3 GB duplication at nb128
+  // (OOM at pack start, 2026-07-16); at no point below do two copies of
+  // the basis coexist.
+  Subspace AggR(&Coarse4d, &RBGrid, Odd), AggL(&Coarse4d, &RBGrid, Odd);
+  std::cout << GridLogMessage << "[mtilde] generating " << nv
+            << " right + " << nv << " left near-kernel vectors (invit tol "
+            << nv_tol << ")" << std::endl;
+  // Production-vs-standalone NV discriminators (2026-07-16 stall hunt):
+  // the header's Setup differs from this file's validated recipe in exactly
+  // two ways — flip each here in isolation to find which kills the solve.
+  // NV_RHS_FULL=1: right vectors from a FULL-grid gaussian src through
+  // SolveTilEO's genuine Schur prep (the header semantics) instead of the
+  // RB-allocated struct quirk this file validated with.
+  // NV_LEFT_DAG=1: left vectors by dagger-CGNR on Mpc~ (header semantics)
+  // instead of G5 x the recip-profile solve.
+  const int nv_rhs_full = env_int("NV_RHS_FULL", 0);
+  const int nv_left_dag = env_int("NV_LEFT_DAG", 0);
+  for (int i = 0; i < nv; ++i) {
+    F r(&RBGrid), x(&RBGrid);
+    RealD rel = 0;
+    int it = 0;
+    if (nv_rhs_full) {
+      F rf(&Grid_), xf(&Grid_);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        gaussian(pRNG, rf.upper.f[a]);
+        gaussian(pRNG, rf.lower.f[a]);
+        xf.upper.f[a] = Zero();
+        xf.lower.f[a] = Zero();
+      }
+      it = Qdef.SolveTilEO(rf, xf, nv_tol, nv_maxit, rel);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        pickCheckerboard(Odd, x.upper.f[a], xf.upper.f[a]);
+        pickCheckerboard(Odd, x.lower.f[a], xf.lower.f[a]);
+      }
+    } else {
+      Fgaussian(pRNG, &Grid_, &RBGrid, r);
+      // right: M~(eta)^{-1} r
+      Fzero(x, Odd);
+      it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
+    }
+    RealD xn = std::sqrt(Fnorm2(x));
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      x.upper.f[a] = x.upper.f[a] * (1.0 / xn);
+      x.lower.f[a] = x.lower.f[a] * (1.0 / xn);
+    }
+    F Mx(&RBGrid);
+    Qdef.MpcTil(x, Mx);
+    std::cout << GridLogMessage << "[mtilde] right nv[" << i
+              << "]: invit iters=" << it << "  |M~v|/|v|="
+              << std::sqrt(Fnorm2(Mx)) << std::endl;
+    // DtxqcdPackDoubled copies the physical Odd cb from the struct; restamp
+    // Even after — packed metadata stays Even program-wide (see MtilOpShim).
+    DtxqcdPackDoubled(x, AggR.subspace[i]);
+    AggR.subspace[i].Checkerboard() = Even;
+    F g5x(&RBGrid);
+    if (nv_left_dag) {
+      // header semantics: z ~ Mpc~^{-dag} r by CG on (Mpc~ Mpc~^dag) z = Mpc~ r
+      Fgaussian(pRNG, &Grid_, &RBGrid, r);
+      F bb(&RBGrid), res(&RBGrid), p(&RBGrid), t(&RBGrid), Ap(&RBGrid);
+      Qdef.MpcTil(r, bb);
+      Fzero(g5x, Odd);
+      res = bb;
+      p = bb;
+      RealD r2 = Fnorm2(res);
+      const RealD tol2 = nv_tol * nv_tol * std::max(Fnorm2(bb), 1e-300);
+      int k = 0;
+      for (; k < nv_maxit && r2 > tol2; ++k) {
+        Qdef.MpcTilDag(p, t);
+        Qdef.MpcTil(t, Ap);
+        const RealD pAp = DtxqcdDeformQuda::finner_(p, Ap).real();
+        const RealD alpha = r2 / std::max(pAp, 1e-300);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          g5x.upper.f[a] = g5x.upper.f[a] + alpha * p.upper.f[a];
+          g5x.lower.f[a] = g5x.lower.f[a] + alpha * p.lower.f[a];
+          res.upper.f[a] = res.upper.f[a] - alpha * Ap.upper.f[a];
+          res.lower.f[a] = res.lower.f[a] - alpha * Ap.lower.f[a];
+        }
+        const RealD rn = Fnorm2(res);
+        const RealD beta = rn / r2;
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          p.upper.f[a] = res.upper.f[a] + beta * p.upper.f[a];
+          p.lower.f[a] = res.lower.f[a] + beta * p.lower.f[a];
+        }
+        r2 = rn;
+      }
+      it = k;
+      xn = std::sqrt(Fnorm2(g5x));
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        g5x.upper.f[a] = g5x.upper.f[a] * (1.0 / xn);
+        g5x.lower.f[a] = g5x.lower.f[a] * (1.0 / xn);
+      }
+    } else {
+    // left: G5 M~(-eta)^{-1} r'
+    Fgaussian(pRNG, &Grid_, &RBGrid, r);
+    Fzero(x, Odd);
+    SetProf(-eta);
+    it = Qdef.SolveTilEO(r, x, nv_tol, nv_maxit, rel);
+    SetProf(eta);
+    xn = std::sqrt(Fnorm2(x));
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      x.upper.f[a] = x.upper.f[a] * (1.0 / xn);
+      x.lower.f[a] = x.lower.f[a] * (1.0 / xn);
+    }
+    Gamma5All(x, g5x);
+    }
+    // gate the identity in anger: |M~(eta)^dag g5x| should equal the
+    // right-style residual of the recip solve (small)
+    Qdef.MpcTilDag(g5x, Mx);
+    std::cout << GridLogMessage << "[mtilde] left  nv[" << i
+              << "]: invit iters=" << it << "  |M~dag u|/|u|="
+              << std::sqrt(Fnorm2(Mx)) << std::endl;
+    DtxqcdPackDoubled(g5x, AggL.subspace[i]);
+    AggL.subspace[i].Checkerboard() = Even;
+  }
+  std::cout << GridLogMessage
+            << "[mtilde] Step 0-1 complete; Petrov-Galerkin coarsening next"
+            << std::endl;
 
+  //////////////////////////////////////////////////////////////////////
+  // Step 2: Petrov-Galerkin coarsening of M~ itself.  Grid's
+  // GeneralCoarsenedMatrix::CoarsenOperator(linop, U, V) is NATIVELY
+  // Petrov-Galerkin (probes linop.Op against V's phased subspace,
+  // projects with U): A_c = U^dag M~ V with U = left basis (G5 x recip
+  // near-kernel), V = right near-kernel.  Nearest coarse geometry covers
+  // the distance-2 Schur footprint for blocks >= 2 in every dimension.
+  //////////////////////////////////////////////////////////////////////
   // Non-Hermitian fine shim: Op = M~, AdjOp = M~^dag, on packed fields.
   struct MtilOpShim : public LinearOperatorBase<LatticeDtxqcdPacked> {
     DtxqcdDeformQuda &q;
@@ -430,21 +502,6 @@ int main(int argc, char **argv) {
   };
   MtilOpShim shim(Qdef, &RBGrid);
 
-  Subspace AggR(&Coarse4d, &RBGrid, Odd), AggL(&Coarse4d, &RBGrid, Odd);
-  for (int i = 0; i < NB; ++i) {
-    // DtxqcdPackDoubled copies the physical Odd cb from the struct; restamp
-    // Even after — packed metadata stays Even program-wide (see MtilOpShim).
-    DtxqcdPackDoubled(Vr[i], AggR.subspace[i]);
-    AggR.subspace[i].Checkerboard() = Even;
-    DtxqcdPackDoubled(Vl[i], AggL.subspace[i]);
-    AggL.subspace[i].Checkerboard() = Even;
-  }
-  // The struct copies are now redundant — at nb48 they duplicate 7.2 GB of
-  // basis residency and were the 75 MB-short OOM at solve start.
-  Vr.clear();
-  Vr.shrink_to_fit();
-  Vl.clear();
-  Vl.shrink_to_fit();
   // Schur footprint is distance-2 in FINE sites: with t-blocks of 2, a
   // (x+-1, t+-1) fine hop crosses a coarse CORNER — nearest geometry
   // truncates it (measured: S2 consistency 0.12).  Default nnn (81-point,

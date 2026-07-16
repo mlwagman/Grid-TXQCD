@@ -18,6 +18,7 @@ srun --overlap --mpi=pmix -N 1 -n 1 --cpu-bind=none \
       PROFILE=${PROFILE:-tent_rounded2} PROFILE_W=${WA:-12} \
       PROFILE_W_SRC=${WS:-12} \
       NV_NEV=$NB NV_TOL=${NVTOL:-1e-3} NV_MAXIT=50000 \
+      NV_RHS_FULL=${NV_RHS_FULL:-0} NV_LEFT_DAG=${NV_LEFT_DAG:-0} \
       BLOCK=${BLOCK:-4.4.4.2} SMOOTH_IT=8 COARSE_DIRECT=1 \
       NV_BOOTSTRAP=0 \
       CG_TOL=1e-7 MG_MAXIT=3000 RUN_BASELINE=0 \
