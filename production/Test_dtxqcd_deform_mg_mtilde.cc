@@ -514,6 +514,25 @@ int main(int argc, char **argv) {
       int info = -1;
       cudaMemcpy(&info, dInfo, sizeof(int), cudaMemcpyDeviceToHost);
       GRID_ASSERT(info == 0 && "coarse dense LU failed");
+      // Singularity meter: the U-diagonal spread bounds cond(A_c) from
+      // below.  The eta=0.8 bootstrap collapse (solve residual 6.6e6)
+      // was a NEAR-SINGULAR A_c from left/right subspace-angle loss —
+      // this print is the early warning.
+      {
+        std::vector<std::complex<double>> diag(N);
+        for (int i = 0; i < N; ++i)
+          cudaMemcpy(&diag[i], dA + (size_t)i + (size_t)N * i,
+                     sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+        double dmin = 1e300, dmax = 0;
+        for (int i = 0; i < N; ++i) {
+          const double a = std::abs(diag[i]);
+          dmin = std::min(dmin, a);
+          dmax = std::max(dmax, a);
+        }
+        std::cout << GridLogMessage << "[mtilde] A_c LU diag |U_ii|: min "
+                  << dmin << " max " << dmax << " ratio " << dmax / dmin
+                  << std::endl;
+      }
       ready = true;
       cudaSetDevice(dev0);
     }
@@ -783,7 +802,15 @@ int main(int argc, char **argv) {
           PrecGeneralisedConjugateResidualNonHermitian<Field> BR(
               btol, bmax, shim, vcyc, 16, 16);
           BR(b, z);
+          // MIX, don't replace: the band modes are t-LOCALIZED (tent
+          // apex), so a raw refined vector has roundoff-junk support in
+          // far blocks which blockOrthogonalise then normalizes to O(1)
+          // NOISE — the coarse correction injects it volume-wide and the
+          // solve blows up (measured 6e6 resid, A_c diag healthy).
+          // v + z keeps volume-filling support while adding band weight.
           RealD zn = std::sqrt(norm2(z));
+          z = b + (1.0 / std::max(zn, 1e-300)) * z;
+          zn = std::sqrt(norm2(z));
           AggR.subspace[i] = (1.0 / std::max(zn, 1e-300)) * z;
           b = AggL.subspace[i];
           z = Zero();
@@ -791,6 +818,8 @@ int main(int argc, char **argv) {
           PrecGeneralisedConjugateResidualNonHermitian<Field> BL(
               btol, bmax, dshim, vcycd, 16, 16);
           BL(b, z);
+          zn = std::sqrt(norm2(z));
+          z = b + (1.0 / std::max(zn, 1e-300)) * z;
           zn = std::sqrt(norm2(z));
           AggL.subspace[i] = (1.0 / std::max(zn, 1e-300)) * z;
         }
