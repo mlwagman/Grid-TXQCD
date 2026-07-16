@@ -23,8 +23,14 @@ P=/lustre2/nplqcd/Grid-DTXQCD/production
 DEFETA=${DEFETA:-0.2}
 LAM=${LAM:-4}
 DEFCGMAX=${DEFCGMAX:-20000}
+# DEFPROFILE (tent): contour profile.  Non-tent profiles get their own
+# output dir (deform_<profile>_eta<tag>) -- never mix profiles in one dir;
+# the un-tagged deform_eta* dirs are the legacy SHARP-TENT datasets.
+DEFPROFILE=${DEFPROFILE:-tent}
 ETATAG=$(echo "$DEFETA" | tr '.' 'p')
-OUT=$P/meas_2pt/dtxqcd_lam${LAM}_deform_eta${ETATAG}
+PROFTAG=""
+if [ "$DEFPROFILE" != "tent" ]; then PROFTAG="${DEFPROFILE}_"; fi
+OUT=$P/meas_2pt/dtxqcd_lam${LAM}_deform_${PROFTAG}eta${ETATAG}
 CFG=$P/cfgs/dtxqcd_lam${LAM}.0000_tla_fromchroma_cw
 PAIR=$P/meas_2pt/dtxqcd_lam${LAM}_baryon8
 mkdir -p "$OUT"
@@ -39,14 +45,14 @@ else
     TRAJS+=("$t")
   done
 fi
-echo "=== deform fleet lam=$LAM eta=$DEFETA cgmax=$DEFCGMAX: ${#TRAJS[@]} paired configs ==="
+echo "=== deform fleet lam=$LAM eta=$DEFETA profile=$DEFPROFILE cgmax=$DEFCGMAX: ${#TRAJS[@]} paired configs ==="
 declare -a SLOT_PID
 launch() {
   local traj=$1 gpu=$2
   echo "  [launch] traj=$traj -> GPU $gpu"
   srun --overlap --mpi=pmix -N1 -n1 -c16 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES=$gpu \
-        LATT=16.16.16.48 ETA=$DEFETA PROFILE=tent MEAS_BARYON_NTSRC=4 \
+        LATT=16.16.16.48 ETA=$DEFETA PROFILE=$DEFPROFILE MEAS_BARYON_NTSRC=4 \
         CG_TOL=1e-7 CG_MAX=$DEFCGMAX LAMBDA_DTXQCD=$LAM \
         CFG_DIR=$CFG DATA_DIR=$OUT \
         OMP_NUM_THREADS=16 \
