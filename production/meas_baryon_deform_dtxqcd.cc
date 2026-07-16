@@ -381,9 +381,14 @@ int main(int argc, char **argv) {
     wGui = ComplexD(1.0, 0.0); wGui = wGui / wGu;
     wGli = ComplexD(1.0, 0.0); wGli = wGli / wGl;
     if (Qdef) {
-      if (tent)
+      if (tent && !prof_rounded)
         Qdef->SetTentProfile(eta, prof_t0);  // tracks t0 for deflation
       else
+        // tent_rounded MUST go through the generic SetProfile — the
+        // 2026-07-16 w-scan came back bit-identical across widths
+        // because SetTentProfile fed the device the built-in SHARP tent
+        // (deflation frame-tracking is t0-keyed off SetTentProfile, so
+        // rounded profiles are incompatible with the deflation cache).
         Qdef->SetProfile(eta, [&](int t) { return prof(t); });
     }
   };

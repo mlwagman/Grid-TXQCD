@@ -24,7 +24,7 @@ LOGD=$P/gridmg_setups/logs
 CFG5=$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw
 GRID="--grid 16.16.16.48 --mpi 1.1.1.1 --shm 512 --shm-mpi 1"
 
-for W in 0 2 4 8; do
+for W in 2 4 8; do
   if [ "$W" = "0" ]; then PROF=tent; else PROF=tent_rounded; fi
   mkdir -p $P/meas_wscan_w$W
   srun --mpi=pmix -N 1 -n 1 --cpu-bind=none \

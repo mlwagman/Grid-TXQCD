@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=08:00:00
+#SBATCH --time=08:30:00
 #SBATCH --output=/lustre2/nplqcd/Grid-DTXQCD/production/gridmg_setups/logs/qdef_wcensus.%j.out
 # ============================================================================
 # Rounded-tent WIDTH SCAN census (lambda=5, eta=0.8): sigma_min vs apex
@@ -23,7 +23,7 @@ P=/lustre2/nplqcd/Grid-DTXQCD/production
 LOGD=$P/gridmg_setups/logs
 GRID="--grid 16.16.16.48 --mpi 1.1.1.1 --shm 512 --shm-mpi 1"
 
-for W in 0 2 4 8; do
+for W in 4 8; do
   if [ "$W" = "0" ]; then PROF=tent; else PROF=tent_rounded; fi
   srun --mpi=pmix -N 1 -n 1 --cpu-bind=none \
     env LATT=16.16.16.48 \
