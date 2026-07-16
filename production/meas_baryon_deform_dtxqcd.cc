@@ -326,10 +326,17 @@ int main(int argc, char **argv) {
   // grading RATE reduced only within w slices of the source (short
   // separations, where S/N is best) + the same uniform w/2 offset.
   const bool prof_round_src = prof_kind == "tent_rounded2";
+  // PROFILE=cos (mwagman 2026-07-16): p(t) = (T/4)(1 - cos(2 pi t / T)).
+  // Both mu-walls maximally smoothed (mu -> 0 LINEARLY at source and
+  // antipode) with p_max = T/2 exactly preserved — full dynamic range, no
+  // width parameter.  Slope compensates at pi/2 mid-way (vs the tent's 1).
+  const bool prof_cos = prof_kind == "cos";
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
     if (!tent) return (double)dt;
     const double d = (double)dt;
+    if (prof_cos)
+      return 0.25 * (double)T * (1.0 - std::cos(2.0 * M_PI * d / (double)T));
     double v = std::min(d, (double)T - d);
     if (!prof_rounded) return v;
     const double a = std::abs(d - 0.5 * T);
@@ -398,7 +405,7 @@ int main(int argc, char **argv) {
     wGui = ComplexD(1.0, 0.0); wGui = wGui / wGu;
     wGli = ComplexD(1.0, 0.0); wGli = wGli / wGl;
     if (Qdef) {
-      if (tent && !prof_rounded)
+      if (tent && !prof_rounded && !prof_cos)
         Qdef->SetTentProfile(eta, prof_t0);  // tracks t0 for deflation
       else
         // tent_rounded MUST go through the generic SetProfile — the

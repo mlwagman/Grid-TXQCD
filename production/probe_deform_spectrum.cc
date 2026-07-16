@@ -171,10 +171,13 @@ int main(int argc, char **argv) {
   const bool prof_rounded = prof_kind == "tent_rounded" ||
                             prof_kind == "tent_rounded2";
   const bool prof_round_src = prof_kind == "tent_rounded2";  // both walls
+  const bool prof_cos = prof_kind == "cos";  // (T/4)(1-cos), full range
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
     if (!tent) return (double)dt;
     const double d = (double)dt;
+    if (prof_cos)
+      return 0.25 * (double)T * (1.0 - std::cos(2.0 * M_PI * d / (double)T));
     double v = std::min(d, (double)T - d);
     if (!prof_rounded) return v;
     const double a = std::abs(d - 0.5 * T);
