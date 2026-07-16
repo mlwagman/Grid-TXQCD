@@ -27,12 +27,14 @@ srun --mpi=pmix -N 1 -n 1 --cpu-bind=none \
       MEAS_BARYON_NTSRC=1 MEAS_BARYON_MAXSOLVES=1 \
       DTXQCD_DEFORM_EO=1 DTXQCD_DEFORM_EO_DEFLATE=0 \
       DTXQCD_DEFORM_MG=1 DTXQCD_MG_SELFTEST=1 \
+      DTXQCD_MG_NVTOL=${DTXQCD_MG_NVTOL:-1e-3} \
+      DTXQCD_MG_NVMAX=${DTXQCD_MG_NVMAX:-50000} \
       DATA_DIR=$P/meas_mgab_1 \
   $P/meas_baryon_deform_dtxqcd 300 --grid 16.16.16.48 --mpi 1.1.1.1 \
-  --shm 512 --shm-mpi 1 > $P/mtilde_runs/mgab_1c.log 2>&1
+  --shm 512 --shm-mpi 1 > $P/mtilde_runs/mgab_1c.$SLURM_JOB_ID.log 2>&1
 echo "== selftest + wall =="
 grep -aE "SELFTEST|deform-mg. solve|deform-CG.*iters=|NOT CONVERGED" \
-  $P/mtilde_runs/mgab_1c.log | tail -4
+  $P/mtilde_runs/mgab_1c.$SLURM_JOB_ID.log | tail -4
 if [ -f $P/meas_mgab_1/baryon_deform_dtxqcd_300.h5 ]; then
   echo "== h5 A/B =="
   python3 $P/_qdef_cmp2.py $P/meas_mgab_0/baryon_deform_dtxqcd_300.h5 \

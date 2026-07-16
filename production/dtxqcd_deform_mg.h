@@ -126,24 +126,146 @@ class DtxqcdDeformMG {
     // convergence; A/B gate 2026-07-16).  Right: M~^{-1}-enriched; left:
     // M~^{-dag} via the dagger CGNR on the same shim.
     double t0 = usecond();
+    // DTXQCD_MG_NV_RBQUIRK=1 (default): reproduce the standalone's
+    // VALIDATED null-vector pipeline verbatim — RB-allocated struct fields
+    // fed to SolveTilEO.  The RB allocation makes SolveTilEO's internal
+    // pickCheckerboard iterate the wrong grid, i.e. the solve's deep
+    // inverse iterate is partially MASKED back toward white noise
+    // (|M~v|/|v| = 4.38 = the white-noise value) while keeping the band's
+    // spatial envelope.  Clean full-grid recipes measured on the depth
+    // ladder (2026-07-16, jobs 1301886/91/92): converged 1e-3 -> metric
+    // 2.86, V-cycle AMPLIFIES 3.9; 23 its -> 3.20/1.57; 6 its ->
+    // 3.63/0.60 with a slow-converging selftest — none reach the masked
+    // basis's 5.2k-Op class.  Quirk-derived but deterministic across
+    // builds/nodes (5,187 Ops thrice bit-identical; 5,607 after an
+    // unrelated recompile) and gated every Setup by S2 + the contraction
+    // probe (+ selftest in production runs).  =0 selects the clean
+    // full-grid pure-odd recipe (the ladder's subject) for future study.
+    const int rbquirk = EnvInt_("DTXQCD_MG_NV_RBQUIRK", 1);
     for (int i = 0; i < NB; ++i) {
       F rf(&grid_), xf(&grid_);
       GaussFull_(pRNG, rf);
       RealD rel = 0;
-      for (int a = 0; a < DtxqcdNf; ++a) {
-        xf.upper.f[a] = Zero();
-        xf.lower.f[a] = Zero();
+      if (rbquirk) {
+        F rq(&rb_), xq(&rb_);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          pickCheckerboard(Odd, rq.upper.f[a], rf.upper.f[a]);
+          pickCheckerboard(Odd, rq.lower.f[a], rf.lower.f[a]);
+          xq.upper.f[a] = Zero();
+          xq.lower.f[a] = Zero();
+          xq.upper.f[a].Checkerboard() = Odd;
+          xq.lower.f[a].Checkerboard() = Odd;
+        }
+        const int itr = q_.SolveTilEO(rq, xq, nvtol, nvmax, rel);
+        DtxqcdPackDoubled(xq, aggR_->subspace[i]);
+        aggR_->subspace[i].Checkerboard() = Even;
+        NormalizeP_(aggR_->subspace[i]);
+        {
+          Field Mv(&rb_);
+          shim_.Op(aggR_->subspace[i], Mv);
+          std::cout << GridLogMessage << "[deform-mg] right nv[" << i
+                    << "]: invit iters=" << itr
+                    << "  |M~v|/|v|=" << std::sqrt(norm2(Mv)) << std::endl;
+        }
+        // left: G5 x recip solve, same RB pipeline
+        GaussFull_(pRNG, rf);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          pickCheckerboard(Odd, rq.upper.f[a], rf.upper.f[a]);
+          pickCheckerboard(Odd, rq.lower.f[a], rf.lower.f[a]);
+          xq.upper.f[a] = Zero();
+          xq.lower.f[a] = Zero();
+          xq.upper.f[a].Checkerboard() = Odd;
+          xq.lower.f[a].Checkerboard() = Odd;
+        }
+        q_.SetEtaSign(-1);
+        const int itl = q_.SolveTilEO(rq, xq, nvtol, nvmax, rel);
+        q_.SetEtaSign(+1);
+        {
+          Gamma g5(Gamma::Algebra::Gamma5);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            xq.upper.f[a] = g5 * xq.upper.f[a];
+            xq.lower.f[a] = g5 * xq.lower.f[a];
+          }
+        }
+        DtxqcdPackDoubled(xq, aggL_->subspace[i]);
+        aggL_->subspace[i].Checkerboard() = Even;
+        NormalizeP_(aggL_->subspace[i]);
+        {
+          Field Mv(&rb_);
+          shim_.AdjOp(aggL_->subspace[i], Mv);
+          std::cout << GridLogMessage << "[deform-mg] left  nv[" << i
+                    << "]: invit iters=" << itl
+                    << "  |M~dag u|/|u|=" << std::sqrt(norm2(Mv)) << std::endl;
+        }
+        continue;
       }
-      q_.SolveTilEO(rf, xf, nvtol, nvmax, rel);
+      // ZERO the even checkerboard of the source: with b_e = 0 the Schur
+      // prep is the identity and the odd solve sees a PURE-ODD gaussian
+      // RHS — the recipe the standalone validated.  A full-grid gaussian's
+      // prepped RHS b'_o = b_o - M~oe Mee^{-1} b_e yields right vectors
+      // with |M~v|/|v| ~ 2.6 (vs 4.38) whose coarse space STALLS the
+      // two-level solve (NV_RHS_FULL discriminator, job 1301868: the
+      // production gate's relres-0.56 stall reproduced on the standalone
+      // by this flip alone; left/dagger recipe exonerated).
+      {
+        LatticeFermion o(&rb_);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          xf.upper.f[a] = Zero();
+          xf.lower.f[a] = Zero();
+          pickCheckerboard(Odd, o, rf.upper.f[a]);
+          rf.upper.f[a] = Zero();
+          setCheckerboard(rf.upper.f[a], o);
+          pickCheckerboard(Odd, o, rf.lower.f[a]);
+          rf.lower.f[a] = Zero();
+          setCheckerboard(rf.lower.f[a], o);
+        }
+      }
+      const int itr = q_.SolveTilEO(rf, xf, nvtol, nvmax, rel);
       PackOdd_(xf, aggR_->subspace[i]);
       NormalizeP_(aggR_->subspace[i]);
-      // left vector: dagger-system CGNR on the shim (loose)
-      Field r(&rb_), z(&rb_);
-      Gauss_(pRNG, r);
-      Cgnr_(r, z, nvtol, nvmax, true);
-      Normalize_(z);
-      aggL_->subspace[i] = z;
-      aggL_->subspace[i].Checkerboard() = Even;
+      {
+        Field Mv(&rb_);
+        shim_.Op(aggR_->subspace[i], Mv);
+        std::cout << GridLogMessage << "[deform-mg] right nv[" << i
+                  << "]: invit iters=" << itr
+                  << "  |M~v|/|v|=" << std::sqrt(norm2(Mv)) << std::endl;
+      }
+      // left vector: G5 x M~(-eta)^{-1} r — the standalone's recipe via the
+      // quasi-g5 identity (left null space of M~(eta) = G5 x right of
+      // M~(-eta)).  Same pure-odd RHS discipline as the right vectors.
+      GaussFull_(pRNG, rf);
+      {
+        LatticeFermion o(&rb_);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          xf.upper.f[a] = Zero();
+          xf.lower.f[a] = Zero();
+          pickCheckerboard(Odd, o, rf.upper.f[a]);
+          rf.upper.f[a] = Zero();
+          setCheckerboard(rf.upper.f[a], o);
+          pickCheckerboard(Odd, o, rf.lower.f[a]);
+          rf.lower.f[a] = Zero();
+          setCheckerboard(rf.lower.f[a], o);
+        }
+      }
+      q_.SetEtaSign(-1);
+      const int itl = q_.SolveTilEO(rf, xf, nvtol, nvmax, rel);
+      q_.SetEtaSign(+1);
+      {
+        Gamma g5(Gamma::Algebra::Gamma5);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          xf.upper.f[a] = g5 * xf.upper.f[a];
+          xf.lower.f[a] = g5 * xf.lower.f[a];
+        }
+      }
+      PackOdd_(xf, aggL_->subspace[i]);
+      NormalizeP_(aggL_->subspace[i]);
+      {
+        Field Mv(&rb_);
+        shim_.AdjOp(aggL_->subspace[i], Mv);
+        std::cout << GridLogMessage << "[deform-mg] left  nv[" << i
+                  << "]: invit iters=" << itl
+                  << "  |M~dag u|/|u|=" << std::sqrt(norm2(Mv)) << std::endl;
+      }
     }
     std::cout << GridLogMessage << "[deform-mg] " << 2 * NB
               << " null vectors in " << (usecond() - t0) * 1e-6 << " s"
@@ -177,6 +299,26 @@ class DtxqcdDeformMG {
               << (usecond() - t0) * 1e-6 << " s (N=" << Ncc_() << ")"
               << std::endl;
     ready_ = true;
+    // One-V-cycle contraction probe: |r - M~ V(r)| / |r| on a random odd
+    // vector.  Separates BASIS quality (probe >~ 1: coarse correction
+    // useless -> PGCR stalls) from outer-solver issues (probe ~ 0.6 like
+    // the winning standalone, yet the solve stalls anyway).
+    {
+      GridParallelRNG PR(&grid_);
+      PR.SeedFixedIntegers({91, 92, 93, 94});
+      Field r(&rb_), z(&rb_), t(&rb_);
+      {
+        F full(&grid_);
+        GaussFull_(PR, full);
+        PackOdd_(full, r);
+      }
+      VCycle vc(*this);
+      vc(r, z);
+      shim_.Op(z, t);
+      t = t - r;
+      std::cout << GridLogMessage << "[deform-mg] V-cycle contraction |r-Mz|/|r|="
+                << std::sqrt(norm2(t) / norm2(r)) << std::endl;
+    }
     // DTXQCD_MG_SELFTEST=1: solve a gaussian odd RHS through the freshly
     // built hierarchy and report.  Discriminates hierarchy-broken from
     // RHS-class-specific behavior: the standalone validation used gaussian
@@ -266,6 +408,21 @@ class DtxqcdDeformMG {
       int info = -1;
       cudaMemcpy(&info, dInfo, sizeof(int), cudaMemcpyDeviceToHost);
       GRID_ASSERT(info == 0 && "deform-mg coarse LU failed");
+      {
+        std::vector<cuDoubleComplex> diag(N);
+        cudaMemcpy2D(diag.data(), sizeof(cuDoubleComplex), dA,
+                     (size_t)(N + 1) * sizeof(cuDoubleComplex),
+                     sizeof(cuDoubleComplex), N, cudaMemcpyDeviceToHost);
+        double lo = 1e300, hi = 0;
+        for (int i = 0; i < N; ++i) {
+          const double m = std::hypot(diag[i].x, diag[i].y);
+          lo = std::min(lo, m);
+          hi = std::max(hi, m);
+        }
+        std::cout << GridLogMessage << "[deform-mg] A_c LU diag |U_ii|: min "
+                  << lo << " max " << hi << " ratio " << hi / std::max(lo, 1e-300)
+                  << std::endl;
+      }
       ready = true;
       cudaSetDevice(dev0);
     }

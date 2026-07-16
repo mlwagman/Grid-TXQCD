@@ -160,6 +160,19 @@ class DtxqcdDeformQuda {
   //   cbu(t) = e^{+eta dp(t-1)/2} - 1
   //   cfl/cbl = reciprocal (lower block / opposite charge)
   void SetProfile(double eta, const std::function<double(int)> &p) {
+    prof_eta_ = eta;
+    prof_p_ = p;
+    ApplyProfile_(eta, p);
+  }
+  // Temporarily flip the deformation sign (M~(-eta) recip solves — the
+  // deform-MG left-vector recipe via the quasi-g5 identity).  Restore with
+  // sign=+1.  Does not touch the SetTentProfile deflation bookkeeping.
+  void SetEtaSign(int sign) { ApplyProfile_(sign * prof_eta_, prof_p_); }
+
+ private:
+  double prof_eta_ = 0.0;
+  std::function<double(int)> prof_p_;
+  void ApplyProfile_(double eta, const std::function<double(int)> &p) {
     auto dp = [&](int t) { return p((t + 1) % T_) - p(t); };
     LatticeComplex one(&grid_);
     for (int t = 0; t < T_; ++t) {
@@ -197,6 +210,7 @@ class DtxqcdDeformQuda {
 #endif
   }
 
+ public:
   void Mtil(const F &in, F &out) { Leg_(in, out, /*dagger=*/false); }
   void MtilDag(const F &in, F &out) { Leg_(in, out, /*dagger=*/true); }
 
