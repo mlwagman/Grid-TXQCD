@@ -314,17 +314,34 @@ int main(int argc, char **argv) {
   // hop weights, the G masks, SetProfile, AND the baked correlator
   // grading — one definition, all consumers.
   const double prof_w = env_real("PROFILE_W", 4.0);
-  const bool prof_rounded = env_str("PROFILE", "tent") == "tent_rounded";
+  const std::string prof_kind = env_str("PROFILE", "tent");
+  const bool prof_rounded = prof_kind == "tent_rounded" ||
+                            prof_kind == "tent_rounded2";
+  // tent_rounded2 ALSO rounds the SOURCE trough: the two tent kinks are
+  // a DEGENERATE PAIR of mu-domain walls — the apex binds the
+  // upper-block quasiparticle, the source trough binds the CONJUGATE
+  // (lower-block) one (mwagman 2026-07-16).  Apex-only rounding splits
+  // the pair but leaves sigma_min pinned at the trough state (measured:
+  // x1.6 census lift, 3.4% CG relief at w=2).  Trough-rounding's cost:
+  // grading RATE reduced only within w slices of the source (short
+  // separations, where S/N is best) + the same uniform w/2 offset.
+  const bool prof_round_src = prof_kind == "tent_rounded2";
   auto prof = [&](int t) {
     const int dt = ((t - prof_t0) % T + T) % T;
     if (!tent) return (double)dt;
     const double d = (double)dt;
-    const double tentv = std::min(d, (double)T - d);
-    if (!prof_rounded) return tentv;
+    double v = std::min(d, (double)T - d);
+    if (!prof_rounded) return v;
     const double a = std::abs(d - 0.5 * T);
-    if (a >= prof_w) return tentv;
-    // parabola matched to slope +-1 at |d - T/2| = w
-    return 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
+    if (a < prof_w)  // apex parabola, slope-matched at |d-T/2| = w
+      v = 0.5 * T - 0.5 * prof_w - a * a / (2.0 * prof_w);
+    if (prof_round_src) {
+      const double b = std::min(d, (double)T - d);  // distance to source
+      if (b < prof_w)  // trough parabola (offset w/2 kept: only
+                       // differences enter weights and grading)
+        v = 0.5 * prof_w + b * b / (2.0 * prof_w);
+    }
+    return v;
   };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;
