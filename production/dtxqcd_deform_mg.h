@@ -150,6 +150,28 @@ class DtxqcdDeformMG {
               << std::endl;
     t0 = usecond();
     Ac_->CoarsenOperator(shim_, *aggL_, *aggR_);
+    // S2 gate (ported from the standalone): Ac c must equal
+    // ProjL(M~ PromR(c)) against the OPERATOR — the dense-vs-Ac
+    // calibration alone cannot catch a wrong AGGREGATION (both sides
+    // would agree).  The production selftest stalled at relres 0.57 on a
+    // gaussian RHS (2026-07-16) with this gate absent.
+    {
+      GridParallelRNG CR(coarse_.get());
+      CR.SeedFixedIntegers({61, 62, 63, 64});
+      CoarseVector c(coarse_.get()), y1(coarse_.get()), y2(coarse_.get());
+      gaussian(CR, c);
+      Ac_->M(c, y1);
+      Field f(&rb_), Mf(&rb_);
+      f.Checkerboard() = Even;
+      aggR_->PromoteFromSubspace(c, f);
+      shim_.Op(f, Mf);
+      aggL_->ProjectToSubspace(y2, Mf);
+      CoarseVector d(coarse_.get());
+      d = y1 - y2;
+      const RealD s2 = std::sqrt(norm2(d) / norm2(y2));
+      std::cout << GridLogMessage << "[deform-mg] S2 coarse-op consistency "
+                << s2 << (s2 < 1e-8 ? " OK" : "  ** FAIL **") << std::endl;
+    }
     BuildDirect_();
     std::cout << GridLogMessage << "[deform-mg] coarsen+LU in "
               << (usecond() - t0) * 1e-6 << " s (N=" << Ncc_() << ")"
