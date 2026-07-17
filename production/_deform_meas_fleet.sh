@@ -32,6 +32,12 @@ DEFPROFILE=${DEFPROFILE:-tent}
 # needs its own ΔlogPf(t0) — high-NTSRC datasets rely on the reweighting
 # factors being smooth/interpolatable in t0 (or on the ~unity-weight regime).
 DEFNTSRC=${DEFNTSRC:-4}
+# DEFGPUS (1): GPUs per config.  MG runs (eta>=0.6) REQUIRE 2 -- the deform
+# MG's dense coarse LU (~22 GB) lives on the SECOND visible device
+# (CoarseDirect dev=1 in dtxqcd_deform_mg.h); with one visible GPU it lands
+# on the fine-op device and the step OOMs/dies (2026-07-16 lesson: both e06
+# farms cycled through configs in ~3 min deaths).
+DEFGPUS=${DEFGPUS:-1}
 ETATAG=$(echo "$DEFETA" | tr '.' 'p')
 PROFTAG=""
 if [ "$DEFPROFILE" != "tent" ]; then PROFTAG="${DEFPROFILE}_"; fi
@@ -53,12 +59,13 @@ else
   done
 fi
 echo "=== deform fleet lam=$LAM eta=$DEFETA profile=$DEFPROFILE cgmax=$DEFCGMAX: ${#TRAJS[@]} paired configs ==="
+if [ "$DEFGPUS" = "2" ]; then SLOTS=("0,1" "2,3"); else SLOTS=(0 1 2 3); fi
 declare -a SLOT_PID
 launch() {
-  local traj=$1 gpu=$2
-  echo "  [launch] traj=$traj -> GPU $gpu"
+  local traj=$1 slot=$2
+  echo "  [launch] traj=$traj -> GPUs ${SLOTS[$slot]}"
   srun --overlap --mpi=pmix -N1 -n1 -c16 --cpu-bind=none \
-    env CUDA_VISIBLE_DEVICES=$gpu \
+    env CUDA_VISIBLE_DEVICES=${SLOTS[$slot]} \
         LATT=16.16.16.48 ETA=$DEFETA PROFILE=$DEFPROFILE \
         MEAS_BARYON_NTSRC=$DEFNTSRC \
         CG_TOL=1e-7 CG_MAX=$DEFCGMAX LAMBDA_DTXQCD=$LAM \
@@ -72,7 +79,7 @@ for traj in "${TRAJS[@]}"; do
   [ -f "$OUT/baryon_deform_dtxqcd_${traj}.h5" ] && continue
   placed=0
   while [ $placed -eq 0 ]; do
-    for g in 0 1 2 3; do
+    for g in "${!SLOTS[@]}"; do
       if [ -z "${SLOT_PID[$g]}" ] || ! kill -0 "${SLOT_PID[$g]}" 2>/dev/null; then
         launch "$traj" "$g"; placed=1; break
       fi
