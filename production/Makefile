@@ -336,6 +336,15 @@ Test_dtxqcd_eta_deform_pf: Test_dtxqcd_eta_deform_pf.o
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_eta_deform_pf.o \
 	  $(LDFLAGS) $(LIBS) -lcusolver
 
+# 4^4 dense design study for the DEFLATED reweighting trace estimator
+# (handoff section 5c): exact Tr[S^-1 dS] + SVD + variance-vs-K ladder.
+Test_dtxqcd_rwf_dense_defl.o: Test_dtxqcd_rwf_dense_defl.cc
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_rwf_dense_defl: Test_dtxqcd_rwf_dense_defl.o
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_rwf_dense_defl.o \
+	  $(LDFLAGS) $(LIBS) -lcusolver
+
 # DTXQCD measurements that build the QUDA full-volume M operator via
 # dtxqcd_meas_helper.h (DTXQCDMpcOpQUDA) must link the SP/DP native-kernel
 # impl objects, exactly like the HMC test above.  The catch-all rule does not.
