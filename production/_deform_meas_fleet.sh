@@ -60,7 +60,7 @@ else
 fi
 echo "=== deform fleet lam=$LAM eta=$DEFETA profile=$DEFPROFILE cgmax=$DEFCGMAX: ${#TRAJS[@]} paired configs ==="
 if [ "$DEFGPUS" = "2" ]; then SLOTS=("0,1" "2,3"); else SLOTS=(0 1 2 3); fi
-declare -a SLOT_PID
+declare -a SLOT_PID SLOT_TRAJ SLOT_T0
 launch() {
   local traj=$1 slot=$2
   echo "  [launch] traj=$traj -> GPUs ${SLOTS[$slot]}"
@@ -73,18 +73,57 @@ launch() {
         OMP_NUM_THREADS=16 \
     $P/meas_baryon_deform_dtxqcd "$traj" --grid 16.16.16.48 --mpi 1.1.1.1 \
     --shm 512 --shm-mpi 1 > "$OUT/deform.$traj.log" 2>&1 &
-  SLOT_PID[$gpu]=$!
+  SLOT_PID[$slot]=$!
+  SLOT_TRAJ[$slot]=$traj
+  SLOT_T0[$slot]=$(date +%s)
 }
-for traj in "${TRAJS[@]}"; do
+# Work queue with INSTANT-DEATH requeue: a step that dies in <90 s without
+# an h5 (srun/pmix launch failures -- e.g. the 2026-07-16 port-exhaustion
+# cascade after a scancel on the same node -- or early aborts) is put back
+# on the queue with a 300 s backoff, instead of burning the whole list.
+QUEUE=("${TRAJS[@]}")
+FAILSTREAK=0
+REQUEUES=0
+MAXREQ=$(( ${#TRAJS[@]} * 3 + 10 ))
+free_slot() {   # sets FREE_G to a free slot index, or "" (runs in-shell:
+  local g pid dt traj  # it mutates QUEUE/REQUEUES -- no command substitution)
+  FREE_G=""
+  for g in "${!SLOTS[@]}"; do
+    pid=${SLOT_PID[$g]:-}
+    if [ -z "$pid" ]; then FREE_G="$g"; return; fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      traj=${SLOT_TRAJ[$g]}
+      dt=$(( $(date +%s) - ${SLOT_T0[$g]} ))
+      if [ ! -f "$OUT/baryon_deform_dtxqcd_${traj}.h5" ] && [ "$dt" -lt 90 ]; then
+        QUEUE+=("$traj")
+        REQUEUES=$((REQUEUES + 1))
+        FAILSTREAK=$((FAILSTREAK + 1))
+        echo "  [instant-death] traj=$traj after ${dt}s -- requeued (streak $FAILSTREAK, total $REQUEUES)"
+        if [ "$FAILSTREAK" -ge 2 ]; then
+          echo "  [backoff] sleeping 300s for node cleanup"
+          sleep 300
+        fi
+        if [ "$REQUEUES" -gt "$MAXREQ" ]; then
+          echo "FATAL: requeue budget exhausted -- node unusable"
+          exit 1
+        fi
+      else
+        FAILSTREAK=0
+      fi
+      SLOT_PID[$g]=""
+      FREE_G="$g"
+      return
+    fi
+  done
+}
+while [ ${#QUEUE[@]} -gt 0 ]; do
+  traj=${QUEUE[0]}
+  QUEUE=("${QUEUE[@]:1}")
   [ -f "$OUT/baryon_deform_dtxqcd_${traj}.h5" ] && continue
   placed=0
   while [ $placed -eq 0 ]; do
-    for g in "${!SLOTS[@]}"; do
-      if [ -z "${SLOT_PID[$g]}" ] || ! kill -0 "${SLOT_PID[$g]}" 2>/dev/null; then
-        launch "$traj" "$g"; placed=1; break
-      fi
-    done
-    [ $placed -eq 0 ] && sleep 30
+    free_slot
+    if [ -n "$FREE_G" ]; then launch "$traj" "$FREE_G"; placed=1; else sleep 30; fi
   done
 done
 wait
