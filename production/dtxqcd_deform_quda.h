@@ -434,6 +434,13 @@ class DtxqcdDeformQuda {
     }
   }
   bool HasDeflation() const { return !defl_evec_.empty(); }
+  // Read access to the deflation basis (packed RB fields) — the stochastic
+  // reweighting estimator builds its oblique-projector trace split from
+  // these (Test_dtxqcd_eta_stoch_pf, DTXQCD_STOCHPF_DEFLATE).
+  const std::vector<LatticeDtxqcdPacked> &EODeflEvecs() const {
+    return defl_evec_;
+  }
+  const std::vector<RealD> &EODeflEvals() const { return defl_eval_; }
 
   // DIAG gate: apply the CG-SIDE operator (MpcTilDag . MpcTil, the exact
   // legs CgnrEO_ iterates) to basis vectors and print Rayleigh quotient +

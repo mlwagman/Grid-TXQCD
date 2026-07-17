@@ -386,6 +386,99 @@ int main(int argc, char **argv) {
     else            dMtil_aux(in, out);
   };
 
+  // ---- SCHUR-form estimator (DTXQCD_STOCHPF_SCHUR) ----------------------
+  // Tr[M~^-1 dM~] = Tr[S~^-1 dS~] exactly (Mee is eta-independent), with
+  // S~ = Moo - M~oe Mee^-1 M~eo the odd Schur complement and
+  // dS~ = -(dM_oe Mee^-1 M~eo + M~oe Mee^-1 dM_eo)  [hop insertion only:
+  // dM_oo = dM_ee = 0 -- the aux-form insertion has site-local cross
+  // blocks and is NOT supported here].  Validated dense at 4^4 vs
+  // FD[log det S~] to 1e-7 (Test_dtxqcd_rwf_dense_defl, job 1302016).
+  //
+  // DTXQCD_STOCHPF_DEFLATE=K adds the OBLIQUE-PROJECTOR split: with any
+  // trial basis V (K lowest eigenpairs of Mpc~^dag Mpc~ from the deform
+  // deflation stack, loose tol is FINE), P = S~V G^-1 (S~V)^dag with
+  // G = (S~V)^dag (S~V):
+  //     Tr[S~^-1 dS~] = Tr[W G^-1] + E_w <w, S~^-1 (1-P) dS~ w>,
+  //     W_jk = (S~ v_j)^dag dS~ v_k
+  // -- the split is EXACT for ANY V (no triplet-tolerance bias: the naive
+  // sigma_k^-1 u^dag dS v form amplifies eigenpair error ~850x through
+  // the exact/remainder cancellation measured at 4^4).
+  // DTXQCD_STOCHPF_DILUTE_EOT=1 splits the remainder noise by t-parity
+  // (the T-independent version of the 4^4 t-slice dilution win: the hop
+  // insertion connects t<->t+-1, so same-t-parity blocks carry no direct
+  // insertion term).
+  const int defl_nev = env_int("DTXQCD_STOCHPF_DEFLATE", 0);
+  const int dilute_eot = env_int("DTXQCD_STOCHPF_DILUTE_EOT", 0);
+  const int use_anti = env_int("DTXQCD_STOCHPF_ANTI", 1);
+  const int schur_mode = env_int("DTXQCD_STOCHPF_SCHUR",
+                                 (defl_nev > 0 || dilute_eot) ? 1 : 0);
+  if (schur_mode) {
+    GRID_ASSERT(hop_insert && chempot && Qdef &&
+                "SCHUR estimator needs INSERTION=hop, CHEMPOT_FRAME=1 and "
+                "the Qdef fast path");
+#ifdef GRID_HAVE_QUDA
+    GRID_ASSERT(Qdef->HasEO() && "SCHUR estimator needs the EO attach");
+#endif
+  }
+  auto MaskKeepCb = [&](F &v, int cb) {
+    LatticeFermion h(&RBGrid);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      pickCheckerboard(cb, h, v.upper.f[a]);
+      v.upper.f[a] = Zero();
+      setCheckerboard(v.upper.f[a], h);
+      pickCheckerboard(cb, h, v.lower.f[a]);
+      v.lower.f[a] = Zero();
+      setCheckerboard(v.lower.f[a], h);
+    }
+  };
+  auto MeeInvEven = [&](const F &fin, F &fout) {
+    F he(&RBGrid), hi(&RBGrid);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      pickCheckerboard(Even, he.upper.f[a], fin.upper.f[a]);
+      pickCheckerboard(Even, he.lower.f[a], fin.lower.f[a]);
+    }
+    Dw.MooeeInv(he, hi);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      fout.upper.f[a] = Zero();
+      fout.lower.f[a] = Zero();
+      setCheckerboard(fout.upper.f[a], hi.upper.f[a]);
+      setCheckerboard(fout.lower.f[a], hi.lower.f[a]);
+    }
+  };
+  // dS~ on a full-grid odd-supported field (result odd-supported).
+  auto dStil = [&](const F &w, F &out) {
+    F t1(&Grid), t2(&Grid), t3(&Grid);
+    Mtil(w, t1);
+    MeeInvEven(t1, t2);
+    dMhop(t2, t1);
+    MaskKeepCb(t1, Odd);
+    dMhop(w, t2);
+    MeeInvEven(t2, t3);
+    Mtil(t3, t2);
+    MaskKeepCb(t2, Odd);
+    for (int a = 0; a < DtxqcdNf; ++a) {
+      out.upper.f[a] = ComplexD(-1.0, 0.0) * (t1.upper.f[a] + t2.upper.f[a]);
+      out.lower.f[a] = ComplexD(-1.0, 0.0) * (t1.lower.f[a] + t2.lower.f[a]);
+    }
+  };
+  // S~^-1 on a full-grid odd-supported field: SolveTilEO with b_e = 0 has
+  // a degenerate Schur prep, so the odd part of the solution IS
+  // Mpc~^-1 b_o.  Unconverged solves abort (a93707d3: silent CG_MAX bias).
+  auto SchurSolve = [&](const F &b, F &x) {
+    RealD relres = 0;
+    const int it = Qdef->SolveTilEO(b, x, tol, cgmax, relres);
+    std::cout << GridLogMessage << "[stochpf-CG:schur] iters=" << it
+              << " relres=" << relres << std::endl;
+    if (relres > tol) {
+      std::cout << GridLogMessage
+                << "[stochpf] NOT CONVERGED -- aborting (biased trace)"
+                << std::endl;
+      std::fflush(nullptr);
+      std::_Exit(3);
+    }
+    MaskKeepCb(x, Odd);
+  };
+
   // Custom CG on Mdef^dag Mdef (pattern of dtxqcd_diag.h compute_trminv).
   // Fast path: x = M~^{-1} src via the device Qdef (Schur EO when attached)
   // — identical solution to the CGNR below, ~10-25x the throughput.  The
@@ -726,6 +819,168 @@ int main(int argc, char **argv) {
       }
     }
 #endif
+    ComplexD g(0.0, 0.0), t_exact(0.0, 0.0);
+    double er = 0, ei = 0;
+    if (schur_mode) {
+      // ---- oblique-projector deflation setup at THIS node ----
+      std::vector<F> SVf;   // S~ v_k, full-grid odd-supported
+      Eigen::MatrixXcd Ginv;
+      int K = 0;
+      if (defl_nev > 0) {
+#ifdef GRID_HAVE_QUDA
+        const int d_ord = env_int("DTXQCD_DEFORM_EO_DEFLATE_ORD", 301);
+        const RealD d_lo = env_real("DTXQCD_DEFORM_EO_DEFLATE_LO", 3e-4);
+        const RealD d_tol = env_real("DTXQCD_DEFORM_EO_DEFLATE_TOL", 1e-3);
+        std::string d_cache;
+        if (const char *cd = std::getenv("DTXQCD_DEFORM_EO_DEFLATE_CACHE"))
+          if (*cd) {
+            char pre[128];
+            std::snprintf(pre, sizeof(pre), "/tr%d_lam%.4f_", traj,
+                          (double)lam);
+            d_cache = std::string(cd) + pre +
+                      DtxqcdDeformQuda::EODeflationCacheName(
+                          defl_nev, d_tol, d_ord, ep, prof_t0,
+                          Grid.GlobalDimensions());
+          }
+        if (d_cache.empty() || !Qdef->LoadEODeflation(d_cache)) {
+          Qdef->BuildEODeflation(
+              defl_nev, pRNG, d_ord, d_lo, d_tol,
+              env_int("DTXQCD_DEFORM_EO_DEFLATE_RESTARTS", 20));
+          if (!d_cache.empty()) Qdef->SaveEODeflation(d_cache);
+        }
+        const auto &evp = Qdef->EODeflEvecs();
+        K = (int)evp.size();
+        // Basis: unpack -> struct RB (physical Odd) -> S~ v_k -> full grid.
+        std::vector<F> Vf;
+        F vrb(&RBGrid), srb(&RBGrid);
+        for (int k = 0; k < K; ++k) {
+          DtxqcdUnpackDoubled(evp[k], vrb);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            vrb.upper.f[a].Checkerboard() = Odd;
+            vrb.lower.f[a].Checkerboard() = Odd;
+          }
+          F vf(&Grid), sf(&Grid);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            vf.upper.f[a] = Zero();
+            vf.lower.f[a] = Zero();
+            setCheckerboard(vf.upper.f[a], vrb.upper.f[a]);
+            setCheckerboard(vf.lower.f[a], vrb.lower.f[a]);
+          }
+          Qdef->MpcTil(vrb, srb);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            sf.upper.f[a] = Zero();
+            sf.lower.f[a] = Zero();
+            setCheckerboard(sf.upper.f[a], srb.upper.f[a]);
+            setCheckerboard(sf.lower.f[a], srb.lower.f[a]);
+          }
+          Vf.push_back(vf);
+          SVf.push_back(sf);
+        }
+        // G = (S~V)^dag(S~V);  W_jk = (S~v_j)^dag dS~ v_k;
+        // exact term = Tr[W G^-1] -- exact for ANY basis (no triplet bias).
+        Eigen::MatrixXcd G(K, K), W(K, K);
+        for (int k = 0; k < K; ++k) {
+          F dsv(&Grid);
+          dStil(Vf[k], dsv);
+          for (int j = 0; j < K; ++j) {
+            const ComplexD gg = DtxqcdDeformQuda::finner_(SVf[j], SVf[k]);
+            const ComplexD ww = DtxqcdDeformQuda::finner_(SVf[j], dsv);
+            G(j, k) = std::complex<double>(DtxqcdToStd(gg).real(),
+                                           DtxqcdToStd(gg).imag());
+            W(j, k) = std::complex<double>(DtxqcdToStd(ww).real(),
+                                           DtxqcdToStd(ww).imag());
+          }
+        }
+        Ginv = G.fullPivLu().inverse();
+        const std::complex<double> tex = (W * Ginv).trace();
+        t_exact = ComplexD(tex.real(), tex.imag());
+        std::cout << GridLogMessage << "[stochpf-defl] node ep=" << ep
+                  << " K=" << K << " exact term = " << t_exact.real()
+                  << " + " << t_exact.imag() << " i" << std::endl;
+#endif
+      }
+      auto Project = [&](F &y) {
+        if (K == 0) return;
+        Eigen::VectorXcd c(K);
+        for (int j = 0; j < K; ++j) {
+          const ComplexD z = DtxqcdDeformQuda::finner_(SVf[j], y);
+          c(j) = std::complex<double>(DtxqcdToStd(z).real(),
+                                      DtxqcdToStd(z).imag());
+        }
+        Eigen::VectorXcd d = Ginv * c;
+        for (int k = 0; k < K; ++k) {
+          const ComplexD dk(d(k).real(), d(k).imag());
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            y.upper.f[a] = y.upper.f[a] - dk * SVf[k].upper.f[a];
+            y.lower.f[a] = y.lower.f[a] - dk * SVf[k].lower.f[a];
+          }
+        }
+      };
+      // one remainder estimate <w, S~^-1 (1-P) dS~ w>/2 for a given probe
+      auto Remainder = [&](const F &w) {
+        F y(&Grid), x(&Grid);
+        dStil(w, y);
+        Project(y);
+        SchurSolve(y, x);
+        return DtxqcdDeformQuda::finner_(w, x) / 2.0;
+      };
+      // t-parity masks for the eo-t dilution
+      LatticeComplex mt0(&Grid), mt1(&Grid);
+      if (dilute_eot) {
+        mt0 = ComplexD(0.0, 0.0);
+        mt1 = ComplexD(0.0, 0.0);
+        LatticeComplex one(&Grid);
+        one = ComplexD(1.0, 0.0);
+        for (int t = 0; t < T; ++t) {
+          if (t % 2 == 0)
+            mt0 = where(tc == Integer(t), one, mt0);
+          else
+            mt1 = where(tc == Integer(t), one, mt1);
+        }
+      }
+      ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
+      for (int h = 0; h < n_noise; ++h) {
+        F w(&Grid);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          gaussian(pRNG, w.upper.f[a]);
+          gaussian(pRNG, w.lower.f[a]);
+        }
+        MaskKeepCb(w, Odd);
+        auto EstOf = [&](const F &probe) {
+          ComplexD e = Remainder(probe);
+          if (use_anti) {
+            F wg(&Grid);
+            wg = probe;
+            for (int a = 0; a < DtxqcdNf; ++a)
+              wg.lower.f[a] = -wg.lower.f[a];
+            e = 0.5 * (e + Remainder(wg));
+          }
+          return e;
+        };
+        ComplexD est;
+        if (dilute_eot) {
+          F w0(&Grid), w1(&Grid);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            w0.upper.f[a] = mt0 * w.upper.f[a];
+            w0.lower.f[a] = mt0 * w.lower.f[a];
+            w1.upper.f[a] = mt1 * w.upper.f[a];
+            w1.lower.f[a] = mt1 * w.lower.f[a];
+          }
+          est = EstOf(w0) + EstOf(w1);
+        } else {
+          est = EstOf(w);
+        }
+        acc += est;
+        acc2r += est.real() * est.real();
+        acc2i += est.imag() * est.imag();
+      }
+      ComplexD rmean = acc / (double)n_noise;
+      er = std::sqrt(std::max(0.0, acc2r.real() / n_noise -
+                                   rmean.real() * rmean.real()) / n_noise);
+      ei = std::sqrt(std::max(0.0, acc2i.real() / n_noise -
+                                   rmean.imag() * rmean.imag()) / n_noise);
+      g = t_exact + rmean;
+    } else {
     // Hutchinson: Tr[Mdef^{-1} dM] = E<v, Mdef^{-1} dM v> / 2 (gaussian).
     ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
     for (int h = 0; h < n_noise; ++h) {
@@ -751,14 +1006,16 @@ int main(int argc, char **argv) {
       acc2r += est.real() * est.real();
       acc2i += est.imag() * est.imag();
     }
-    ComplexD g = acc / (double)n_noise;
-    double er = std::sqrt(std::max(0.0, acc2r.real() / n_noise -
-                                        g.real() * g.real()) / n_noise);
-    double ei = std::sqrt(std::max(0.0, acc2i.real() / n_noise -
-                                        g.imag() * g.imag()) / n_noise);
+    g = acc / (double)n_noise;
+    er = std::sqrt(std::max(0.0, acc2r.real() / n_noise -
+                                 g.real() * g.real()) / n_noise);
+    ei = std::sqrt(std::max(0.0, acc2i.real() / n_noise -
+                                 g.imag() * g.imag()) / n_noise);
+    }
     std::cout << GridLogMessage << "GLNODE q=" << q << " eta'=" << ep
               << " Tr[Minv dM] = " << g.real() << " +- " << er
-              << "  (im " << g.imag() << " +- " << ei << ")" << std::endl;
+              << "  (im " << g.imag() << " +- " << ei << ")"
+              << (schur_mode ? "  [schur]" : "") << std::endl;
     dlogdet += eta * gl_w[q] * g;
     dlogdet_var += ComplexD(eta * gl_w[q] * er * eta * gl_w[q] * er,
                             eta * gl_w[q] * ei * eta * gl_w[q] * ei);
