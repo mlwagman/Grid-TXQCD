@@ -27,10 +27,17 @@ DEFCGMAX=${DEFCGMAX:-20000}
 # output dir (deform_<profile>_eta<tag>) -- never mix profiles in one dir;
 # the un-tagged deform_eta* dirs are the legacy SHARP-TENT datasets.
 DEFPROFILE=${DEFPROFILE:-tent}
+# DEFNTSRC (4): wall sources per config (source-centered contour each).
+# NOTE the reweighting coupling: every source offset is its OWN contour and
+# needs its own ΔlogPf(t0) — high-NTSRC datasets rely on the reweighting
+# factors being smooth/interpolatable in t0 (or on the ~unity-weight regime).
+DEFNTSRC=${DEFNTSRC:-4}
 ETATAG=$(echo "$DEFETA" | tr '.' 'p')
 PROFTAG=""
 if [ "$DEFPROFILE" != "tent" ]; then PROFTAG="${DEFPROFILE}_"; fi
-OUT=$P/meas_2pt/dtxqcd_lam${LAM}_deform_${PROFTAG}eta${ETATAG}
+SRCTAG=""
+if [ "$DEFNTSRC" != "4" ]; then SRCTAG="_s${DEFNTSRC}"; fi
+OUT=$P/meas_2pt/dtxqcd_lam${LAM}_deform_${PROFTAG}eta${ETATAG}${SRCTAG}
 CFG=$P/cfgs/dtxqcd_lam${LAM}.0000_tla_fromchroma_cw
 PAIR=$P/meas_2pt/dtxqcd_lam${LAM}_baryon8
 mkdir -p "$OUT"
@@ -52,7 +59,8 @@ launch() {
   echo "  [launch] traj=$traj -> GPU $gpu"
   srun --overlap --mpi=pmix -N1 -n1 -c16 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES=$gpu \
-        LATT=16.16.16.48 ETA=$DEFETA PROFILE=$DEFPROFILE MEAS_BARYON_NTSRC=4 \
+        LATT=16.16.16.48 ETA=$DEFETA PROFILE=$DEFPROFILE \
+        MEAS_BARYON_NTSRC=$DEFNTSRC \
         CG_TOL=1e-7 CG_MAX=$DEFCGMAX LAMBDA_DTXQCD=$LAM \
         CFG_DIR=$CFG DATA_DIR=$OUT \
         OMP_NUM_THREADS=16 \
