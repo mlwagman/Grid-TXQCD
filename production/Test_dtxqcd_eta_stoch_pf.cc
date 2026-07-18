@@ -72,6 +72,13 @@ int main(int argc, char **argv) {
   int nstout = env_int("STOUT_NSMEAR", 1);
   RealD rho  = env_real("STOUT_RHO", 0.125);
   RealD eta  = env_real("ETA", 0.3);
+  // ETA_LO: quadrature over the SEGMENT [eta_lo, eta] instead of [0, eta].
+  // The eta-target family {0.2, 0.4, 0.6} shares nested segments
+  // [0,.2][.2,.4][.4,.6]: each target's DlogPf = the sum of its segments,
+  // computed once each -- and the affordability ledger is per-segment
+  // (the eta=0.6 premium is ONLY its top segment).
+  RealD eta_lo = env_real("ETA_LO", 0.0);
+  GRID_ASSERT(eta_lo >= 0.0 && eta_lo < eta);
   int n_noise = env_int("N_NOISE", 16);
   int n_gl    = env_int("N_GL", 8);
   // Sampling-solve tolerance.  Default 1e-4 since the 2026-07-18 ladder
@@ -460,7 +467,12 @@ int main(int argc, char **argv) {
   // {t : t mod k == r} (k=2 == EOT).  The hop insertion concentrates
   // A's off-diagonals at |Dt|=1, so a k-comb removes all cross terms up
   // to |Dt|=k-1 at D=k cost.
-  const int dilute_ts = env_int("DTXQCD_STOCHPF_DILUTE_TSTRIDE", 0);
+  // Default 4: comb-4 is the measured universal optimum across the
+  // production node range (F-map ladder 2026-07-18: equal-budget ratio
+  // 0.68/0.70/0.74/0.82 at ep=0.05/0.16/0.32/0.40; the hop insertion's
+  // F(Dt) peaks at Dt=1 with xi~2-3).  =0 restores the undiluted
+  // estimator (with DTXQCD_STOCHPF_SCHUR=0 for the full legacy path).
+  const int dilute_ts = env_int("DTXQCD_STOCHPF_DILUTE_TSTRIDE", 4);
   // DTXQCD_STOCHPF_DILUTE_ZPAR=1: z-parity dilution (D=2) -- the spatial
   // control arm (structural prediction: neutral, like spin/color).
   const int dilute_zp = env_int("DTXQCD_STOCHPF_DILUTE_ZPAR", 0);
@@ -970,9 +982,38 @@ int main(int argc, char **argv) {
   }
 #endif
 
+  // NEYMAN allocation: per-node sample counts N_q ∝ w_q σ(ep_q) at fixed
+  // total n_gl*n_noise (variance-optimal for a weighted sum of node
+  // means).  σ(ep) = the measured per-sample table from the F-map ladder
+  // (comb-4 folded in; the profile is FLAT-ish, so the gain over equal
+  // split is modest but free).  DTXQCD_STOCHPF_NEYMAN=0 restores equal.
+  auto sigma_ep = [](double x) {
+    const double xs[4] = {0.05, 0.16, 0.32, 0.40};
+    const double ys[4] = {512.0, 536.0, 621.0, 750.0};
+    if (x <= xs[0]) return ys[0];
+    for (int i = 0; i < 3; ++i)
+      if (x <= xs[i + 1])
+        return ys[i] + (ys[i + 1] - ys[i]) * (x - xs[i]) / (xs[i + 1] - xs[i]);
+    return ys[3] + (ys[3] - ys[2]) * (x - xs[3]) / (xs[3] - xs[2]);
+  };
+  std::vector<int> neyman_nq(n_gl, n_noise);
+  if (env_int("DTXQCD_STOCHPF_NEYMAN", 1)) {
+    double sw = 0;
+    for (int q = 0; q < n_gl; ++q)
+      sw += gl_w[q] * sigma_ep(eta_lo + (eta - eta_lo) * gl_x[q]);
+    for (int q = 0; q < n_gl; ++q) {
+      const double frac =
+          gl_w[q] * sigma_ep(eta_lo + (eta - eta_lo) * gl_x[q]) / sw;
+      neyman_nq[q] = std::max(1, (int)std::lround(n_gl * n_noise * frac));
+      std::cout << GridLogMessage << "[stochpf-neyman] node q=" << q
+                << " N=" << neyman_nq[q] << std::endl;
+    }
+  }
+
   ComplexD dlogdet(0.0, 0.0), dlogdet_var(0.0, 0.0);
   for (int q = 0; q < n_gl; ++q) {
-    const double ep = eta * gl_x[q];
+    const double ep = eta_lo + (eta - eta_lo) * gl_x[q];
+    const int nn = neyman_nq[q];
     BuildWeights(ep);
     if (chempot) BuildGWeights(ep);
     if (hop_insert) BuildHopWeights(ep);
@@ -1272,11 +1313,11 @@ int main(int argc, char **argv) {
         std::cout << GridLogMessage << "GLNODE q=" << q << " eta'=" << ep
                   << " [fmap instrument run -- no trace estimate]"
                   << std::endl;
-        dlogdet += eta * gl_w[q] * g;
+        dlogdet += (eta - eta_lo) * gl_w[q] * g;
         continue;
       }
       ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
-      for (int h = 0; h < n_noise; ++h) {
+      for (int h = 0; h < nn; ++h) {
         F w(&Grid);
         for (int a = 0; a < DtxqcdNf; ++a) {
           gaussian(pRNG, w.upper.f[a]);
@@ -1358,16 +1399,16 @@ int main(int argc, char **argv) {
         acc2r += est.real() * est.real();
         acc2i += est.imag() * est.imag();
       }
-      ComplexD rmean = acc / (double)n_noise;
-      er = std::sqrt(std::max(0.0, acc2r.real() / n_noise -
-                                   rmean.real() * rmean.real()) / n_noise);
-      ei = std::sqrt(std::max(0.0, acc2i.real() / n_noise -
-                                   rmean.imag() * rmean.imag()) / n_noise);
+      ComplexD rmean = acc / (double)nn;
+      er = std::sqrt(std::max(0.0, acc2r.real() / nn -
+                                   rmean.real() * rmean.real()) / nn);
+      ei = std::sqrt(std::max(0.0, acc2i.real() / nn -
+                                   rmean.imag() * rmean.imag()) / nn);
       g = t_exact + rmean;
     } else {
     // Hutchinson: Tr[Mdef^{-1} dM] = E<v, Mdef^{-1} dM v> / 2 (gaussian).
     ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
-    for (int h = 0; h < n_noise; ++h) {
+    for (int h = 0; h < nn; ++h) {
       // Grading-antithetic pair: dM is block-grading ODD, so the odd part of
       // M^{-1} dM dominates the Hutchinson variance yet contributes ZERO to
       // the trace.  Averaging v with Gv (G = block-parity flip of the lower
@@ -1390,25 +1431,28 @@ int main(int argc, char **argv) {
       acc2r += est.real() * est.real();
       acc2i += est.imag() * est.imag();
     }
-    g = acc / (double)n_noise;
-    er = std::sqrt(std::max(0.0, acc2r.real() / n_noise -
-                                 g.real() * g.real()) / n_noise);
-    ei = std::sqrt(std::max(0.0, acc2i.real() / n_noise -
-                                 g.imag() * g.imag()) / n_noise);
+    g = acc / (double)nn;
+    er = std::sqrt(std::max(0.0, acc2r.real() / nn -
+                                 g.real() * g.real()) / nn);
+    ei = std::sqrt(std::max(0.0, acc2i.real() / nn -
+                                 g.imag() * g.imag()) / nn);
     }
     std::cout << GridLogMessage << "GLNODE q=" << q << " eta'=" << ep
               << " Tr[Minv dM] = " << g.real() << " +- " << er
               << "  (im " << g.imag() << " +- " << ei << ")"
               << (schur_mode ? "  [schur]" : "") << std::endl;
-    dlogdet += eta * gl_w[q] * g;
-    dlogdet_var += ComplexD(eta * gl_w[q] * er * eta * gl_w[q] * er,
-                            eta * gl_w[q] * ei * eta * gl_w[q] * ei);
+    dlogdet += (eta - eta_lo) * gl_w[q] * g;
+    dlogdet_var += ComplexD((eta - eta_lo) * gl_w[q] * er * (eta - eta_lo) *
+                                gl_w[q] * er,
+                            (eta - eta_lo) * gl_w[q] * ei * (eta - eta_lo) *
+                                gl_w[q] * ei);
   }
   std::cout << GridLogMessage << "STOCHPF traj=" << traj << " eta=" << eta
             << " dlogdet= " << dlogdet.real()
             << " +- " << std::sqrt(dlogdet_var.real())
             << " darg= " << dlogdet.imag()
-            << " +- " << std::sqrt(dlogdet_var.imag()) << std::endl;
+            << " +- " << std::sqrt(dlogdet_var.imag())
+            << " eta_lo= " << eta_lo << std::endl;
 
   Grid_finalize();
   std::fflush(nullptr);
