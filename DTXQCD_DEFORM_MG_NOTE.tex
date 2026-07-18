@@ -91,7 +91,36 @@ graded profiles the local criterion
 \qquad \muc \simeq 0.85 \ \ (\lambda=5,\ 16^3\times48)
 \end{equation}
 separates benign deformations from ones that manufacture near-zero
-modes in every supercritical stretch.  For the cosine profile
+modes in every supercritical stretch.
+
+\paragraph{Evidence for $\muc \simeq 0.85$.}
+The identification rests on two \emph{independent profile families}
+agreeing once expressed in the local variable $\max_t|\eta\,p'(t)|$:
+\begin{enumerate}
+\item \textbf{Ramp family} ($|p'| = 1$, so $\max|\eta p'| = \eta$):
+the deformed even--odd spectrum shows an onset edge between
+$\eta = 0.80$ and $0.85$ --- $\sigma_{\min}$ collapses by a factor
+$\approx 66$ across that single $\Delta\eta = 0.05$ step, after which
+solves become unconvergeable.  (The rounded-ramp study separates this
+\emph{bulk} edge from the kink-localized wall modes, which exist at
+every $\eta$; the edge survives rounding, the wall modes do not.)
+This places $\muc = 0.85 \pm 0.03$.
+\item \textbf{Cosine family} ($\max|\eta p'| = \eta\pi/2$): the census
+band-count staircase opens at
+$N = 0 \to 2 \to 22 \to 38$ across $\eta = 0.35 \to 0.50$
+(cut $\sigma < 10^{-4}$), locating the threshold at
+$\eta^* \simeq 0.50\pm0.05$, i.e.\
+$\muc = \eta^*\pi/2 = 0.79 \pm 0.08$.  The CG cost corroborates:
+$5{,}204 \to 26{,}761$ iterations across $\eta = 0.5 \to 0.6$
+(a $\times5$ jump against the $\times\sqrt{\kappa}$ trend of the
+subcritical region).
+\end{enumerate}
+Two families, two slopes, one number: $\muc = 0.85(8)$, and the
+criterion is genuinely \emph{local} in $\eta\,p'(t)$ --- the same
+$\muc$ governs a profile with uniform slope and one whose slope varies
+across the lattice.  (Physically $\muc$ is the lightest charged
+excitation of the undeformed doubled operator, so it is a
+$\lambda$-dependent quantity; only $\lambda = 5$ has been mapped.)  For the cosine profile
 $p(t) = \tfrac{T}{4}\left[1-\cos(2\pi t/T)\right]$ the maximal slope is
 $\eta\pi/2$, so the threshold sits at
 $\eta^{*} = 2\muc/\pi \approx 0.54$.  The near-zero mode count follows
@@ -130,9 +159,50 @@ makes the light single-GPU multigrid of Sec.~\ref{sec:mg} possible.
 
 \section{Measured spectra and what they dictated}
 \label{sec:spectra}
+
+\subsection{The instrument}
+\label{sec:instrument}
+Eigenvalues of $\Mt_{\rm pc}^\dagger\Mt_{\rm pc}$ are computed by
+Chebyshev-filtered implicitly-restarted Lanczos.  With
+$\lambda_{\max}$ estimated by a power iteration, the filter is
+\begin{equation}
+H \;=\; T_{n}\!\left(\hat h(\Mt_{\rm pc}^\dagger\Mt_{\rm pc})\right),
+\qquad
+\hat h(\lambda) = \frac{2\lambda - (\ell + u)}{u - \ell},
+\qquad
+[\ell, u] = \left[3\times10^{-5}\,\lambda_{\max},\;
+1.5\,\lambda_{\max}\right],
+\end{equation}
+with polynomial order $n = 1001$ for the census (order 301 fails to
+resolve the dense band and aborts restarting).  Modes below $\ell$ are
+exponentially amplified relative to the $[\ell,u]$ bulk, so the
+near-zero band converges first.  Krylov dimensions:
+$N_{\rm stop} = 48$, $N_k = 60$, $N_m = 120$, at most 20 restarts.
+Convergence is declared on the \emph{filtered} operator residual
+($\|H v - \theta v\|^2/\theta_{\max}^2 \le 10^{-6}$ as logged);
+the quoted eigenvalues are then Rayleigh quotients of the converged
+vectors under the \emph{plain} operator.
+
+\paragraph{Bounds versus converged values.}
+This construction certifies the \emph{existence, count, and ordering}
+of the near-zero band robustly, but for eigenvalues far below the
+window edge ($\lambda \ll \ell \approx 2.3\times10^{-3}$) the
+plain-operator Rayleigh quotient inherits a resolution floor from the
+filtered convergence criterion: the residual bound does not tightly
+constrain values orders of magnitude below $\ell$.  Accordingly the
+$\eta \ge 0.60$ entries of the table below ($\lambda_{\min} \le
+2\times10^{-7}$) should be read as \emph{upper bounds} on
+$\lambda_{\min}$ (equivalently lower bounds on $\kappa$), marked
+$\lesssim$; the criticality and design conclusions depend only on the
+band counts and on order-of-magnitude conditioning, both of which are
+insensitive to this caveat.  Entries with $\lambda_{\min}$ within
+$\sim\!10^{-1}\ell$ of the window ($\eta \le 0.55$) are converged in
+the standard sense.
+
+\subsection{Census}
 Lowest 48 eigenvalues of $\Mt_{\rm pc}^\dagger \Mt_{\rm pc}$
-($16^3\times 48$, $\lambda=5$, traj 300, cosine profile, Chebyshev-IRL,
-uniform instrument ord $=1001$):
+($16^3\times 48$, $\lambda=5$, traj 300, cosine profile, uniform
+instrument as above):
 
 \begin{center}
 \begin{tabular}{cccccc}
@@ -147,9 +217,9 @@ $\kappa=\lambda_{\max}/\lambda_{\min}$ & $N(\sigma<2\times10^{-4})$ \\
 0.45 & $3.73\times10^{-5}$ & $1.70\times10^{-4}$ & 74.1 & $2.0\times10^{6}$ & $\ge 48$ \\
 0.50 & $1.23\times10^{-5}$ & $8.55\times10^{-4}$ & 74.8 & $6.1\times10^{6}$ & 47 \\
 0.55 & $2.58\times10^{-6}$ & $4.03\times10^{-5}$ & 75.6 & $2.9\times10^{7}$ & $\ge 48$ \\
-0.60 & $1.80\times10^{-7}$ & $2.75\times10^{-3}$ & 76.4 & $4.2\times10^{8}$ & 47 \\
-0.65 & $1.77\times10^{-9}$ & $2.66\times10^{-5}$ & 77.2 & $4.4\times10^{10}$ & $\ge 48$ \\
-0.70 & $7.91\times10^{-10}$ & $1.52\times10^{-5}$ & 78.2 & $9.9\times10^{10}$ & $\ge 48$ \\
+0.60 & $\lesssim 1.80\times10^{-7}$ & $2.75\times10^{-3}$ & 76.4 & $\gtrsim 4.2\times10^{8}$ & 47 \\
+0.65 & $\lesssim 1.77\times10^{-9}$ & $2.66\times10^{-5}$ & 77.2 & $\gtrsim 4.4\times10^{10}$ & $\ge 48$ \\
+0.70 & $\lesssim 7.91\times10^{-10}$ & $1.52\times10^{-5}$ & 78.2 & $\gtrsim 9.9\times10^{10}$ & $\ge 48$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -262,25 +332,73 @@ trough ($-\eta\to+\eta$).  Each binds a near-zero quasiparticle of one
 grading block --- a \emph{degenerate pair} (apex: upper block; trough:
 conjugate block).  Diagnostics that established the localization:
 \begin{itemize}
-\item \textbf{Adaptive-setup support collapse.}  Refining multigrid null
-vectors through the solver concentrated their weight onto the wall slices;
-in far blocks the remaining round-off support was renormalized to $O(1)$
-noise by block orthogonalisation and the coarse correction injected it
+\item \textbf{Slice density and grading fraction of the computed
+modes.}  For each converged Lanczos vector $v_k$
+(Sec.~\ref{sec:instrument}) the timeslice density and upper-grading
+fraction
+\begin{equation}
+\rho_k(t) = \sum_{\vec x,\,\alpha} \left|v_k(\vec x, t;\alpha)\right|^2,
+\qquad
+f_k^{u} = \frac{\sum_{\vec x, t,\,\alpha\in\rm upper}
+|v_k|^2}{\|v_k\|^2},
+\end{equation}
+($\alpha$ = grading $\otimes$ flavor $\otimes$ spin $\otimes$ color)
+show the deep pair exponentially localized at the two kink slices with
+$e$-folding widths of 2--3 slices, one member with $f^u \approx 1$
+(apex) and one with $f^u \approx 0$ (source trough, conjugate block).
+\item \textbf{Adaptive-setup support collapse.}  Refining a null vector
+through the current two-level solver,
+$z_i = \mathcal{P}_{\rm MG}[v_i]$ (an approximate $\Mt^{-1}v_i$ at
+loose tolerance $0.05$, $\le 60$ V-cycles), and \emph{replacing}
+$v_i \leftarrow z_i/\|z_i\|$ concentrated all weight onto the wall
+slices; in blocks far from the walls the surviving $O(10^{-8})$
+round-off support was renormalized to $O(1)$ by the coarse-level block
+orthogonalisation, and the coarse correction then injected that noise
 volume-wide (solve residual diverged to $6\times10^6$ with a
-well-conditioned coarse matrix).  Mixing refinements ($v\to v+z/\|z\|$)
-restored stability --- the signature of modes narrower than the block.
-\item \textbf{Source orthogonality with block structure.}  Wall-source
-overlaps with the deep modes are $\lesssim10^{-6}$: the apex mode is
-spatially separated from the source; the trough mode sits \emph{on} the
-source slice but in the conjugate-block components.
-\item \textbf{Rounding response.}  Quadratic rounding of half-width $w$ at
-both walls lifts the pair: CG iterations at $\eta=0.8$ fall
-$59{,}931\to 54{,}889/37{,}196/8{,}307/2{,}435$ for $w=2/4/8/12$; rounding
-the apex alone leaves $\sigma_{\min}$ pinned at the trough state
-($\times1.6$ lift only).  The sharp-tent ``onset edge'' at
-$\eta\simeq0.85$ (a $\times66$ collapse of $\sigma_{\min}$ per
-$\Delta\eta=0.05$) is \emph{wall physics}: the rounded profile passes
-through it, reaching $\eta=0.9$ at $3{,}934$ iterations.
+demonstrably well-conditioned coarse matrix).  The stable refinement is
+the \emph{additive mix}
+\begin{equation}
+v_i^{(n+1)} \;\propto\; v_i^{(n)} + \frac{z_i}{\|z_i\|},
+\qquad z_i = \mathcal{P}_{\rm MG}\big[v_i^{(n)}\big],
+\end{equation}
+which adds roughly one decade of low-mode weight per round while
+keeping every block's support at unit scale --- the practical signature
+that the offending modes are \emph{narrower than a coarse block}.
+\item \textbf{Source orthogonality with block structure.}  Overlaps are
+computed directly between the numerically converged low modes and the
+wall source,
+\begin{equation}
+\mathcal{O}_k \;=\;
+\frac{\left|\langle v_k,\, \eta_{\rm wall}\rangle\right|^2}
+{\|v_k\|^2\,\|\eta_{\rm wall}\|^2}\;\lesssim\;10^{-6},
+\end{equation}
+explaining why plain CG on wall sources converges through a spectrum
+whose $\kappa$ would forbid it for generic right-hand sides: the apex
+mode is spatially separated from the source slice, and the trough mode
+sits \emph{on} the source slice but in the conjugate-grading components
+the source does not populate.
+\item \textbf{Rounding response.}  Replacing the tent apex kink by the
+slope-matched parabola of half-width $w$,
+\begin{equation}
+p_w(t) \;=\;
+\begin{cases}
+\dfrac{T}{2} - \dfrac{w}{2} - \dfrac{(t - T/2)^2}{2w},
+& |t - T/2| < w,\\[6pt]
+\min(t,\, T-t), & \text{otherwise},
+\end{cases}
+\end{equation}
+(and its mirror at the source trough) converts the sign flip of
+$\mu(t) = \eta\,p'(t)$ from a step into a linear crossing of width
+$2w$, which lifts and widens the bound state.  The measured response at
+$\lambda = 5$, $\eta = 0.8$: CG iterations
+$59{,}931 \to 54{,}889 / 37{,}196 / 8{,}307 / 2{,}435 / 1{,}178$ for
+$w = 2/4/8/12/16$; rounding the apex alone leaves $\sigma_{\min}$
+pinned at the trough state ($\times1.6$ lift only) --- the pair must be
+lifted together.  The sharp-tent ``onset edge'' at $\eta \simeq 0.85$
+(the $\times 66$ collapse of Sec.~\ref{sec:crit}) is \emph{bulk}
+physics that survives rounding; the wall modes are what rounding
+removes, carrying the rounded profile to $\eta = 0.9$ at $3{,}934$
+iterations.
 \end{itemize}
 
 \subsection{Supercritical stretches bind extended modes (smooth profiles)}
@@ -337,6 +455,22 @@ sites with all 48 internal components kept per site.  (Historically the
 mask was discovered by accident --- a red--black-allocated field routed
 through a full-grid checkerboard pick --- and then certified as the
 recipe; the clean-recipe dial is retained for study.)
+Explicitly, with $\xi_i$ independent odd-checkerboard Gaussian noise
+and $\mathcal{C}$ the (half-lattice) checkerboard restriction that
+implements the mask,
+\begin{equation}
+v_i \;=\; \mathcal{N}\!\left[\,\mathcal{C}\,x_i\,\right],
+\qquad
+\Mt(\eta)\, x_i = \xi_i \ \ \text{solved to relative residual }10^{-3}
+\ (\approx 130\ \text{even--odd CGNR iterations}),
+\end{equation}
+where $\mathcal{N}$ normalizes.  The mask restores the vector to the
+white-noise Rayleigh quotient
+($\|\Mt v\|/\|v\| = 4.38$, vs.\ $2.86$ for the unmasked converged
+iterate) while retaining the low-mode spatial envelope --- measured on
+the clean-recipe depth ladder: converged iterates make the V-cycle
+\emph{amplify} ($3.9$), the masked basis contracts ($0.05$--$0.10$).
+
 \item \textbf{Left basis for free}: the deformed operator obeys the
 quasi-$\gamma_5$ identity
 $\Gamma_5\,\Mt(\eta)\,\Gamma_5=\Mt(-\eta)^\dagger$ (machine-exact,
@@ -371,6 +505,29 @@ non-Hermitian $z\mathrel{+}=\alpha r$, $\alpha=\langle Ar,r\rangle/\|Ar\|^2$)
 before and after the coarse correction; flexible non-Hermitian PGCR
 outer.
 \end{itemize}
+
+\noindent\textbf{Parameter card} (the final configuration, all values
+defaults in the implementation):
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+fine operator & $\Mt_{\rm pc}$ (even--odd Schur, unsquared) \\
+basis size & $n_b = 16$ right $+$ 16 left (masked iterates, tol $10^{-3}$, cap $5\times10^4$) \\
+blocking & $4^3\times4$ sites, all 48 internal components kept \\
+coarse geometry & 81-point (next-to-next-to-nearest; the Schur distance-2 \\
+ & footprint crosses coarse corners --- 9-point truncation fails S2 at $0.12$) \\
+coarse storage & index-transposed links, 8-variant calibration vs.\ $A_c\cdot v$ to $10^{-15}$ \\
+coarse solve & dense LU, $N = 12{,}288$, $2.4$ GB, same GPU, $36$ s factor, ms/apply \\
+smoother & minimal residual, 8 iterations, pre- and post- \\
+outer solver & flexible non-Hermitian PGCR, $m_{\max} = 16$, restart 16, tol $10^{-7}$ \\
+setup gates & S2 coarse-op consistency $\le 10^{-8}$; assembly calibration $\le 10^{-8}$; \\
+ & per-vector Rayleigh prints; LU-diagonal conditioning; \\
+ & one-V-cycle contraction probe ($\lesssim 0.1$ healthy, $> 0.3$ triggers \\
+ & basis regeneration under reuse; $> 1$ = collapsed basis) \\
+reuse & null vectors shared across profile offsets/strengths (probe-gated) \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \noindent\textbf{Performance} at the production-relevant point
 (differential $14.4$): cosine $\eta=0.6$ + MG $=5{,}187$ fine operator
