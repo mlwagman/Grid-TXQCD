@@ -179,12 +179,16 @@ int main(int argc, char **argv) {
   // NON-const: the RHOT0 instrument switches the contour offset mid-run
   // (all weight builders + the prof lambda capture it by reference).
   int prof_t0 = env_int("PROF_T0", 0);
+  // CONTINUOUS offset shift (TSRC-ratio quadrature): the profile argument
+  // becomes t - prof_t0 - prof_shift with prof_shift real.  0 = the
+  // integer-offset behavior, bit-identical.
+  double prof_shift = 0.0;
   LatticeInteger tc(&Grid);
   LatticeCoordinate(tc, Nd - 1);
   auto prof = [&](int t) {
-    const int dt = ((t - prof_t0) % T + T) % T;
-    if (!tent) return (double)dt;
-    const double d = (double)dt;
+    double d = std::fmod((double)(t - prof_t0) - prof_shift, (double)T);
+    if (d < 0) d += (double)T;
+    if (!tent) return d;
     if (prof_cos)
       return 0.25 * (double)T * (1.0 - std::cos(2.0 * M_PI * d / (double)T));
     double v = std::min(d, (double)T - d);
@@ -198,6 +202,12 @@ int main(int argc, char **argv) {
         v = 0.5 * prof_w_src + b * b / (2.0 * prof_w_src);
     }
     return v;
+  };
+  // p'(t - t0 - shift) for the cos profile (the TSRC-ratio insertion).
+  auto profp = [&](int t) {
+    double d = std::fmod((double)(t - prof_t0) - prof_shift, (double)T);
+    if (d < 0) d += (double)T;
+    return 0.5 * M_PI * std::sin(2.0 * M_PI * d / (double)T);
   };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;
@@ -362,6 +372,30 @@ int main(int argc, char **argv) {
       one = ComplexD(+0.5 * dpf * std::exp(+e * dpf / 2.0), 0.0);
       af_l = where(tc == Integer(t), one, af_l);
       one = ComplexD(-0.5 * dpb * std::exp(-e * dpb / 2.0), 0.0);
+      ab_l = where(tc == Integer(t), one, ab_l);
+    }
+  };
+  // dM~/ds coefficients (contour-OFFSET derivative at fixed eta): the hop
+  // weight w_f(t) = e^{-e dp(t)/2} depends on the offset s only through
+  // dp, and d(dp)/ds = -[p'(t+1-s) - p'(t-s)] = -dpp, so
+  //   d w_f/ds = +(e/2) dpp w_f,   d w_b/ds = -(e/2) dpp(t-1) w_b,
+  // lower block reciprocal.  Fills the SAME af/ab fields, so dMhop (and
+  // through it dStil) becomes the d/ds insertion -- coefficients are
+  // O(e * p'') vs the eta-insertion's O(dp/2): parametrically small.
+  auto BuildHopWeightsS = [&](double e) {
+    auto dp = [&](int t) { return prof((t + 1) % T) - prof(t); };
+    auto dpp = [&](int t) { return profp((t + 1) % T) - profp(t); };
+    LatticeComplex one(&Grid);
+    for (int t = 0; t < T; ++t) {
+      const double dpf = dp(t), dppf = dpp(t);
+      const double dpb = dp((t - 1 + T) % T), dppb = dpp((t - 1 + T) % T);
+      one = ComplexD(+0.5 * e * dppf * std::exp(-e * dpf / 2.0), 0.0);
+      af_u = where(tc == Integer(t), one, af_u);
+      one = ComplexD(-0.5 * e * dppb * std::exp(+e * dpb / 2.0), 0.0);
+      ab_u = where(tc == Integer(t), one, ab_u);
+      one = ComplexD(-0.5 * e * dppf * std::exp(+e * dpf / 2.0), 0.0);
+      af_l = where(tc == Integer(t), one, af_l);
+      one = ComplexD(+0.5 * e * dppb * std::exp(-e * dpb / 2.0), 0.0);
       ab_l = where(tc == Integer(t), one, ab_l);
     }
   };
@@ -744,6 +778,115 @@ int main(int argc, char **argv) {
               << ": |dMhop - FD(Mtil)| / |FD| = "
               << std::sqrt(dev / nrm)
               << (std::sqrt(dev / nrm) < 1e-6 ? "   MATCH" : "   MISMATCH")
+              << std::endl;
+    Grid_finalize();
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
+
+  // ---- TSRC-RATIO mode (DTXQCD_STOCHPF_TSRC_RATIO=M): all-offset
+  // reweighting ratios from ONE smooth periodic quadrature.  The contour
+  // offset is a CONTINUOUS parameter of the cos profile, and
+  //   log[Pf(eta,t0)/Pf(eta,0)] = int_0^t0 ds Tr[S~(s)^-1 dS~/ds],
+  // with dS~/ds the hop insertion built by BuildHopWeightsS (coefficients
+  // O(eta p'') -- parametrically below the eta-insertion's O(dp/2)).
+  // Uniform s-nodes (trapezoid = spectrally accurate for periodic smooth
+  // integrands); cumulative partial sums give every offset; periodicity
+  // forces the closure sum rule (integral over the full period = 0),
+  // printed as TSRCCLOSURE = the live gate + Brownian-bridge corrector.
+  // Runs at FIXED strength eta (env ETA is the target, not a quadrature
+  // endpoint).  cos + chempot + hop + Qdef EO only; no deflation (the
+  // basis is s-dependent; the insertion is small enough not to need it).
+  const int tsrc_M = env_int("DTXQCD_STOCHPF_TSRC_RATIO", 0);
+  if (tsrc_M > 0) {
+    GRID_ASSERT(prof_cos && chempot && hop_insert && Qdef &&
+                "TSRC ratio mode needs cos/chempot/hop/Qdef");
+#ifdef GRID_HAVE_QUDA
+    GRID_ASSERT(Qdef->HasEO());
+#endif
+    const double e = eta;
+    if (env_int("TSRC_DERIVCHECK", 1)) {
+      // operator-level FD gate in s: the hop-corrected M~'s ONLY
+      // s-dependence is the hop weights, so dMhopS must equal the FD of
+      // Mtil(s +- d) to O(d^2) exactly.
+      const double s0 = 0.37 * (double)T, dd = 1e-3;
+      F v(&Grid), y1(&Grid), y2(&Grid), yh(&Grid);
+      GridParallelRNG DR(&Grid);
+      DR.SeedFixedIntegers({55, 56, 57, 58});
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        gaussian(DR, v.upper.f[a]);
+        gaussian(DR, v.lower.f[a]);
+      }
+      prof_shift = s0 + dd;
+      BuildWeights(e);
+      BuildGWeights(e);
+      Mtil(v, y1);
+      prof_shift = s0 - dd;
+      BuildWeights(e);
+      BuildGWeights(e);
+      Mtil(v, y2);
+      prof_shift = s0;
+      BuildWeights(e);
+      BuildGWeights(e);
+      BuildHopWeightsS(e);
+      dMhop(v, yh);
+      RealD nrm = 0, dev = 0;
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        LatticeFermion du(&Grid), dl(&Grid);
+        du = (0.5 / dd) * (y1.upper.f[a] - y2.upper.f[a]) - yh.upper.f[a];
+        dl = (0.5 / dd) * (y1.lower.f[a] - y2.lower.f[a]) - yh.lower.f[a];
+        dev += norm2(du) + norm2(dl);
+        du = (0.5 / dd) * (y1.upper.f[a] - y2.upper.f[a]);
+        dl = (0.5 / dd) * (y1.lower.f[a] - y2.lower.f[a]);
+        nrm += norm2(du) + norm2(dl);
+      }
+      const RealD r = std::sqrt(dev / nrm);
+      std::cout << GridLogMessage
+                << "TSRC-DERIVCHECK |dMhopS - FD_s(Mtil)|/|FD| = " << r
+                << (r < 1e-5 ? "   MATCH" : "   MISMATCH") << std::endl;
+      GRID_ASSERT(r < 1e-5);
+    }
+    ComplexD closure(0.0, 0.0);
+    double closure_var = 0;
+    for (int m = 0; m < tsrc_M; ++m) {
+      prof_shift = (double)m * (double)T / (double)tsrc_M;
+      BuildWeights(e);
+      BuildGWeights(e);
+      BuildHopWeightsS(e);
+      Qdef->SetProfile(e, [&](int t) { return prof(t); });
+      ComplexD acc(0.0, 0.0);
+      double acc2r = 0, acc2i = 0;
+      for (int h = 0; h < n_noise; ++h) {
+        F w(&Grid), y(&Grid), x(&Grid);
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          gaussian(pRNG, w.upper.f[a]);
+          gaussian(pRNG, w.lower.f[a]);
+        }
+        MaskKeepCb(w, Odd);
+        dStil(w, y);   // dMhop fields hold the d/ds coefficients here
+        SchurSolve(y, x);
+        ComplexD est = DtxqcdDeformQuda::finner_(w, x) / 2.0;
+        acc += est;
+        acc2r += est.real() * est.real();
+        acc2i += est.imag() * est.imag();
+      }
+      ComplexD gm = acc / (double)n_noise;
+      const double er2 =
+          std::max(0.0, acc2r / n_noise - gm.real() * gm.real()) / n_noise;
+      const double ei2 =
+          std::max(0.0, acc2i / n_noise - gm.imag() * gm.imag()) / n_noise;
+      std::cout << GridLogMessage << "TSRCNODE m=" << m << " s=" << prof_shift
+                << " Tr[Sinv dS/ds] = " << gm.real() << " +- "
+                << std::sqrt(er2) << "  (im " << gm.imag() << " +- "
+                << std::sqrt(ei2) << ")" << std::endl;
+      const double wq = (double)T / (double)tsrc_M;
+      closure += wq * gm;
+      closure_var += wq * wq * er2;
+    }
+    std::cout << GridLogMessage << "TSRCCLOSURE eta=" << eta
+              << " integral over full period = " << closure.real() << " +- "
+              << std::sqrt(closure_var)
+              << "  (sum rule: 0; offline bridge-corrects the cumulative)"
               << std::endl;
     Grid_finalize();
     std::fflush(nullptr);
