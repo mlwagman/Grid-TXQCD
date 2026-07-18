@@ -299,6 +299,16 @@ class DtxqcdDeformMG {
               << (usecond() - t0) * 1e-6 << " s (N=" << Ncc_() << ")"
               << std::endl;
     ready_ = true;
+    // MG-lite knobs for the SUBCRITICAL reweighting nodes (ep < 0.54 for
+    // cos): DTXQCD_MG_LUDEV picks the dense-LU GPU (default 1 = the
+    // certified two-GPU layout; 0 = single-GPU when the coarse fits, e.g.
+    // BLOCK=4.4.4.4 -> N=12,288 -> 2.4 GB).  DTXQCD_MG_COARSE=gmres
+    // replaces the dense LU with restarted GMRES on A_c (CTOL/CMAXIT/
+    // CRESTART) -- the historical "GMRES does not converge on the coarse
+    // system" verdict was measured on the SUPERCRITICAL inherited band;
+    // the subcritical coarse system may be iterable, freeing the second
+    // GPU entirely (2x fleet throughput).  Gate every configuration with
+    // the contraction probe + selftest before production use.
     // One-V-cycle contraction probe: |r - M~ V(r)| / |r| on a random odd
     // vector.  Separates BASIS quality (probe >~ 1: coarse correction
     // useless -> PGCR stalls) from outer-solver issues (probe ~ 0.6 like
@@ -467,10 +477,20 @@ class DtxqcdDeformMG {
       CoarseVector cr(m.coarse_.get()), cx(m.coarse_.get());
       m.aggL_->ProjectToSubspace(cr, resid);
       cx = Zero();
-      std::vector<ComplexD> cb;
-      m.Packc_(cr, cb);
-      m.direct_.Solve(cb);
-      m.Pokec_(cb, cx);
+      if (m.coarse_gmres_) {
+        NonHermitianLinearOperator<LittleDiracOperator, CoarseVector> cop(
+            *m.Ac_);
+        GeneralisedMinimalResidual<CoarseVector> gmres(
+            m.EnvReal_("DTXQCD_MG_CTOL", 1e-2),
+            m.EnvInt_("DTXQCD_MG_CMAXIT", 2000),
+            m.EnvInt_("DTXQCD_MG_CRESTART", 64), false);
+        gmres(cop, cr, cx);
+      } else {
+        std::vector<ComplexD> cb;
+        m.Packc_(cr, cb);
+        m.direct_.Solve(cb);
+        m.Pokec_(cb, cx);
+      }
       Field corr(r.Grid());
       corr.Checkerboard() = r.Checkerboard();
       m.aggR_->PromoteFromSubspace(cx, corr);
@@ -518,6 +538,16 @@ class DtxqcdDeformMG {
   // Dense assembly, convention-calibrated once (measured winner: shift +1,
   // TRANSPOSED link indices, link at x — variant 2).
   void BuildDirect_() {
+    // GMRES coarse mode: no dense assembly, no LU (S2 already gates the
+    // coarse operator against the fine one) -- single-GPU, zero coarse
+    // memory beyond A_c itself.
+    coarse_gmres_ = EnvStr_("DTXQCD_MG_COARSE", "lu") == std::string("gmres");
+    if (coarse_gmres_) {
+      std::cout << GridLogMessage
+                << "[deform-mg] coarse solve: restarted GMRES (no LU)"
+                << std::endl;
+      return;
+    }
     const int npoint = geom_->npoint;
     const int N = Ncc_();
     std::vector<std::complex<double>> Dcol;
@@ -589,6 +619,7 @@ class DtxqcdDeformMG {
       best = rel();
     }
     GRID_ASSERT(best < 1e-8 && "deform-mg dense assembly calibration failed");
+    direct_.dev = EnvInt_("DTXQCD_MG_LUDEV", 1);
     direct_.Factor(Dcol, N);
   }
   // Internal CGNR (dag=false: solve M~ z = r; dag=true: M~^dag z = r).
@@ -691,6 +722,7 @@ class DtxqcdDeformMG {
   CoarseDirect direct_;
   int variant_ = -1;
   bool ready_ = false;
+  bool coarse_gmres_ = false;
 };
 
 #endif  // GRID_CUDA && GRID_HAVE_QUDA

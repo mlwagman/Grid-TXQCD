@@ -525,6 +525,7 @@ int main(int argc, char **argv) {
     auto comp = [&](int g) { return g % 48; };
     std::vector<Scheme> schemes = {
         {"t-slice", T, [&](int g) { return siteT(g); }},
+        {"t-comb2 (eot)", 2, [&](int g) { return siteT(g) % 2; }},
         {"spin", 4, [&](int g) { return (comp(g) % 12) / 3; }},
         {"color", 3, [&](int g) { return comp(g) % 3; }},
         {"spin*color", 12, [&](int g) { return comp(g) % 12; }},

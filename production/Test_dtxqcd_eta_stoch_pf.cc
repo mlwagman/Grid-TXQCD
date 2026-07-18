@@ -176,7 +176,9 @@ int main(int argc, char **argv) {
   // PROF_T0 (default 0): profile offset -- p(t) = tent/linear of (t - t0)
   // mod T.  Matches meas_baryon_deform_dtxqcd's source-centered contours:
   // translation averaging there needs one ΔlogPf per offset, computed here.
-  const int prof_t0 = env_int("PROF_T0", 0);
+  // NON-const: the RHOT0 instrument switches the contour offset mid-run
+  // (all weight builders + the prof lambda capture it by reference).
+  int prof_t0 = env_int("PROF_T0", 0);
   LatticeInteger tc(&Grid);
   LatticeCoordinate(tc, Nd - 1);
   auto prof = [&](int t) {
@@ -409,9 +411,55 @@ int main(int argc, char **argv) {
   // insertion term).
   const int defl_nev = env_int("DTXQCD_STOCHPF_DEFLATE", 0);
   const int dilute_eot = env_int("DTXQCD_STOCHPF_DILUTE_EOT", 0);
+  // DTXQCD_STOCHPF_DILUTE_TBLOCK=B: contiguous t-block dilution, D = T/B
+  // blocks of B slices (0 = off; overrides EOT).  The scan over B maps the
+  // integrated Dt-decay of A = S~^-1 dS~ at production volume -- the 4^4
+  // t-slice win (x1.78 equal-budget) came from T ~ the S~^-1 correlation
+  // length, so blocks of ~xi slices are the T=48 candidate.
+  const int dilute_tb = env_int("DTXQCD_STOCHPF_DILUTE_TBLOCK", 0);
+  // DTXQCD_STOCHPF_DILUTE_TSTRIDE=k: interleaved comb dilution, block r =
+  // {t : t mod k == r} (k=2 == EOT).  The hop insertion concentrates
+  // A's off-diagonals at |Dt|=1, so a k-comb removes all cross terms up
+  // to |Dt|=k-1 at D=k cost.
+  const int dilute_ts = env_int("DTXQCD_STOCHPF_DILUTE_TSTRIDE", 0);
+  // DTXQCD_STOCHPF_DILUTE_ZPAR=1: z-parity dilution (D=2) -- the spatial
+  // control arm (structural prediction: neutral, like spin/color).
+  const int dilute_zp = env_int("DTXQCD_STOCHPF_DILUTE_ZPAR", 0);
+  // DTXQCD_STOCHPF_TSLICE=1: log per-timeslice partial estimates s_t
+  // (TSLICE lines) each sample.  CAUTION (2026-07-18): with a single
+  // probe the conjugated covariance of s_t is Wick-blind to cross-t
+  // Frobenius mass (contractions force t=t') -- mode 1 does NOT predict
+  // dilution schemes.  Kept for the per-sample decomposition only.
+  // DTXQCD_STOCHPF_TSLICE=2: the F-MAP instrument -- per "sample", one
+  // probe pair (z, z'); z' is solved once per masked t' slice (T solves)
+  // and FMAP lines record |slice_t <z, A z'|_t'>|^2-ready partials: the
+  // sample-mean of |f(t,t')|^2 is an unbiased estimate of
+  // F(t,t') = sum_{i in t, j in t'} |A_ij|^2, the exact object every
+  // t-dilution scheme's variance is a partial sum of.
+  const int tslice_log = env_int("DTXQCD_STOCHPF_TSLICE", 0);
+  // DTXQCD_STOCHPF_RHOT0=<t0B>: the DIFFERENCE-TELESCOPE correlation
+  // instrument.  Per sample, the SAME noise w is pushed through the
+  // estimator at contour offsets t0A (=PROF_T0) and t0B; RHOPAIR lines
+  // record both estimates.  Offline corr(estA, estB) prices the
+  // common-noise difference estimator DlogPf(t0B) - DlogPf(t0A):
+  // Var(diff) = (1-rho)-suppressed => one anchor offset + 47 cheap
+  // differences instead of 48 full estimates, IF rho is high.
+  // Runs with DEFLATE=0 (the basis is t0-dependent; rho of the plain
+  // Schur estimator is the relevant number).  -1 = off.
+  const int rho_t0b = env_int("DTXQCD_STOCHPF_RHOT0", -1);
   const int use_anti = env_int("DTXQCD_STOCHPF_ANTI", 1);
   const int schur_mode = env_int("DTXQCD_STOCHPF_SCHUR",
-                                 (defl_nev > 0 || dilute_eot) ? 1 : 0);
+                                 (defl_nev > 0 || dilute_eot || dilute_tb ||
+                                  dilute_ts || dilute_zp || rho_t0b >= 0)
+                                     ? 1 : 0);
+  if (rho_t0b >= 0)
+    GRID_ASSERT(defl_nev == 0 &&
+                "RHOT0 instrument runs undeflated (basis is t0-dependent)");
+  if (dilute_tb > 0) GRID_ASSERT(T % dilute_tb == 0);
+  if (dilute_ts > 0) GRID_ASSERT(T % dilute_ts == 0);
+  GRID_ASSERT((dilute_tb > 0) + (dilute_ts > 0) + (dilute_eot != 0) +
+                  (dilute_zp != 0) <= 1 &&
+              "one dilution scheme at a time");
   if (schur_mode) {
     GRID_ASSERT(hop_insert && chempot && Qdef &&
                 "SCHUR estimator needs INSERTION=hop, CHEMPOT_FRAME=1 and "
@@ -917,11 +965,34 @@ int main(int argc, char **argv) {
         }
       };
       // one remainder estimate <w, S~^-1 (1-P) dS~ w>/2 for a given probe
+      int tslice_id = 0;
       auto Remainder = [&](const F &w) {
         F y(&Grid), x(&Grid);
         dStil(w, y);
         Project(y);
         SchurSolve(y, x);
+        if (tslice_log) {
+          // per-timeslice partials s_t (sum_t s_t = the estimate): the
+          // sample-covariance of these over the run predicts every
+          // t-dilution scheme's variance offline.
+          LatticeComplex dens(&Grid);
+          dens = Zero();
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            dens = dens + localInnerProduct(w.upper.f[a], x.upper.f[a]);
+            dens = dens + localInnerProduct(w.lower.f[a], x.lower.f[a]);
+          }
+          std::vector<TComplex> sums;
+          sliceSum(dens, sums, Nd - 1);
+          std::cout << GridLogMessage << "TSLICE n=" << tslice_id << " re";
+          for (int t = 0; t < T; ++t)
+            std::cout << " " << 0.5 * TensorRemove(sums[t]).real();
+          std::cout << std::endl;
+          std::cout << GridLogMessage << "TSLICE n=" << tslice_id << " im";
+          for (int t = 0; t < T; ++t)
+            std::cout << " " << 0.5 * TensorRemove(sums[t]).imag();
+          std::cout << std::endl;
+          ++tslice_id;
+        }
         return DtxqcdDeformQuda::finner_(w, x) / 2.0;
       };
       // t-parity masks for the eo-t dilution
@@ -937,6 +1008,99 @@ int main(int argc, char **argv) {
           else
             mt1 = where(tc == Integer(t), one, mt1);
         }
+      }
+      if (rho_t0b >= 0) {
+        // difference-telescope correlation: same noise through both
+        // contour offsets; all weight builders capture prof_t0 by
+        // reference, so switching it + rebuilding retargets the operator.
+        const int t0a = prof_t0;
+        for (int h = 0; h < n_noise; ++h) {
+          F w(&Grid);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            gaussian(pRNG, w.upper.f[a]);
+            gaussian(pRNG, w.lower.f[a]);
+          }
+          MaskKeepCb(w, Odd);
+          ComplexD eab[2];
+          const int t0s[2] = {t0a, rho_t0b};
+          for (int s = 0; s < 2; ++s) {
+            prof_t0 = t0s[s];
+            BuildWeights(ep);
+            BuildGWeights(ep);
+            BuildHopWeights(ep);
+            Qdef->SetProfile(ep, [&](int t) { return prof(t); });
+            eab[s] = Remainder(w);
+          }
+          prof_t0 = t0a;
+          std::cout << GridLogMessage << "RHOPAIR h=" << h << " A "
+                    << eab[0].real() << " " << eab[0].imag() << " B "
+                    << eab[1].real() << " " << eab[1].imag() << std::endl;
+        }
+        // restore the t0a operator state for any later nodes
+        BuildWeights(ep);
+        BuildGWeights(ep);
+        BuildHopWeights(ep);
+        Qdef->SetProfile(ep, [&](int t) { return prof(t); });
+        g = ComplexD(0.0, 0.0);
+        er = ei = 0;
+        std::cout << GridLogMessage << "GLNODE q=" << q << " eta'=" << ep
+                  << " [rhot0 instrument run -- no trace estimate]"
+                  << std::endl;
+        continue;
+      }
+      if (tslice_log == 2) {
+        // F-MAP instrument: N_NOISE probe pairs x T masked solves each.
+        // Offline: F(t,t') = mean over pairs of |f(t,t')|^2 / 4.
+        LatticeComplex one(&Grid), mtp(&Grid);
+        one = ComplexD(1.0, 0.0);
+        for (int h = 0; h < n_noise; ++h) {
+          F z(&Grid), zp(&Grid);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            gaussian(pRNG, z.upper.f[a]);
+            gaussian(pRNG, z.lower.f[a]);
+            gaussian(pRNG, zp.upper.f[a]);
+            gaussian(pRNG, zp.lower.f[a]);
+          }
+          MaskKeepCb(z, Odd);
+          MaskKeepCb(zp, Odd);
+          for (int tp = 0; tp < T; ++tp) {
+            mtp = ComplexD(0.0, 0.0);
+            mtp = where(tc == Integer(tp), one, mtp);
+            F zt(&Grid), y(&Grid), x(&Grid);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              zt.upper.f[a] = mtp * zp.upper.f[a];
+              zt.lower.f[a] = mtp * zp.lower.f[a];
+            }
+            dStil(zt, y);
+            Project(y);
+            SchurSolve(y, x);
+            LatticeComplex dens(&Grid);
+            dens = Zero();
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              dens = dens + localInnerProduct(z.upper.f[a], x.upper.f[a]);
+              dens = dens + localInnerProduct(z.lower.f[a], x.lower.f[a]);
+            }
+            std::vector<TComplex> sums;
+            sliceSum(dens, sums, Nd - 1);
+            std::cout << GridLogMessage << "FMAP h=" << h << " tp=" << tp
+                      << " re";
+            for (int t = 0; t < T; ++t)
+              std::cout << " " << TensorRemove(sums[t]).real();
+            std::cout << std::endl;
+            std::cout << GridLogMessage << "FMAP h=" << h << " tp=" << tp
+                      << " im";
+            for (int t = 0; t < T; ++t)
+              std::cout << " " << TensorRemove(sums[t]).imag();
+            std::cout << std::endl;
+          }
+        }
+        g = t_exact;
+        er = ei = 0;
+        std::cout << GridLogMessage << "GLNODE q=" << q << " eta'=" << ep
+                  << " [fmap instrument run -- no trace estimate]"
+                  << std::endl;
+        dlogdet += eta * gl_w[q] * g;
+        continue;
       }
       ComplexD acc(0.0, 0.0), acc2r(0.0, 0.0), acc2i(0.0, 0.0);
       for (int h = 0; h < n_noise; ++h) {
@@ -958,7 +1122,54 @@ int main(int argc, char **argv) {
           return e;
         };
         ComplexD est;
-        if (dilute_eot) {
+        if (dilute_ts > 0) {
+          est = ComplexD(0.0, 0.0);
+          LatticeComplex mb(&Grid), one(&Grid);
+          one = ComplexD(1.0, 0.0);
+          for (int r = 0; r < dilute_ts; ++r) {
+            mb = ComplexD(0.0, 0.0);
+            for (int t = r; t < T; t += dilute_ts)
+              mb = where(tc == Integer(t), one, mb);
+            F wb(&Grid);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              wb.upper.f[a] = mb * w.upper.f[a];
+              wb.lower.f[a] = mb * w.lower.f[a];
+            }
+            est = est + EstOf(wb);
+          }
+        } else if (dilute_zp > 0) {
+          est = ComplexD(0.0, 0.0);
+          LatticeInteger zc(&Grid);
+          LatticeCoordinate(zc, 2);
+          LatticeComplex mb(&Grid), one(&Grid);
+          one = ComplexD(1.0, 0.0);
+          for (int r = 0; r < 2; ++r) {
+            mb = ComplexD(0.0, 0.0);
+            for (int z = r; z < latt[2]; z += 2)
+              mb = where(zc == Integer(z), one, mb);
+            F wb(&Grid);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              wb.upper.f[a] = mb * w.upper.f[a];
+              wb.lower.f[a] = mb * w.lower.f[a];
+            }
+            est = est + EstOf(wb);
+          }
+        } else if (dilute_tb > 0) {
+          est = ComplexD(0.0, 0.0);
+          LatticeComplex mb(&Grid), one(&Grid);
+          one = ComplexD(1.0, 0.0);
+          for (int b = 0; b < T / dilute_tb; ++b) {
+            mb = ComplexD(0.0, 0.0);
+            for (int t = b * dilute_tb; t < (b + 1) * dilute_tb; ++t)
+              mb = where(tc == Integer(t), one, mb);
+            F wb(&Grid);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              wb.upper.f[a] = mb * w.upper.f[a];
+              wb.lower.f[a] = mb * w.lower.f[a];
+            }
+            est = est + EstOf(wb);
+          }
+        } else if (dilute_eot) {
           F w0(&Grid), w1(&Grid);
           for (int a = 0; a < DtxqcdNf; ++a) {
             w0.upper.f[a] = mt0 * w.upper.f[a];
