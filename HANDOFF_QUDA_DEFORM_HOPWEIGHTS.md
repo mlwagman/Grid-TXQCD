@@ -243,6 +243,144 @@ Implementation plan (all pieces exist in `DTXQCDWilsonCloverFermionEO` +
   `dtxqcd_lam5.0000_4t4_signhop_lam5`) — above the Mee cliff, ⟨signPf⟩=1,
   clean decorrelated chain.
 
+## 5d. REWEIGHTING FACTORS: SOLVED — the production battery (2026-07-18)
+
+**Status: the 5c program is complete.  Reweighting factors went from
+"showstopper" (σ ≈ 20–40/config at 24 solves) to a running 4-config
+pilot at η=0.2 with σ_anchor ≈ 1 in 24 GPU-h/config.**  Every element
+below is measured and gated; commits dcc64dbc / ea28a970 / 6528a8aa.
+
+### The measured stack (all multiplicative)
+
+| lever | win | evidence |
+|---|---|---|
+| Schur-form estimator | ×1.7 σ | 4⁴ gate 1302156 |
+| comb-4 t-dilution (DEFAULT) | ×1.2–1.5 σ | F-map ladder: universal optimum 0.68–0.82 at ep=0.05–0.40 |
+| CG_TOL=1e-4 sampling (DEFAULT) | ×1.8 time | ladder gate 1302547: bias 1.5e-4 vs ±1.25 stat |
+| MG-lite L1 (single GPU, DEFAULT) | ~×9/solve above ep\*≈0.15 | crossover 1302548/65; marginal ~7 s/solve at ep=0.4 |
+| REUSE_NV shared nullspace (battery env) | setup 110 s → 20 µs/node | A/B 1302589; probe-gated auto-fallback |
+| Neyman allocation (DEFAULT) | ~13% σ | measured flat-ish σ(ep) table baked in |
+| η-segments ETA_LO | ~2× across target family + lower variance | consistency gate 1302595 |
+| TSRC-RATIO quadrature | 48 offsets ≈ 2–3 anchors | ∂ₛ insertion O(η p″): node σ 14–31 vs 540; DERIVCHECK 1.3e-8; closure sum rule |
+| oblique-projector deflation | variance-neutral, exact-term capture, ~free cached | prod A/B 1302160; NO bias from loose pairs (6-digit dense match) |
+
+Deflation verdict: the deep band carries large MEAN (exact terms −105 at
+K=16, −269 at K=48) but NOT the variance (σ 540→507 at K=48) — the bulk
+floor dominates (√V scaling from 4⁴ + the σ∝η-was-the-prefactor
+finding: σ(ep) is flat-ish {0.05: 512, 0.16: 536, 0.32: 621, 0.40: 750}).
+
+### How to run reweighting factors (per config)
+
+```bash
+# 1) ANCHOR per segment (nested across the eta-target family):
+env LATT=16.16.16.48 TRAJ=<t> CFG_DIR=<lam5 dir> PROFILE=cos PROF_T0=0 \
+    ETA=0.2  ETA_LO=0.0 N_GL=2 N_NOISE=625 DTXQCD_STOCHPF_ANTI=0 \
+    DTXQCD_DEFORM_QUDA=1 DTXQCD_DEFORM_EO=1 DTXQCD_MG_REUSE_NV=1 \
+    ./Test_dtxqcd_eta_stoch_pf ...        # sigma_anchor ~ 1.0, ~10 GPU-h
+# repeat with ETA=0.4 ETA_LO=0.2 and ETA=0.6 ETA_LO=0.4 as budget allows;
+# each target's DlogPf = sum of its segments (STOCHPF lines carry eta_lo).
+# 2) TSRC ratios (ALL 48 offsets from one periodic quadrature):
+env ... ETA=0.2 DTXQCD_STOCHPF_TSRC_RATIO=12 N_NOISE=500 \
+    DTXQCD_MG_REUSE_NV=1 ./Test_dtxqcd_eta_stoch_pf ...
+# offline: cumulative trapezoid of the TSRCNODE means, bridge-corrected
+# by the TSRCCLOSURE sum rule; DlogPf(t0) = anchor + ratio(t0).
+```
+Defaults already ON: comb-4 dilution, Neyman, CG_TOL=1e-4, Schur form,
+MG-lite (ETAMIN 0.15).  Reference launcher: `slurm_rwf_battery_smoke.sh`
+(+ `_seg.sh`).  Pricing: η=0.2 full ensemble ≈ 2,300 GPU-h (VIABLE);
+η=0.4 ×2; η=0.6 ~100+ GPU-h/config (subset campaign; its top node
+ep=0.558 is marginally supercritical — verified only by extrapolation).
+Accuracy contract: per-config anchor σ ≲ 1 (the e^{σ²} ESS argument:
+exponentiation bias CANCELS in reweighting ratios for independent noise);
+relative offsets tolerate σ_D ~ 2–3.
+
+### Propagator-side MG update (MG-lite L1 = NEW DEFAULT)
+
+`DTXQCD_MG_BLOCK=4.4.4.4` + `DTXQCD_MG_LUDEV=0` (both now header
+defaults) put the dense coarse LU (N=12,288, 2.4 GB) on the SAME GPU:
+**h5-certified at cos η=0.6 (job 1302640) and BETTER than the original
+two-GPU config — selftest 3,891 vs 4,501 Ops, wall 5,664 vs 8,695,
+coarsen+LU 36 vs 50 s.**  The GPU-pairs constraint (DEFGPUS) is
+OBSOLETE — deform-MG runs single-GPU everywhere; fleets get 2×
+throughput from the same allocation.  `DTXQCD_MG_REUSE_NV=1` extends to
+source-centered prop measurements (per-t_src setup 640–840 s of NV → 36 s
+coarsen+LU; probe-gated fallback), certified for s-shifts, probe-guarded
+per t_src.  GMRES coarse (`DTXQCD_MG_COARSE=gmres`) converges at
+subcritical nodes but is slower than the LU — the zero-memory fallback.
+
+## 5c. DEFLATED TRACE ESTIMATOR — the reweighting critical path (2026-07-16)
+
+**The measured problem.** The fast EO estimator works (56 s/solve at λ=5
+η=0.4, guards + proper GL rules in, commits 65ea769d/a93707d3), but the
+rwf battery prices per-config ΔlogPf noise at 24 solves (N_GL=2, N_NOISE=12,
+cos, PROF_T0=0):
+
+| point | ΔlogPf ± σ | darg ± σ |
+|---|---|---|
+| λ=4 η=0.2 traj300 | +0.1 ± 17.3 | +2.8 ± 12.8 |
+| λ=4 η=0.4 traj300 | −48.4 ± 52.9 | +64.4 ± 40.5 |
+| λ=4 η=0.6 traj300 | +49.6 ± 88.7 | +49.9 ± 75.7 |
+| λ=5 η=0.2 traj500 | −16.5 ± 18.3 | −8.0 ± 18.9 |
+| λ=5 η=0.4 traj500 | +8.8 ± 42.8 | +1.2 ± 46.9 |
+| λ=5 η=0.6 traj500 | +31.4 ± 72.7 | −22.3 ± 68.9 |
+
+(σ ≈ 18·(η/0.2), λ=4 ~25% noisier than λ=5 at fixed η; every value ≲1σ
+from zero — noise-dominated across the whole map.  Per-node integrand σ ≈
+120–215 at N12 — the same per-sample σ ≈ 400 as the pre-perf era; the fast
+solver made samples cheap, not quiet.  η=0.6 numbers from the GPU-PAIRED
+rerun (EO+MG); earlier "−6.8 ± 3.0" was the TRUNCATED-rule artifact.)  Reweighting needs σ ≲ O(1) per config/offset ⇒
+brute force ~10⁵ solves/config/offset.  Cheap solves cannot buy this; the
+Hutchinson VARIANCE must come down — this is now the single blocker for
+production reweighting, and it is a job for the deflation stack.
+
+**Proposed estimator (singular-triplet split).**  With the SVD
+S̃ = Σ σ_k u_k v_k†, split at K smallest σ:
+
+  Tr[S̃⁻¹ dS̃] = Σ_{k≤K} σ_k⁻¹ ⟨u_k| dS̃ |v_k⟩          (EXACT, no noise)
+              + E_w ⟨w, S̃⁻¹ P⊥_u dS̃ w⟩                 (Hutchinson, deflated)
+
+- v_k, σ_k² = lowest eigenpairs of M̃pc†M̃pc (the stack's bread and butter;
+  ord~1001 window discipline per [[dtxqcd-deform-deflation]]);
+  u_k = S̃ v_k / σ_k.
+- Remainder sample: y = dS̃ w (hop-form insertion, exists); project y ⊥
+  span{u_k}; deflated solve S̃x = P⊥y (Galerkin deflation accelerates this
+  too); accumulate ⟨w, x⟩.  Keep the grading-antithetic pair.
+- The variance is dominated by the σ_k⁻¹-enhanced directions — exactly the
+  low band the census maps.  NOTE the known solve-side result does NOT
+  carry over: "eigen-deflation returns ZERO at η=0.8" was about CGNR
+  iteration counts (mid-band dominated); the TRACE variance ∝ σ_k⁻² is
+  low-mode dominated, so deflation should pay here even where it failed
+  for solves.  The open risk is the same dense mid-band: variance-vs-K may
+  flatten once K exhausts the resolvable outliers.  MEASURE IT FIRST on
+  4⁴ dense (exact SVD + exact trace via cuSOLVER — one afternoon, decides
+  the production K before any big wiring).
+- Eigenpair tolerance → trace BIAS (not just variance): the exact term
+  needs refined triplets or a residual-correction term; gate at 4⁴ against
+  the dense trace to 1e-8.
+
+**The offset unlock (why this also rescues NTSRC=48).**  Source-centered
+contours need one ΔlogPf per offset; the stack's **basis cache + frame
+translation** (e98a3c9c) translates an eigenbasis between t0 frames — one
+eigensolve per config, translated per offset, amortizes the dominant cost
+across all 48 offsets.  Combined with per-offset deflated Hutchinson this
+is the only visible path to reweighted max-stats datasets.
+
+**ALSO FOR THE MG OWNER — λ=4 wall-source stall (2026-07-16, farm 1302010):**
+cos η=0.6 λ=4, EO+MG forced, ALL setup gates green (S2 7e-14, LU-diag 52.8,
+contraction probe 0.111, NV Rayleigh 4.589) yet the WALL solve hard-stalls
+at relres 0.044 @ 60k while the same pairing's gaussian-source estimator
+solves succeed.  The gates are gaussian probes; wall sources excite what
+the λ=4 coarse span misses (the old λ-scan's "λ=4 needs nbasis>32").  λ=4
+η=0.6 correlator farm is parked on this; λ=5 unaffected.  Suggested: add a
+WALL-source contraction probe to the Setup gates so this class is caught
+before a production run.
+
+**Contract to preserve** (Test_dtxqcd_eta_stoch_pf): GLNODE/STOCHPF output
+format; proper 1/2/4/8-pt GL rules; NOT-CONVERGED ⇒ _Exit(3) (unconverged
+solves bias the trace); PROF_T0 / profile dispatch (cos default in scripts,
+tent in code); MG needs GPU PAIRS (CoarseDirect dev=1 — the 2026-07-16
+single-GPU lesson, commit 6b524e97).
+
 ## 6. Context pointers
 
 - Program history + physics: memory `dtxqcd-eta-contour-deformation.md`;

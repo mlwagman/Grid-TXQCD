@@ -97,7 +97,11 @@ class DtxqcdDeformMG {
   DtxqcdDeformMG(DtxqcdDeformQuda &q, GridCartesian &grid,
                  GridRedBlackCartesian &rb)
       : q_(q), grid_(grid), rb_(rb), shim_(q, &rb) {
-    block_ = ParseBlock_(EnvStr_("DTXQCD_MG_BLOCK", "4.4.4.2"));
+    // Default 4.4.4.4 = the MG-lite L1 config (N=12,288, 2.4 GB LU,
+    // fits the SAME GPU): h5-certified at cos eta=0.6 (job 1302640) and
+    // BETTER than the original 4.4.4.2 two-GPU config -- selftest
+    // 3,891 vs 4,501 Ops, wall 5,664 vs 8,695, coarsen+LU 36 vs 50 s.
+    block_ = ParseBlock_(EnvStr_("DTXQCD_MG_BLOCK", "4.4.4.4"));
     Coordinate latt = grid_.GlobalDimensions();
     clatt_.resize(Nd);
     for (int d = 0; d < Nd; ++d) {
@@ -642,7 +646,8 @@ class DtxqcdDeformMG {
       best = rel();
     }
     GRID_ASSERT(best < 1e-8 && "deform-mg dense assembly calibration failed");
-    direct_.dev = EnvInt_("DTXQCD_MG_LUDEV", 1);
+    // Default 0 = same-GPU LU (the L1 config; no GPU-pairs constraint).
+    direct_.dev = EnvInt_("DTXQCD_MG_LUDEV", 0);
     direct_.Factor(Dcol, N);
   }
   // Internal CGNR (dag=false: solve M~ z = r; dag=true: M~^dag z = r).
