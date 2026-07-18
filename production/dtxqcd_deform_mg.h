@@ -142,7 +142,20 @@ class DtxqcdDeformMG {
     // probe (+ selftest in production runs).  =0 selects the clean
     // full-grid pure-odd recipe (the ladder's subject) for future study.
     const int rbquirk = EnvInt_("DTXQCD_MG_NV_RBQUIRK", 1);
-    for (int i = 0; i < NB; ++i) {
+    // DTXQCD_MG_REUSE_NV=1: keep the aggregates from the previous Setup
+    // (shared null space).  At SUBCRITICAL strengths the masked basis is
+    // white-noise-Rayleigh and barely operator-specific, so it transfers
+    // across s/eta nodes; the coarse op + LU are always rebuilt (they DO
+    // change).  Probe-gated: if the one-V-cycle contraction exceeds
+    // DTXQCD_MG_REUSE_MAXCONTR (default 0.3) the basis is regenerated
+    // in full — reuse can degrade quality but never correctness.
+    const bool reuse_nv =
+        EnvInt_("DTXQCD_MG_REUSE_NV", 0) != 0 && ready_;
+    if (reuse_nv)
+      std::cout << GridLogMessage
+                << "[deform-mg] REUSING null-vector basis (probe-gated)"
+                << std::endl;
+    for (int i = reuse_nv ? NB : 0; i < NB; ++i) {
       F rf(&grid_), xf(&grid_);
       GaussFull_(pRNG, rf);
       RealD rel = 0;
@@ -326,8 +339,18 @@ class DtxqcdDeformMG {
       vc(r, z);
       shim_.Op(z, t);
       t = t - r;
+      last_contr_ = std::sqrt(norm2(t) / norm2(r));
       std::cout << GridLogMessage << "[deform-mg] V-cycle contraction |r-Mz|/|r|="
-                << std::sqrt(norm2(t) / norm2(r)) << std::endl;
+                << last_contr_ << std::endl;
+    }
+    if (reuse_nv &&
+        last_contr_ > EnvReal_("DTXQCD_MG_REUSE_MAXCONTR", 0.3)) {
+      std::cout << GridLogMessage << "[deform-mg] reuse probe FAILED (contr="
+                << last_contr_ << ") -- regenerating basis in full"
+                << std::endl;
+      ready_ = false;
+      Setup(pRNG);  // depth <= 1: ready_=false disables reuse on the retry
+      return;
     }
     // DTXQCD_MG_SELFTEST=1: solve a gaussian odd RHS through the freshly
     // built hierarchy and report.  Discriminates hierarchy-broken from
@@ -723,6 +746,7 @@ class DtxqcdDeformMG {
   int variant_ = -1;
   bool ready_ = false;
   bool coarse_gmres_ = false;
+  RealD last_contr_ = 0;
 };
 
 #endif  // GRID_CUDA && GRID_HAVE_QUDA

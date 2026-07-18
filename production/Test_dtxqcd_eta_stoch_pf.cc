@@ -74,7 +74,12 @@ int main(int argc, char **argv) {
   RealD eta  = env_real("ETA", 0.3);
   int n_noise = env_int("N_NOISE", 16);
   int n_gl    = env_int("N_GL", 8);
-  RealD tol   = env_real("CG_TOL", 1e-8);
+  // Sampling-solve tolerance.  Default 1e-4 since the 2026-07-18 ladder
+  // gate (job 1302547): means shift 1.5e-4 across 1e-8..1e-4 vs +-1.25
+  // statistical -- solve error enters a Hutchinson sample as <w, eps_x>,
+  // noise not bias.  x1.8 measured.  Tighten explicitly for non-sampling
+  // uses.
+  RealD tol   = env_real("CG_TOL", 1e-4);
   int cgmax   = env_int("CG_MAX", 20000);
   int traj    = env_int("TRAJ", 250);
   // PROFILE=tent|linear|tent_rounded|tent_rounded2|cos — the same dispatch
@@ -846,6 +851,19 @@ int main(int argc, char **argv) {
                 << (r < 1e-5 ? "   MATCH" : "   MISMATCH") << std::endl;
       GRID_ASSERT(r < 1e-5);
     }
+    // MG for the s-node solves (the operator changes per node -> setup per
+    // node; at fixed eta >= the crossover this dominates plain CG by the
+    // measured margins).  Single-GPU battery config: pass
+    // DTXQCD_MG_BLOCK=4.4.4.4 DTXQCD_MG_LUDEV=0 (MG-lite L1).
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+    const int tsrc_mg =
+        env_int("DTXQCD_DEFORM_MG",
+                (prof_cos && eta >= env_real("DTXQCD_DEFORM_MG_ETAMIN", 0.15))
+                    ? 1 : 0);
+    std::unique_ptr<DtxqcdDeformMG<16>> tmg;
+    if (tsrc_mg && Qdef->HasEO())
+      tmg.reset(new DtxqcdDeformMG<16>(*Qdef, Grid, RBGrid));
+#endif
     ComplexD closure(0.0, 0.0);
     double closure_var = 0;
     for (int m = 0; m < tsrc_M; ++m) {
@@ -854,6 +872,15 @@ int main(int argc, char **argv) {
       BuildGWeights(e);
       BuildHopWeightsS(e);
       Qdef->SetProfile(e, [&](int t) { return prof(t); });
+#if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+      if (tmg) {
+        tmg->Setup(pRNG);
+        Qdef->SetOddSolver([&](const F &b2, F &x2, RealD tol2, int mx,
+                               RealD &r2) {
+          return tmg->Solve(b2, x2, tol2, mx, r2);
+        });
+      }
+#endif
       ComplexD acc(0.0, 0.0);
       double acc2r = 0, acc2i = 0;
       for (int h = 0; h < n_noise; ++h) {
@@ -931,7 +958,10 @@ int main(int argc, char **argv) {
   const bool prof_smooth = prof_cos || prof_rounded;
   const int use_mg = env_int("DTXQCD_DEFORM_MG",
                              (eta >= 0.6 && prof_smooth) ? 1 : 0);
-  const RealD mg_etamin = env_real("DTXQCD_DEFORM_MG_ETAMIN", 0.5);
+  // MG per-node threshold: 0.15 = the measured CG/MG-lite crossover
+  // (jobs 1302548/65: x1.5 at ep=0.2 rising to x5.2 at 0.47, setup
+  // ~200 s amortizing to ~7 s/solve marginal at ep=0.4).
+  const RealD mg_etamin = env_real("DTXQCD_DEFORM_MG_ETAMIN", 0.15);
   std::unique_ptr<DtxqcdDeformMG<16>> mg;
   if (use_mg && use_eo_def && Qdef && Qdef->HasEO()) {
     std::cout << GridLogMessage << "[stochpf] deform-MG ENABLED for nodes "
