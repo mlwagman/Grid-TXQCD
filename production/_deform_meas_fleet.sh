@@ -32,11 +32,11 @@ DEFPROFILE=${DEFPROFILE:-tent}
 # needs its own ΔlogPf(t0) — high-NTSRC datasets rely on the reweighting
 # factors being smooth/interpolatable in t0 (or on the ~unity-weight regime).
 DEFNTSRC=${DEFNTSRC:-4}
-# DEFGPUS (1): GPUs per config.  MG runs (eta>=0.6) REQUIRE 2 -- the deform
-# MG's dense coarse LU (~22 GB) lives on the SECOND visible device
-# (CoarseDirect dev=1 in dtxqcd_deform_mg.h); with one visible GPU it lands
-# on the fine-op device and the step OOMs/dies (2026-07-16 lesson: both e06
-# farms cycled through configs in ~3 min deaths).
+# DEFGPUS (1): GPUs per config.  Since 2026-07-19 the MG default is the
+# L1 config (BLOCK=4.4.4.4, 2.4 GB LU on the SAME GPU, h5-certified
+# better than the old two-GPU layout) -- DEFGPUS=1 is correct for MG
+# runs too.  (Historical: the pre-L1 22 GB dev-1 LU required pairs; the
+# 2026-07-16 single-GPU e06 3-min-death cycles were that config.)
 DEFGPUS=${DEFGPUS:-1}
 ETATAG=$(echo "$DEFETA" | tr '.' 'p')
 PROFTAG=""
@@ -70,6 +70,7 @@ launch() {
         MEAS_BARYON_NTSRC=$DEFNTSRC \
         CG_TOL=1e-7 CG_MAX=$DEFCGMAX LAMBDA_DTXQCD=$LAM \
         CFG_DIR=$CFG DATA_DIR=$OUT \
+        DTXQCD_MG_NB=${DEFMGNB:-16} DTXQCD_MG_REUSE_NV=${DEFREUSE:-1} \
         OMP_NUM_THREADS=16 \
     $P/meas_baryon_deform_dtxqcd "$traj" --grid 16.16.16.48 --mpi 1.1.1.1 \
     --shm 512 --shm-mpi 1 > "$OUT/deform.$traj.log" 2>&1 &

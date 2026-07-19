@@ -733,23 +733,42 @@ int main(int argc, char **argv) {
   const int use_mg = env_int("DTXQCD_DEFORM_MG",
                              (eta >= 0.6 && prof_smooth) ? 1 : 0);
   std::unique_ptr<DtxqcdDeformMG<16>> mg;
+  // nb32 object: the PRIMARY solver when DTXQCD_MG_NB=32 (recommended at
+  // eta=0.6 with dense sources: at NTSRC=48 the per-solve tail rate makes
+  // >=1 chain engagement per traj a certainty, and each failed attempt
+  // wastes ~122k Ops -- nb32's span removes the tail for ~2.5x setup and
+  // LOWER solve iters; 9.7 GB LU still fits one GPU), else the lazily
+  // constructed escalation tier of the fallback chain.
+  std::unique_ptr<DtxqcdDeformMG<32>> mg32;
+  const int mg_nb = env_int("DTXQCD_MG_NB", 16);
   int mg_t0 = -12345;
   if (use_mg && use_eo_def && Qdef) {
     std::cout << GridLogMessage << "[baryon-def] deform-MG ENABLED "
-              << "(two-level PG, dense coarse on GPU 1)" << std::endl;
-    mg.reset(new DtxqcdDeformMG<16>(*Qdef, Grid, RBGrid));
+              << "(two-level PG, nb=" << mg_nb << ")" << std::endl;
+    if (mg_nb == 32)
+      mg32.reset(new DtxqcdDeformMG<32>(*Qdef, Grid, RBGrid));
+    else
+      mg.reset(new DtxqcdDeformMG<16>(*Qdef, Grid, RBGrid));
   }
 #endif
   for (int t_src : tsrc_list) {
     BuildDeformWeights(t_src);   // source-centered contour for this t_src
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
-    if (mg && prof_t0 != mg_t0) {
-      mg->Setup(pRNG);  // per (config, profile, t0)
+    if ((mg || mg32) && prof_t0 != mg_t0) {
       mg_t0 = prof_t0;
-      Qdef->SetOddSolver([&](const F &b, F &x2, RealD tol2, int mx,
-                             RealD &r2) {
-        return mg->Solve(b, x2, tol2, mx, r2);
-      });
+      if (mg_nb == 32) {
+        mg32->Setup(pRNG);
+        Qdef->SetOddSolver([&](const F &b, F &x2, RealD tol2, int mx,
+                               RealD &r2) {
+          return mg32->Solve(b, x2, tol2, mx, r2);
+        });
+      } else {
+        mg->Setup(pRNG);  // per (config, profile, t0)
+        Qdef->SetOddSolver([&](const F &b, F &x2, RealD tol2, int mx,
+                               RealD &r2) {
+          return mg->Solve(b, x2, tol2, mx, r2);
+        });
+      }
     }
 #endif
     for (int fi = 0; fi < NF; ++fi)
@@ -819,28 +838,82 @@ int main(int argc, char **argv) {
               if (env_int("DTXQCD_DEFORM_EO_DEFLATE_DIAG", 0))
                 Qdef->VerifyDeflationBasis();
             }
-            if (Qdef->HasDeflation()) {
-              it = Qdef->SolveTilEODeflated(src, y, tol, cgmax, relres);
-              tag = "[deform-CG:quda-EO-defl]";
-            } else {
-              it = Qdef->SolveTilEO(src, y, tol, cgmax, relres);
-              tag = "[deform-CG:quda-EO]";
+            // TAIL FALLBACK CHAIN (2026-07-19): at eta=0.6 the wall-solve
+            // difficulty is (config, t0)-dependent -- most offsets sail at
+            // ~5k Ops, a tail parks the supercritical window on rough
+            // gauge patches whose local band exceeds nb=16 (healthy S2 +
+            // contraction, solve grinds to relres ~1e-2).  Escalation:
+            // attempt 0 = as configured; 1 = FRESH basis draw (the masked
+            // basis is stochastic; unlucky draws happen); 2 = nb32 span;
+            // then abort as before.  Never skip a t_src (source-coverage
+            // selection correlated with gauge roughness = physics bias).
+            for (int attempt = 0;; ++attempt) {
+              if (Qdef->HasDeflation()) {
+                it = Qdef->SolveTilEODeflated(src, y, tol, cgmax, relres);
+                tag = "[deform-CG:quda-EO-defl]";
+              } else {
+                it = Qdef->SolveTilEO(src, y, tol, cgmax, relres);
+                tag = "[deform-CG:quda-EO]";
+              }
+              std::cout << GridLogMessage << tag << " iters=" << it
+                        << " relres=" << relres << std::endl;
+              if (relres <= tol) break;
+#if defined(GRID_CUDA)
+              // Chain order set by the nb32 gate (job 1302926): nb32 costs
+              // ~2.7x nb16 on the MEDIAN (wall 15,405 vs 5,664) but spans
+              // the tail -- so escalate span FIRST (a fresh draw that fails
+              // wastes a full 122k-Op grind; span escalation converts the
+              // tail case directly), fresh draw last.
+              if (attempt == 0 && mg_nb != 32 && mg) {
+                std::cout << GridLogMessage
+                          << "[deform-mg] tail retry 1: nb32 span escalation"
+                          << std::endl;
+                if (!mg32)
+                  mg32.reset(new DtxqcdDeformMG<32>(*Qdef, Grid, RBGrid));
+                mg32->Setup(pRNG);
+                Qdef->SetOddSolver([&](const F &b2, F &x2, RealD tol2,
+                                       int mx, RealD &r2) {
+                  return mg32->Solve(b2, x2, tol2, mx, r2);
+                });
+                continue;
+              }
+              if (attempt <= 1 && (mg || mg32)) {
+                std::cout << GridLogMessage
+                          << "[deform-mg] tail retry: fresh basis draw"
+                          << std::endl;
+                if (mg32 && (mg_nb == 32 || attempt == 1)) {
+                  mg32->ForceRegen();
+                  mg32->Setup(pRNG);
+                } else if (mg) {
+                  mg->ForceRegen();
+                  mg->Setup(pRNG);
+                }
+                continue;
+              }
+#endif
+              std::cout << GridLogMessage
+                        << "[deform-CG:quda] NOT CONVERGED at CG_MAX="
+                        << cgmax << " (relres " << relres << " > tol " << tol
+                        << ") -- aborting rather than writing tainted "
+                        << "correlators" << std::endl;
+              Grid_finalize();
+              std::_Exit(3);
             }
           } else
 #endif
           {
             it = Qdef->SolveTil(src, y, tol, cgmax, relres);
-          }
-          std::cout << GridLogMessage << tag << " iters=" << it
-                    << " relres=" << relres << std::endl;
-          if (relres > tol) {
-            std::cout << GridLogMessage
-                      << "[deform-CG:quda] NOT CONVERGED at CG_MAX=" << cgmax
-                      << " (relres " << relres << " > tol " << tol
-                      << ") -- aborting rather than writing tainted "
-                      << "correlators" << std::endl;
-            Grid_finalize();
-            std::_Exit(3);
+            std::cout << GridLogMessage << tag << " iters=" << it
+                      << " relres=" << relres << std::endl;
+            if (relres > tol) {
+              std::cout << GridLogMessage
+                        << "[deform-CG:quda] NOT CONVERGED at CG_MAX="
+                        << cgmax << " (relres " << relres << " > tol " << tol
+                        << ") -- aborting rather than writing tainted "
+                        << "correlators" << std::endl;
+              Grid_finalize();
+              std::_Exit(3);
+            }
           }
         } else {
           SolveTil(src, y);

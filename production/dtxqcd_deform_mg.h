@@ -382,6 +382,10 @@ class DtxqcdDeformMG {
     }
   }
   bool Ready() const { return ready_; }
+  // Force the next Setup() to regenerate the null-vector basis even under
+  // DTXQCD_MG_REUSE_NV (the tail-failure retry path: the masked basis is
+  // a stochastic draw, and a failed (config, t0) may simply be unlucky).
+  void ForceRegen() { ready_ = false; }
 
   // Odd-block solve, plugs into DtxqcdDeformQuda::SetOddSolver.
   int Solve(const F &b_o, F &x_o, RealD tol, int maxit, RealD &rel_out) {
