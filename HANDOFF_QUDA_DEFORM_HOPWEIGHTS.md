@@ -294,6 +294,45 @@ Accuracy contract: per-config anchor σ ≲ 1 (the e^{σ²} ESS argument:
 exponentiation bias CANCELS in reweighting ratios for independent noise);
 relative offsets tolerate σ_D ~ 2–3.
 
+### PILOT RESULTS (2026-07-19: the first production reweighting factors)
+
+4 configs (traj 300/400/500/600), full locked stack, measured 6.5 s/solve
+at the [0,0.2] nodes (cost model confirmed):
+
+| traj | ΔlogPf[0,0.2] | ΔlogPf[0.2,0.4] | cumulative η=0.4 |
+|---|---|---|---|
+| 300 | −0.047 ± 0.74 | 2.38 ± 1.12 | 2.33 ± 1.34 |
+| 400 | +0.958 ± 0.77 | 2.44 ± 1.13 | 3.40 ± 1.36 |
+| 500 | −0.125 ± 0.76 | 4.45 ± 1.16 | 4.33 ± 1.39 |
+| 600 | +1.465 ± 0.79 | 1.27 ± 1.13 | 2.74 ± 1.38 |
+
+σ_anchor 0.74–0.79 at 5,000 solves ([0,0.2]) and 1.12–1.16 at 4,000
+([0.2,0.4]) — both BETTER than the model's 1.0/1.5.  O(1) per-config
+spread (η=0.2 weights e^{ΔlogPf} ≈ 0.9–4.3; η=0.4 spanning ~e³) —
+genuine, resolvable reweighting structure.  darg resolved as well.
+[0.4,0.6] smoke + TSRC halves pending.  η=0.6 TSRC QUADRATURE: use
+M=24 — the M=12 closure violated the sum rule at 2.4σ (−2193±898),
+M=24 restores it (+355±647): supercritical integrands have finer
+s-structure; η ≤ 0.4 is clean at M=12.
+
+### Scaling to higher stats: multi-job averaging + packing
+
+Averaging runs on the same config is valid IFF every run has a DISTINCT
+NOISE_SEED (identical seeds = identical samples = fully correlated).
+Convention: `NOISE_SEED = 1000*traj + 100*segment_id + job_index`.
+Plain averages of STOCHPF (and of per-node TSRCNODE means, before the
+cumulative integral) are then correct; deflation caches and MG bases
+may be shared freely (operator data, not statistics).
+
+One 24 h × 4-GPU job on a single config (4 seeds averaged) delivers:
+anchors σ ≈ 0.23 / 0.40 / 0.55 for [0,.2]/[.2,.4]/[.4,.6] (or run one
+GPU per segment: 0.46/0.81/1.1 in a single job — anchors saturate
+fast); TSRC (all 48 sources, always) σ_D ≈ 1.0 (η=0.2, M=12) / 2.6
+(η=0.4) / ~28 (η=0.6, M=24 — INFEASIBLE at this budget: accept
+σ_D ~ 5–10, spend 2–4 GPU-days, or run η=0.6 anchor-only with a fixed
+t0=0 contour).  The η=0.6 TSRC integrand is intrinsically expensive:
+per-sample σ ≈ 190 with 24 nodes.
+
 ### Propagator-side MG update (MG-lite L1 = NEW DEFAULT)
 
 `DTXQCD_MG_BLOCK=4.4.4.4` + `DTXQCD_MG_LUDEV=0` (both now header
