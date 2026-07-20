@@ -387,6 +387,16 @@ Test_dtxqcd_eta_stoch_pf: Test_dtxqcd_eta_stoch_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_eta_stoch_pf.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
+# Deflation-basis localization diagnostics (slice density + grading
+# fraction + transverse IPR per cached eigenmode).
+Test_dtxqcd_defl_slicedens.o: Test_dtxqcd_defl_slicedens.cc \
+  dtxqcd_deform_quda.h ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_defl_slicedens: Test_dtxqcd_defl_slicedens.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_defl_slicedens.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 # eta-spectrum probe: lowest evals of M~^dag M~ vs eta (deform hardness map).
 probe_deform_spectrum.o: probe_deform_spectrum.cc dtxqcd_deform_quda.h \
   ../Grid/qcd/action/dtxqcd/DTXQCDPackedField.h \
