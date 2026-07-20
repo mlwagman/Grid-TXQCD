@@ -366,12 +366,21 @@ class DtxqcdDeformQuda {
   }
   void ClearOddSolver() { odd_solver_ = nullptr; }
 
-  // ---- deflated EO solve (the eta=0.8/0.9 unlock) ----------------------
+  // ---- deflated EO solve -------------------------------------------------
   // Build NEV lowest eigenpairs of Mpc~^dag Mpc~ ONCE per (config, eta) at
   // the CURRENT profile (Chebyshev-IRL on the EO adapter's fused device
-  // HermOp — deform corrections included).  lambda=5 eta=0.8 census: the
-  // low spectrum is SPARSE (ev[0]=1.1e-5, x7.5 gap, ev[11]=5e-3), so
-  // nev~12-16 cuts kappa_eff 6.8e6 -> 1.5e4 (60k CGNR iters -> ~1k).
+  // HermOp — deform corrections included).
+  // *** STALE-HOPE WARNING (retracted twice: 2026-07-14 and 2026-07-20)
+  // *** The original "sparse spectrum, nev~12-16 -> 60k->1k" estimate was
+  // *** an ord-301-era resolution artifact.  The true low spectrum is a
+  // *** dense band/tower whose modes pack below the achievable IRL
+  // *** residual (Ritz mush; filter-quasi-degenerate at any ord tried):
+  // *** small-Nstop bases converge to ARBITRARY sub-slices and deflated
+  // *** WALL solves come out SLOWER than plain CG (measured at eta=0.6
+  // *** AND 0.8).  Production recipe: wall props = plain EO CG.  This
+  // *** path remains for the reweighting estimator's exact-term capture
+  // *** (bias-free for any basis via the oblique projector) and for
+  // *** explicitly-gated experiments only.
   void BuildEODeflation(int nev, GridParallelRNG &pRNG, int ord,
                         RealD lo_frac, RealD irl_tol, int restarts) {
     GRID_ASSERT(mq_eo_);
