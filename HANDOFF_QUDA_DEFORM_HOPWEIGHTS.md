@@ -372,6 +372,23 @@ ord=1001/tol=1e-5; the bare meas defaults 301/1e-3 build bases that
 HURT).  Eigensolves are cached per (config, node) and t0-translatable
 — reusable by TSRC/telescope runs.
 
+### PREPPED, NOT FIRED: incremental eigCG for deep-tent props (eta >= 0.7)
+
+The unified failure picture (deflation = Ritz mush on a band packed
+below IRL resolution; MG = walls narrower than blocks) leaves ONE
+proven-technology route for the 15.9k/60k-iter deep-tent prop solves:
+incremental eigCG.  It accumulates an APPROXIMATE band subspace across
+the 192-solve per-config workload and Galerkin-projects it — requiring
+zero resolved eigenpairs (the same span-not-modes insight that makes
+the oblique projector bias-free).  Expected shape: first solves at the
+plain-CG cost, later solves progressively cheaper as the accumulated
+span covers the mid-band that actually drives the cost.  Design: wrap
+the meas EO odd-block CG with a k-dim search-space accumulator
+(standard eigCG(nev,m) recurrence), Galerkin-project new RHS before
+CG, grow to ~m=64-96; per-config state, no cache needed (rebuilds in
+the first few solves).  FIRE CONDITION: the [0.6,0.7]/[0.7,0.8]
+sigma_config smokes come back ESS-viable (otherwise no demand).
+
 ### Propagator-side MG update (MG-lite L1 = NEW DEFAULT)
 
 `DTXQCD_MG_BLOCK=4.4.4.4` + `DTXQCD_MG_LUDEV=0` (both now header

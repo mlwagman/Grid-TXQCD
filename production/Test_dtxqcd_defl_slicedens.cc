@@ -160,6 +160,91 @@ int main(int argc, char **argv) {
               << " (1/Vx=" << 1.0 / (double)Vx << " extended baseline)"
               << std::endl;
   }
+  // ---- ANALYTIC WALL-VECTOR ansatz test ---------------------------------
+  // psi_{kink,pm,kappa}(x,t) = e^{-kappa d_T(t, t_kink)} x P_pm(gamma_t)
+  // x (uniform spatial, unit color/flavor) x definite grading (apex ->
+  // upper, trough -> lower).  The e^{-int mu dt} envelope predicts
+  // kappa = eta.  Metrics per ansatz: Rayleigh |Mpc~ psi|/|psi| (compare
+  // the census sigma_min) and the SPAN overlap sum_k |<v_k, psi>|^2 /
+  // |psi|^2 against the cached deep basis -- span-level, hence robust to
+  // Ritz mush.  Caveat printed with the numbers: transverse gauge
+  // roughness can suppress the overlap of a color-uniform ansatz without
+  // falsifying the t-SHAPE (compare rho_k(t) vs e^{-2 kappa |t-t_k|}
+  // offline for the gauge-robust test).
+  {
+    Gamma g_t(Gamma::Algebra::GammaT);
+    const int kinks[2] = {(prof_t0 + T / 2) % T, prof_t0};  // apex, trough
+    const char *knames[2] = {"apex", "trough"};
+    for (int ki = 0; ki < 2; ++ki) {
+      for (int pm = 0; pm < 2; ++pm) {
+        for (double kap : {0.5 * eta, eta, 2.0 * eta}) {
+          F psi(&Grid_);
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            psi.upper.f[a] = Zero();
+            psi.lower.f[a] = Zero();
+          }
+          // envelope on the t-lattice
+          LatticeComplex env(&Grid_);
+          env = ComplexD(0.0, 0.0);
+          LatticeComplex one(&Grid_);
+          for (int t = 0; t < T; ++t) {
+            int dt_ = std::abs(t - kinks[ki]);
+            dt_ = std::min(dt_, T - dt_);
+            one = ComplexD(std::exp(-kap * (double)dt_), 0.0);
+            env = where(tc == Integer(t), one, env);
+          }
+          // unit spinor through P_pm, color 0, flavor 0, one grading
+          LatticeFermion base(&Grid_);
+          base = Zero();
+          {
+            typename LatticeFermion::vector_object::scalar_object sp;
+            sp = Zero();
+            for (int s = 0; s < Ns; ++s) sp()(s)(0) = ComplexD(0.5, 0.0);
+            LatticeFermion unif(&Grid_);
+            unif = sp;   // uniform fill
+            LatticeFermion gt(&Grid_);
+            gt = g_t * unif;
+            base = 0.5 * (unif + ((pm == 0) ? gt : (-1.0) * gt));
+          }
+          LatticeFermion mode(&Grid_);
+          mode = env * base;
+          if (ki == 0)
+            psi.upper.f[0] = mode;   // apex: upper grading
+          else
+            psi.lower.f[0] = mode;   // trough: conjugate block
+          // restrict to the odd checkerboard (the EO operator's domain)
+          F prb(&RBGrid);
+          RealD pn = 0;
+          for (int a = 0; a < DtxqcdNf; ++a) {
+            pickCheckerboard(Odd, prb.upper.f[a], psi.upper.f[a]);
+            pickCheckerboard(Odd, prb.lower.f[a], psi.lower.f[a]);
+            pn += norm2(prb.upper.f[a]) + norm2(prb.lower.f[a]);
+          }
+          // Rayleigh under Mpc~
+          F Mp(&RBGrid);
+          Qdef.MpcTil(prb, Mp);
+          RealD mn = 0;
+          for (int a = 0; a < DtxqcdNf; ++a)
+            mn += norm2(Mp.upper.f[a]) + norm2(Mp.lower.f[a]);
+          // span overlap vs the cached basis (packed inner products)
+          LatticeDtxqcdPacked ppk(&RBGrid);
+          DtxqcdPackDoubled(prb, ppk);
+          ppk.Checkerboard() = evec.empty() ? Odd : evec[0].Checkerboard();
+          RealD ov = 0;
+          for (int k = 0; k < K; ++k)
+            ov += std::norm(
+                std::complex<double>(DtxqcdToStd(
+                    innerProduct(evec[k], ppk)).real(),
+                DtxqcdToStd(innerProduct(evec[k], ppk)).imag()));
+          std::cout << GridLogMessage << "ANSATZ kink=" << knames[ki]
+                    << " P" << (pm == 0 ? "+" : "-") << " kappa=" << kap
+                    << " rayleigh=" << std::sqrt(mn / std::max(pn, 1e-300))
+                    << " span_overlap=" << ov / std::max(pn, 1e-300)
+                    << std::endl;
+        }
+      }
+    }
+  }
   Grid_finalize();
   std::fflush(nullptr);
   std::_Exit(0);
