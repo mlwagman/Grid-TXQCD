@@ -239,6 +239,53 @@ modes (the masked-basis law of Sec.~\ref{sec:mg});
 spectrum is merely stretched, not banded, so cheap generic coarse
 spaces and shared null vectors suffice.
 
+\subsection{Tent census}
+\label{sec:tentcensus}
+The same instrument applied to the sharp tent ($|p'| = 1$; NEV $= 24$)
+maps the \emph{wall} spectrum --- the complementary localization
+mechanism.  Lowest eigenvalues of
+$\Mt_{\rm pc}^\dagger\Mt_{\rm pc}$, same configuration:
+
+\begin{center}
+\begin{tabular}{ccccl}
+\toprule
+$\eta$ & $\lambda_{\min}$ & $\lambda_{24}$ & $\kappa$ & structure \\
+\midrule
+0.20 & $1.13\times10^{-3}$ & $1.79\times10^{-3}$ & $6.4\times10^{4}$ & pair barely split from bulk \\
+0.30 & $6.53\times10^{-4}$ & $1.12\times10^{-3}$ & $1.1\times10^{5}$ & \\
+0.40 & $2.94\times10^{-4}$ & $6.45\times10^{-4}$ & $2.5\times10^{5}$ & exact 2-fold degeneracy (pair) \\
+0.60 & $1.99\times10^{-5}$ & $5.47\times10^{-4}$ & $3.7\times10^{6}$ & two pairs, then bulk \\
+0.70 & $9.69\times10^{-7}$ & $3.16\times10^{-5}$ & $7.7\times10^{7}$ & tower forming ($\ge24$ levels) \\
+0.80 & $\lesssim2.1\times10^{-10}$ & $8.43\times10^{-6}$ & $\gtrsim3.6\times10^{11}$ & deep tower \\
+0.85 & $\lesssim2.5\times10^{-9}$ & $1.10\times10^{-5}$ & $\gtrsim3.0\times10^{10}$ & bulk-critical edge \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The exact two-fold degeneracies through $\eta = 0.6$ are the
+apex/trough wall pair of Sec.~\ref{sec:crit} (one member per grading
+block); the pair-to-tower transition at $\eta \approx 0.7$ marks the
+walls acquiring secondary bound levels.  Contrast with the cosine
+table: at equal $\eta = 0.6$ the tent's low space is
+\emph{four modes} against the cosine's $\gtrsim 47$-mode band ---
+the spectral origin of the tent's ensemble-variance advantage
+(reweighting $\sigma_{\rm config} \approx 0.5$ vs.\ $5$--$6$ measured
+on the same configurations; the supercritical band is genuine
+configuration-to-configuration determinant noise, the isolated pair is
+not).  Production reweighting at $\eta \le 0.6$ therefore uses the
+sharp tent.
+
+Measured tent solve costs (wall sources, tol $10^{-7}$):
+CG $= 1{,}260 / 4{,}480 / 15{,}900 / 59{,}930$ at
+$\eta = 0.4/0.6/0.7/0.8$ --- plain CG carries production
+($\eta \le 0.6$); the certified deflated solve
+(nev $= 24$--$32$ per the tower counts, eigensolve at order 1001 and
+tolerance $10^{-5}$ --- looser bases actively \emph{hurt}, measured
+$4.5\mathrm{k} \to 33\mathrm{k}$) covers $\eta = 0.7$--$0.8$.
+Estimator (Gaussian-probe) solves at the sampling tolerance $10^{-4}$
+cost only $430$--$770$ iterations across the production node range:
+loose tolerance stops CG before the deep modes matter.
+
 \section{Conditioning and iteration counts}
 \label{sec:iters}
 Direct condition numbers (from the spectra above), CG counts, and

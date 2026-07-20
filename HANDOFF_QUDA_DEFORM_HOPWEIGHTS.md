@@ -357,6 +357,21 @@ Mask engineering post-mortem: explicit split/parity masks stall; the
 RB-quirk NV recipe is not a spatial mask (site-scrambled half-copy) and
 remains the only working basis — moot for tent production (no MG).
 
+### The tent ceiling program (launched 2026-07-20)
+
+Solver feasibility now EXCEEDS ensemble feasibility: estimator solves
+at tol=1e-4 cost only ~700 iters even at ep=0.558 (CG stops before the
+deep modes matter), and deflation covers ep to ~0.8 — so the tent reach
+limit is σ_config per segment, i.e. ESS(η) = e^{−Σσ²_config}.  Running
+on the pilot's 4 configs: [0.6,0.7] (DEFL=24) and [0.7,0.8] (DEFL=32)
+anchor smokes + a DEFL=8 variance arm on [0.4,0.6] (does the wall pair
+carry trace variance at deep nodes?).  nev policy from the census:
+pairs (8) at nodes ≤ 0.6; tower (24–32) at 0.68+.  ALWAYS run
+deflation through the seg-script DEFL knob (it forces the certified
+ord=1001/tol=1e-5; the bare meas defaults 301/1e-3 build bases that
+HURT).  Eigensolves are cached per (config, node) and t0-translatable
+— reusable by TSRC/telescope runs.
+
 ### Propagator-side MG update (MG-lite L1 = NEW DEFAULT)
 
 `DTXQCD_MG_BLOCK=4.4.4.4` + `DTXQCD_MG_LUDEV=0` (both now header
