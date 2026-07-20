@@ -729,6 +729,11 @@ int main(int argc, char **argv) {
   // it re-runs each t_src (~6 min) — worthwhile only for many solves per
   // source; a fixed contour (PROF_T0>=0) sets up once.  =0/1 overrides.
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
+  // MG default: ON only for SMOOTH profiles at eta >= 0.6.  For the
+  // sharp tent (the production contour) this is OFF by construction —
+  // the wall modes are narrower than any coarse block (MG structurally
+  // inapplicable; measured + mask post-mortem 2026-07-20); tent
+  // acceleration is the eta-banded DEFLATION below.
   const bool prof_smooth = prof_cos || prof_rounded;
   const int use_mg = env_int("DTXQCD_DEFORM_MG",
                              (eta >= 0.6 && prof_smooth) ? 1 : 0);
@@ -798,37 +803,63 @@ int main(int argc, char **argv) {
             // DTXQCD_DEFORM_EO_DEFLATE=nev: build the eigenbasis lazily at
             // the FIRST solve's profile (once per config+eta; later t_srcs
             // are handled by the solve-frame conjugation — even spacings
-            // only).  lambda=5 eta=0.8: nev=16 -> 60k iters -> ~1k.
-            static const int defl_nev =
-                env_int("DTXQCD_DEFORM_EO_DEFLATE", 0);
+            // only).  DEFAULT is eta-BANDED from the 2026-07-20 tent
+            // census (one-config central values + tail margin; adjust as
+            // farm data accumulates):
+            //   eta < 0.55        : 0   (pairs barely split; CG ~4.5k max)
+            //   0.55 <= eta < 0.65: 8   (two wall pairs + margin)
+            //   0.65 <= eta < 0.75: 32  (tower, unexhausted at NEV=24)
+            //   eta >= 0.75       : 48  (deep tower, >=24 levels resolved)
+            // (banded default is SHARP-TENT only: the deflation cache's
+            // t0 frame translation is SetTentProfile-keyed; cos/rounded
+            // default to 0 and require an explicit env to deflate)
+            static const int defl_nev = env_int(
+                "DTXQCD_DEFORM_EO_DEFLATE",
+                (!prof_rounded && !prof_cos)
+                    ? ((eta < 0.55) ? 0
+                       : (eta < 0.65) ? 8
+                       : (eta < 0.75) ? 32
+                                      : 48)
+                    : 0);
             if (defl_nev > 0 && tent && !Qdef->HasDeflation()) {
               // LO sets the Chebyshev window edge as a FRACTION of
               // lambda_max and must sit ABOVE the wanted band (modes below
               // lo are amplified; modes inside [lo,hi] are suppressed and
               // never converge — job 1301270 ground 0/16 with lo below the
-              // band).  3e-4 * lmax ~ 0.04 lands in the gap between the
-              // deformation band (<~1e-2) and the EO bulk edge (~0.1) for
-              // lambda=5/6 at eta = 0.6-0.9.
-              const int defl_ord = env_int("DTXQCD_DEFORM_EO_DEFLATE_ORD", 301);
-              const RealD defl_lo = env_real("DTXQCD_DEFORM_EO_DEFLATE_LO", 3e-4);
-              const RealD defl_tol = env_real("DTXQCD_DEFORM_EO_DEFLATE_TOL", 1e-3);
+              // band).
+              // DEFAULTS are the CERTIFIED eigensolve settings (deflation
+              // era + 2026-07-20 relearn: ord=301/tol=1e-3 build bases
+              // that actively HURT — measured 4.5k -> 33k at eta=0.6).
+              const int defl_ord =
+                  env_int("DTXQCD_DEFORM_EO_DEFLATE_ORD", 1001);
+              const RealD defl_lo =
+                  env_real("DTXQCD_DEFORM_EO_DEFLATE_LO", 3e-5);
+              const RealD defl_tol =
+                  env_real("DTXQCD_DEFORM_EO_DEFLATE_TOL", 1e-5);
               // DTXQCD_DEFORM_EO_DEFLATE_CACHE=<dir>: reload the ~20-30 min
               // tight eigensolve if a matching sidecar exists (config
               // identity guarded by a gauge fingerprint in the header),
               // else build and save.  The basis is t0-translatable, so one
               // file per (config, eta) serves every t_src AND the
               // sign-reweighting estimator (same Mpc~).  ~75 MB x nev.
+              // Cache DEFAULTS ON (shared production dir; one eigensolve
+              // per (config, eta) serves all 48 t_srcs via frame
+              // translation).  DTXQCD_DEFORM_EO_DEFLATE_CACHE="" disables.
+              std::string cache_dir =
+                  "/lustre2/nplqcd/Grid-DTXQCD/production/defl_cache";
+              if (const char *cd =
+                      std::getenv("DTXQCD_DEFORM_EO_DEFLATE_CACHE"))
+                cache_dir = cd;
               std::string defl_cache;
-              if (const char *cd = std::getenv("DTXQCD_DEFORM_EO_DEFLATE_CACHE"))
-                if (*cd) {
-                  char pre[128];
-                  std::snprintf(pre, sizeof(pre), "/tr%d_lam%.4f_", traj,
-                                (double)lam);
-                  defl_cache = std::string(cd) + pre +
-                               DtxqcdDeformQuda::EODeflationCacheName(
-                                   defl_nev, defl_tol, defl_ord, eta, t_src,
-                                   Grid.GlobalDimensions());
-                }
+              if (!cache_dir.empty()) {
+                char pre[128];
+                std::snprintf(pre, sizeof(pre), "/tr%d_lam%.4f_", traj,
+                              (double)lam);
+                defl_cache = cache_dir + pre +
+                             DtxqcdDeformQuda::EODeflationCacheName(
+                                 defl_nev, defl_tol, defl_ord, eta, t_src,
+                                 Grid.GlobalDimensions());
+              }
               if (defl_cache.empty() || !Qdef->LoadEODeflation(defl_cache)) {
                 Qdef->BuildEODeflation(
                     defl_nev, pRNG, defl_ord, defl_lo, defl_tol,
