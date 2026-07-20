@@ -818,17 +818,21 @@ int main(int argc, char **argv) {
             //   0.55 <= eta < 0.65: 8   (two wall pairs + margin)
             //   0.65 <= eta < 0.75: 32  (tower, unexhausted at NEV=24)
             //   eta >= 0.75       : 48  (deep tower, >=24 levels resolved)
-            // (banded default is SHARP-TENT only: the deflation cache's
-            // t0 frame translation is SetTentProfile-keyed; cos/rounded
-            // default to 0 and require an explicit env to deflate)
-            static const int defl_nev = env_int(
-                "DTXQCD_DEFORM_EO_DEFLATE",
-                (!prof_rounded && !prof_cos)
-                    ? ((eta < 0.55) ? 0
-                       : (eta < 0.65) ? 8
-                       : (eta < 0.75) ? 32
-                                      : 48)
-                    : 0);
+            // DEFAULT OFF (2026-07-20 evening): the certified-settings
+            // ladder showed the builder's basis converging to the WRONG
+            // subspace (ev[0]=7.95e-5 vs census 1.99e-5 at eta=0.6, both
+            // tolerance regimes; deflated solves 6x SLOWER than plain
+            // CG).  Suspected filter-saturation degeneracy: all sub-window
+            // modes are quasi-degenerate under the Chebyshev filter
+            // (5% separation at ord=1001), so Nstop < cluster size grabs
+            // an arbitrary slice; the census's NEV=24 spanned the cluster
+            // and resolved it via the final plain-op Ritz rotation.
+            // Re-enable via env once the DIAG discriminator settles the
+            // fix (nev >= cluster size and/or lo inside the band).
+            // Plain CG is correct and within the banded CG_MAX at all
+            // production eta.
+            static const int defl_nev =
+                env_int("DTXQCD_DEFORM_EO_DEFLATE", 0);
             if (defl_nev > 0 && tent && !Qdef->HasDeflation()) {
               // LO sets the Chebyshev window edge as a FRACTION of
               // lambda_max and must sit ABOVE the wanted band (modes below
