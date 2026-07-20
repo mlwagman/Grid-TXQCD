@@ -1092,12 +1092,16 @@ int main(int argc, char **argv) {
                norm2(LatticeFermion(dg.lower.f[a] - dq.lower.f[a]));
         ndd += norm2(dg.upper.f[a]) + norm2(dg.lower.f[a]);
       }
+      // Threshold 1e-8: convention/frame errors measure O(1)-1e-2; the
+      // FP-accumulation floor of the host sandwich at deep hop weights
+      // reached 1.25e-10 at 16^3x48 ep~0.72 (job 1303319 false-failed
+      // the old 1e-10 gate in 35 s).  1e-8 keeps 6+ orders of margin.
       const RealD rM = std::sqrt(nm / nd), rD = std::sqrt(nmd / ndd);
       std::cout << GridLogMessage << "[stochpf-qcheck] |M~_dev - M~_host| "
                 << rM << "  dagger " << rD
-                << ((rM < 1e-10 && rD < 1e-10) ? "   OK" : "   ** FAIL **")
+                << ((rM < 1e-8 && rD < 1e-8) ? "   OK" : "   ** FAIL **")
                 << std::endl;
-      GRID_ASSERT(rM < 1e-10 && rD < 1e-10);
+      GRID_ASSERT(rM < 1e-8 && rD < 1e-8);
     }
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
     if (mg) {
