@@ -908,6 +908,7 @@ int main(int argc, char **argv) {
 #endif
     ComplexD closure(0.0, 0.0);
     double closure_var = 0;
+    std::vector<double> sv_s, sv_w, sv_re, sv_im, sv_er, sv_ei;
     for (int m = 0; m < (int)snodes.size(); ++m) {
       prof_shift = snodes[m].first;
       BuildWeights(e);
@@ -952,6 +953,35 @@ int main(int argc, char **argv) {
       const double wq = snodes[m].second;
       closure += wq * gm;
       closure_var += wq * wq * er2;
+      sv_s.push_back(prof_shift);
+      sv_w.push_back(wq);
+      sv_re.push_back(gm.real());
+      sv_im.push_back(gm.imag());
+      sv_er.push_back(std::sqrt(er2));
+      sv_ei.push_back(std::sqrt(ei2));
+    }
+    // Persist the NODE TABLE (the covariance-complete primitive: the
+    // 48-vector of per-offset Delta log-rwf is cumulative sums at
+    // integer s + bridge, with correlated errors derivable exactly).
+    if (const char *dd = std::getenv("DATA_DIR")) {
+      char fn[512];
+      std::snprintf(fn, sizeof(fn), "%s/tsrc_ratio_eta%.4f_tr%d.dat", dd,
+                    (double)eta, traj);
+      FILE *fp = std::fopen(fn, "w");
+      if (fp) {
+        std::fprintf(fp, "# tsrc-ratio node table: eta=%.6f traj=%d "
+                         "profile=%s t0=%d N=%d seed-env=%s\n",
+                     (double)eta, traj, prof_kind.c_str(), prof_t0, n_noise,
+                     std::getenv("NOISE_SEED") ? std::getenv("NOISE_SEED")
+                                               : "-");
+        std::fprintf(fp, "# s  w  re  im  err_re  err_im\n");
+        for (size_t i = 0; i < sv_s.size(); ++i)
+          std::fprintf(fp, "%.10f %.10f %.10e %.10e %.10e %.10e\n", sv_s[i],
+                       sv_w[i], sv_re[i], sv_im[i], sv_er[i], sv_ei[i]);
+        std::fclose(fp);
+        std::cout << GridLogMessage << "[tsrc-ratio] node table -> " << fn
+                  << std::endl;
+      }
     }
     std::cout << GridLogMessage << "TSRCCLOSURE eta=" << eta
               << " integral over full period = " << closure.real() << " +- "

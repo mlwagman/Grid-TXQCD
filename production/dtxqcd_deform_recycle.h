@@ -86,13 +86,18 @@ class DtxqcdDeformRecycle {
       int dt = (t0_new - cur_t0_);
       const int T = rb_.GlobalDimensions()[Nd - 1];
       dt = ((dt % T) + T) % T;
-      if (dt != 0) {
-        // Cshift needs full-grid fields: promote, shift, restrict.  An
-        // odd t-shift maps Odd sites to Even -- re-picking ODD keeps
-        // only half the support (renormalized; dropped if near-null).
-        // All approximation is absorbed by the exact Galerkin recompute
-        // below + CG's unconditional correctness.
-        TranslateAll_(shiftsign_ * dt);
+      // An ODD t-shift flips every site's parity: the odd-CB restriction
+      // of the shifted field is EXACTLY ZERO (measured: dim wiped at the
+      // first t_src step, gate 1303439).  Accumulate steps and translate
+      // only by the EVEN part (a deferred 1-slice envelope offset is
+      // within the translation approximation, which the exact Galerkin
+      // rebuild + CG absorb regardless).
+      pending_ += dt;
+      pending_ %= rb_.GlobalDimensions()[Nd - 1];
+      const int ev2 = pending_ - (pending_ % 2);
+      if (ev2 != 0) {
+        TranslateAll_(shiftsign_ * ev2);
+        pending_ -= ev2;
       }
       RebuildGalerkin_();
     }
@@ -191,7 +196,10 @@ class DtxqcdDeformRecycle {
   void RebuildGalerkin_() {
     const int M = (int)U_.size();
     AU_.clear();
-    if (M == 0) return;
+    if (M == 0) {
+      H_.resize(0, 0);   // stale-H crash guard (Eigen assert, 1303500)
+      return;
+    }
     // re-orthonormalize U (modified Gram-Schmidt) under the plain inner
     // product, then exact AU and H under the CURRENT operator.
     std::vector<F> V;
@@ -271,6 +279,7 @@ class DtxqcdDeformRecycle {
   Eigen::MatrixXcd H_;
   Eigen::LLT<Eigen::MatrixXcd> Hllt_;
   int mmax_, maxadd_, shiftsign_, cur_t0_;
+  int pending_ = 0;
   RealD orthtol_;
 };
 
