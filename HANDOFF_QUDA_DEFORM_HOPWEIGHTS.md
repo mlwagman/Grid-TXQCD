@@ -333,6 +333,30 @@ fast); TSRC (all 48 sources, always) σ_D ≈ 1.0 (η=0.2, M=12) / 2.6
 t0=0 contour).  The η=0.6 TSRC integrand is intrinsically expensive:
 per-sample σ ≈ 190 with 24 nodes.
 
+### TENT PIVOT (2026-07-20): the production contour is the SHARP TENT
+
+The [0.4,0.6] same-config head-to-head ended the cos era for
+production reweighting: cos's supercritical band (η > 0.54·(2/π)…, i.e.
+nodes above ep ≈ 0.45) is GENUINE config-to-config ΔlogPf variance —
+cos σ_config ≈ 5–6 at η=0.6 ⇒ ESS ≈ 0 regardless of estimator
+precision — while the subcritical tent holds σ_config ≈ 0.5 with ×2.4
+lower estimator noise on top.  Tent segment ledger (4 configs):
+σ = 0.66 / 0.85 / 1.67 for [0,.2]/[.2,.4]/[.4,.6].
+
+Tent solver reality (λ=5, wall sources, measured): plain CG
+1,260 / 4,480 / 15,900 / 59,930 iters at η = 0.4/0.6/0.7/0.8 —
+**production η ≤ 0.6 needs NO MG and NO deflation.**  Census: the
+wall PAIR (exact 2-fold degeneracy) descends smoothly to 2.0e-5 at
+η=0.6; towers (~24 levels) form only at 0.7+.  Deflation for reach
+beyond 0.6 MUST use the certified eigensolve settings
+`DTXQCD_DEFORM_EO_DEFLATE_ORD=1001 _TOL=1e-5` — the meas defaults
+(301/1e-3) build bases that actively HURT (measured 4.5k→33k).
+Tent TSRC coverage: use the common-noise Δt0 telescope
+(ρ = 0.98–0.99 measured) — the s-line-integral needs a smooth profile.
+Mask engineering post-mortem: explicit split/parity masks stall; the
+RB-quirk NV recipe is not a spatial mask (site-scrambled half-copy) and
+remains the only working basis — moot for tent production (no MG).
+
 ### Propagator-side MG update (MG-lite L1 = NEW DEFAULT)
 
 `DTXQCD_MG_BLOCK=4.4.4.4` + `DTXQCD_MG_LUDEV=0` (both now header
