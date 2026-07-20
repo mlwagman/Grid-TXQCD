@@ -15,14 +15,16 @@
 #   DEFETA (0.2)     eta
 #   LAM (4)          lambda -- picks cfg stream, baryon8 partner dir, output
 #   DEFTRAJS         explicit traj list (default: all baryon8 partners)
-#   DEFCGMAX (20000) CG_MAX (eta=0.6 sharp tent needs ~60000)
+#   DEFCGMAX ("")    CG_MAX override; empty = the meas binary's
+#                    eta-banded default (20k/60k/100k/200k at
+#                    <0.55/0.65/0.75/above -- tent-ladder-calibrated)
 # Fast path: meas defaults DTXQCD_DEFORM_QUDA=1 (5.7x/iter) and
 # DTXQCD_DEFORM_EO=1 at lambda>=5; MG auto-policy (off for sharp tent).
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh
 P=/lustre2/nplqcd/Grid-DTXQCD/production
 DEFETA=${DEFETA:-0.2}
 LAM=${LAM:-4}
-DEFCGMAX=${DEFCGMAX:-20000}
+DEFCGMAX=${DEFCGMAX:-}   # empty => meas eta-banded default
 # DEFPROFILE (tent): contour profile.  Non-tent profiles get their own
 # output dir (deform_<profile>_eta<tag>) -- never mix profiles in one dir;
 # the un-tagged deform_eta* dirs are the legacy SHARP-TENT datasets.

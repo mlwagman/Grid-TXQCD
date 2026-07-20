@@ -154,7 +154,15 @@ int main(int argc, char **argv) {
   RealD eta  = env_real("ETA", 0.2);
   RealD lam  = env_real("LAMBDA_DTXQCD", 4.0);
   RealD tol  = env_real("CG_TOL", 1e-7);
-  int cgmax  = env_int("CG_MAX", 20000);
+  // CG_MAX default is eta-banded to the measured tent ladder
+  // (1,260/4,480/15,900/59,930 at 0.4/0.6/0.7/0.8, wall sources) with
+  // headroom for the (config, t_src) tail AND for explicitly-disabled
+  // deflation; a stuck solve aborts at the cap rather than burning the
+  // walltime (h5-skip reruns it).
+  int cgmax  = env_int("CG_MAX", (eta < 0.55)   ? 20000
+                                 : (eta < 0.65) ? 60000
+                                 : (eta < 0.75) ? 100000
+                                                : 200000);
   int n_tsrc = env_int("MEAS_BARYON_NTSRC", 4);
   const bool tent = env_str("PROFILE", "tent") != "linear";
   std::string cfg_dir = env_str("CFG_DIR",
