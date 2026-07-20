@@ -31,7 +31,13 @@ PROF=${PROF:-cos}      # profile A/B smokes (e.g. tent: subcritical at all
                        # production eta -- the ESS/config-variance
                        # head-to-head vs cos's supercritical segments)
 SEEDBASE=${SEEDBASE:-400}   # distinct per submission (multi-job averaging)
-TAG=$(echo "seg${ELO}_${EHI}_${PROF}" | tr -d .)
+DEFL=${DEFL:-0}             # oblique-projector deflation nev (0 = off);
+                            # when >0 the certified eigensolve settings
+                            # (ord=1001 tol=1e-5 lo=3e-5) are forced.
+RUNTAG=${RUNTAG:-}          # optional log-name suffix: REQUIRED for any
+                            # rerun of an existing (segment, profile) --
+                            # identical tags OVERWRITE prior logs.
+TAG=$(echo "seg${ELO}_${EHI}_${PROF}${RUNTAG}" | tr -d .)
 rm -f $LOGD/rwf_smoke_$TAG.DONE
 GPU=0
 for TRAJ in 300 400 500 600; do
@@ -43,6 +49,11 @@ for TRAJ in 300 400 500 600; do
           ETA=$EHI ETA_LO=$ELO N_GL=2 N_NOISE=$NA \
           NOISE_SEED=$((SEEDBASE + TRAJ)) \
           PROFILE=$PROF PROF_T0=0 DTXQCD_STOCHPF_ANTI=0 \
+          DTXQCD_STOCHPF_DEFLATE=$DEFL \
+          DTXQCD_DEFORM_EO_DEFLATE_ORD=1001 \
+          DTXQCD_DEFORM_EO_DEFLATE_TOL=1e-5 \
+          DTXQCD_DEFORM_EO_DEFLATE_LO=3e-5 \
+          DTXQCD_DEFORM_EO_DEFLATE_CACHE=$P/defl_cache \
           DTXQCD_DEFORM_QUDA=1 DTXQCD_DEFORM_EO=1 \
           DTXQCD_MG_BLOCK=4.4.4.4 DTXQCD_MG_LUDEV=0 DTXQCD_MG_REUSE_NV=1 \
       $P/Test_dtxqcd_eta_stoch_pf --grid 16.16.16.48 --mpi 1.1.1.1 \
