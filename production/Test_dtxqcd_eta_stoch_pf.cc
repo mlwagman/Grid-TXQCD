@@ -215,11 +215,18 @@ int main(int argc, char **argv) {
     }
     return v;
   };
-  // p'(t - t0 - shift) for the cos profile (the TSRC-ratio insertion).
+  // p'(t - t0 - shift) for the TSRC-ratio insertion.  cos: smooth sine.
+  // Sharp tent: p' = sign(T/2 - d) piecewise-constant, so the difference
+  // profp(t+1) - profp(t) in BuildHopWeightsS is AUTOMATICALLY the
+  // kink-window square pulse (+-2 on the one link containing each kink,
+  // 0 elsewhere) -- the exact d/ds of the tent hop weights for
+  // non-integer shifts (the per-interval GL nodes never sit on a kink).
   auto profp = [&](int t) {
     double d = std::fmod((double)(t - prof_t0) - prof_shift, (double)T);
     if (d < 0) d += (double)T;
-    return 0.5 * M_PI * std::sin(2.0 * M_PI * d / (double)T);
+    if (prof_cos)
+      return 0.5 * M_PI * std::sin(2.0 * M_PI * d / (double)T);
+    return (d < 0.5 * (double)T) ? 1.0 : -1.0;   // sharp tent
   };
   auto WeightField = [&](const auto &f, auto &out, auto fac) {
     out = f;
@@ -816,12 +823,35 @@ int main(int argc, char **argv) {
   // basis is s-dependent; the insertion is small enough not to need it).
   const int tsrc_M = env_int("DTXQCD_STOCHPF_TSRC_RATIO", 0);
   if (tsrc_M > 0) {
-    GRID_ASSERT(prof_cos && chempot && hop_insert && Qdef &&
-                "TSRC ratio mode needs cos/chempot/hop/Qdef");
+    // cos: smooth periodic integrand, M uniform nodes (trapezoid =
+    // spectral).  Sharp tent: the integrand is C^0 with derivative
+    // breaks exactly at INTEGER s (a kink hops between links), analytic
+    // on each unit interval -- KINK-AWARE quadrature = 2-point
+    // Gauss-Legendre per unit interval, nodes n + (1 -+ 1/sqrt(3))/2,
+    // weights 1/2, M forced to 2T (the env value is ignored for tent).
+    const bool tsrc_tent = !prof_cos;
+    GRID_ASSERT((prof_cos || (tent && !prof_rounded)) && chempot &&
+                hop_insert && Qdef &&
+                "TSRC ratio mode needs cos or sharp tent + chempot/hop/Qdef");
 #ifdef GRID_HAVE_QUDA
     GRID_ASSERT(Qdef->HasEO());
 #endif
     const double e = eta;
+    std::vector<std::pair<double, double>> snodes;  // (s, weight)
+    if (tsrc_tent) {
+      const double h2 = 0.5 / std::sqrt(3.0);
+      for (int n2 = 0; n2 < T; ++n2) {
+        snodes.push_back({(double)n2 + 0.5 - h2, 0.5});
+        snodes.push_back({(double)n2 + 0.5 + h2, 0.5});
+      }
+      std::cout << GridLogMessage << "[tsrc-ratio] TENT kink-aware "
+                << "quadrature: 2 GL nodes x " << T << " unit intervals"
+                << std::endl;
+    } else {
+      for (int m2 = 0; m2 < tsrc_M; ++m2)
+        snodes.push_back({(double)m2 * (double)T / (double)tsrc_M,
+                          (double)T / (double)tsrc_M});
+    }
     if (env_int("TSRC_DERIVCHECK", 1)) {
       // operator-level FD gate in s: the hop-corrected M~'s ONLY
       // s-dependence is the hop weights, so dMhopS must equal the FD of
@@ -878,8 +908,8 @@ int main(int argc, char **argv) {
 #endif
     ComplexD closure(0.0, 0.0);
     double closure_var = 0;
-    for (int m = 0; m < tsrc_M; ++m) {
-      prof_shift = (double)m * (double)T / (double)tsrc_M;
+    for (int m = 0; m < (int)snodes.size(); ++m) {
+      prof_shift = snodes[m].first;
       BuildWeights(e);
       BuildGWeights(e);
       BuildHopWeightsS(e);
@@ -915,10 +945,11 @@ int main(int argc, char **argv) {
       const double ei2 =
           std::max(0.0, acc2i / n_noise - gm.imag() * gm.imag()) / n_noise;
       std::cout << GridLogMessage << "TSRCNODE m=" << m << " s=" << prof_shift
+                << " w=" << snodes[m].second
                 << " Tr[Sinv dS/ds] = " << gm.real() << " +- "
                 << std::sqrt(er2) << "  (im " << gm.imag() << " +- "
                 << std::sqrt(ei2) << ")" << std::endl;
-      const double wq = (double)T / (double)tsrc_M;
+      const double wq = snodes[m].second;
       closure += wq * gm;
       closure_var += wq * wq * er2;
     }
