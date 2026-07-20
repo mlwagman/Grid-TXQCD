@@ -1223,6 +1223,53 @@ int main(int argc, char **argv) {
             mt1 = where(tc == Integer(t), one, mt1);
         }
       }
+      // DTXQCD_STOCHPF_RHOCHAIN=1: the full-period TELESCOPE CHAIN.
+      // Per GL node, for every step t0 -> t0+1, N_NOISE common-noise
+      // pairs of the remainder estimate at the two offsets (RHOSTEP
+      // lines).  Offline: per-step differences D(t0) accumulate to the
+      // per-offset DlogPf ratios, the periodic closure gives the bridge
+      // correction, and the measured per-step sigma_diff x chain
+      // arithmetic IS the tent offset-coverage cost curve (the telescope
+      // is only break-even vs brute force unless rho > ~0.99 -- this
+      // instrument measures which side we are on).  Undeflated Schur
+      // estimator; profile-generic (tent intended).
+      if (env_int("DTXQCD_STOCHPF_RHOCHAIN", 0)) {
+        const int t0a = prof_t0;
+        auto Retarget = [&](int t0new) {
+          prof_t0 = t0new;
+          BuildWeights(ep);
+          BuildGWeights(ep);
+          BuildHopWeights(ep);
+          Qdef->SetProfile(ep, [&](int t) { return prof(t); });
+        };
+        for (int step = 0; step < T; ++step) {
+          for (int h = 0; h < n_noise; ++h) {
+            F w(&Grid);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              gaussian(pRNG, w.upper.f[a]);
+              gaussian(pRNG, w.lower.f[a]);
+            }
+            MaskKeepCb(w, Odd);
+            ComplexD eab[2];
+            const int t0s[2] = {step, (step + 1) % T};
+            for (int s2 = 0; s2 < 2; ++s2) {
+              Retarget(t0s[s2]);
+              eab[s2] = Remainder(w);
+            }
+            std::cout << GridLogMessage << "RHOSTEP q=" << q << " t0="
+                      << step << " h=" << h << " A " << eab[0].real() << " "
+                      << eab[0].imag() << " B " << eab[1].real() << " "
+                      << eab[1].imag() << std::endl;
+          }
+        }
+        Retarget(t0a);
+        g = ComplexD(0.0, 0.0);
+        er = ei = 0;
+        std::cout << GridLogMessage << "GLNODE q=" << q << " eta'=" << ep
+                  << " [rhochain instrument run -- no trace estimate]"
+                  << std::endl;
+        continue;
+      }
       if (rho_t0b >= 0) {
         // difference-telescope correlation: same noise through both
         // contour offsets; all weight builders capture prof_t0 by

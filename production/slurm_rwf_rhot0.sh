@@ -22,25 +22,26 @@
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh
 P=/lustre2/nplqcd/Grid-DTXQCD/production
 LOGD=$P/gridmg_setups/logs
-rm -f $LOGD/rwf_rhot0.DONE
+rm -f $LOGD/rwf_rhot0_${RPROF:-cos}.DONE
+RPROF=${RPROF:-cos}
 GPU=0
-for EP in 0.16 0.47; do
+for EP in ${EPS:-0.16 0.47}; do
   ETA2=$(python3 -c "print(2*$EP)")
   srun --overlap --mpi=pmix -N 1 -n 1 --cpu-bind=none \
     env CUDA_VISIBLE_DEVICES=$GPU LATT=16.16.16.48 TRAJ=300 LAMBDA_DTXQCD=5 \
         CFG_DIR=$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw \
-        ETA=$ETA2 N_GL=1 N_NOISE=16 NOISE_SEED=95 \
-        PROFILE=cos PROF_T0=0 DTXQCD_DEFORM_MG=0 \
+        ETA=$ETA2 N_GL=1 N_NOISE=16 NOISE_SEED=${RSEED:-95} \
+        PROFILE=$RPROF PROF_T0=0 DTXQCD_DEFORM_MG=0 \
         DTXQCD_DEFORM_QUDA=1 DTXQCD_DEFORM_EO=1 \
         DTXQCD_STOCHPF_SCHUR=1 DTXQCD_STOCHPF_DEFLATE=0 \
         DTXQCD_STOCHPF_RHOT0=1 \
     $P/Test_dtxqcd_eta_stoch_pf --grid 16.16.16.48 --mpi 1.1.1.1 \
-    --shm 512 --shm-mpi 1 > $LOGD/rwf_rho_ep$EP.log 2>&1 &
+    --shm 512 --shm-mpi 1 > $LOGD/rwf_rho_${RPROF}_ep$EP.log 2>&1 &
   GPU=$((GPU+1))
 done
 wait
-for EP in 0.16 0.47; do
+for EP in ${EPS:-0.16 0.47}; do
   echo "== ep=$EP =="
-  grep -ac "RHOPAIR" $LOGD/rwf_rho_ep$EP.log
+  grep -ac "RHOPAIR" $LOGD/rwf_rho_${RPROF}_ep$EP.log
 done
-touch $LOGD/rwf_rhot0.DONE
+touch $LOGD/rwf_rhot0_${RPROF}.DONE
