@@ -55,6 +55,8 @@
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
 #include "dtxqcd_deform_mg.h"
 #endif
+// Subspace-recycling CGNR (deep-tent accelerator; DTXQCD_DEFORM_RECYCLE=1)
+#include "dtxqcd_deform_recycle.h"
 
 using namespace Grid;
 
@@ -764,8 +766,26 @@ int main(int argc, char **argv) {
       mg.reset(new DtxqcdDeformMG<16>(*Qdef, Grid, RBGrid));
   }
 #endif
+  // ---- DTXQCD_DEFORM_RECYCLE=1: subspace-recycling CGNR (default OFF
+  // pending the A/B gate).  Accumulates late-CG residual snapshots
+  // across the 192-solve workload; Galerkin init-guess deflation per
+  // solve; t0-translated + exactly rebuilt on each contour step.
+  // Unconditionally exact (init-guess only).  Deep-tent (eta >= 0.7)
+  // accelerator; composes with nothing else needed (MG off for tent).
+  std::unique_ptr<DtxqcdDeformRecycle> recyc;
+  if (env_int("DTXQCD_DEFORM_RECYCLE", 0) && use_eo_def && Qdef &&
+      Qdef->HasEO()) {
+    recyc.reset(new DtxqcdDeformRecycle(*Qdef, Grid, RBGrid));
+    Qdef->SetOddSolver([&](const F &b, F &x2, RealD tol2, int mx,
+                           RealD &r2) {
+      return recyc->Solve(b, x2, tol2, mx, r2);
+    });
+    std::cout << GridLogMessage << "[baryon-def] RECYCLE solver ENABLED"
+              << std::endl;
+  }
   for (int t_src : tsrc_list) {
     BuildDeformWeights(t_src);   // source-centered contour for this t_src
+    if (recyc) recyc->OnT0Change(prof_t0);
 #if defined(GRID_HAVE_QUDA) && defined(GRID_CUDA)
     if ((mg || mg32) && prof_t0 != mg_t0) {
       mg_t0 = prof_t0;
