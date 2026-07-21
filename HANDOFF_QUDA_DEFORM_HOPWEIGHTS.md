@@ -372,6 +372,19 @@ ord=1001/tol=1e-5; the bare meas defaults 301/1e-3 build bases that
 HURT).  Eigensolves are cached per (config, node) and t0-translatable
 — reusable by TSRC/telescope runs.
 
+### THE TENT CEILING: eta = 0.6 (measured 2026-07-21 — program headline)
+
+Deep-segment sigma_config (4 configs, estimator noise subtracted):
+~0.4 / ~0 / ~0 / 2.2 / 3 across [0,.2]...[.7,.8] => ESS(0.6) ~ 85%
+(reweighting nearly free at the production point), ESS(0.7) ~ 0.7%,
+ESS(0.8) dead.  The spread turns on exactly at the census's tower
+formation — spectral and ensemble stories agree.  Production is the
+eta<=0.6 battery as finalized; NO deep accelerator needed (props 4.5k
+plain CG, estimator ~700 iters).  The recycler/Def-CG line is CLOSED
+(both flat through dim=64 — the wall-source slow space is
+tower x transverse ~hundreds-dim) and moot.  eta=0.8 props measured at
+58.5k iters/solve (23 min) if deep correlators are ever wanted.
+
 ### PREPPED, NOT FIRED: incremental eigCG for deep-tent props (eta >= 0.7)
 
 The unified failure picture (deflation = Ritz mush on a band packed
