@@ -387,6 +387,14 @@ Test_dtxqcd_eta_stoch_pf: Test_dtxqcd_eta_stoch_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_eta_stoch_pf.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
+# Operator-consistency A/B (host sandwich vs fused device x profile API).
+Test_dtxqcd_smoking_gun.o: Test_dtxqcd_smoking_gun.cc dtxqcd_deform_quda.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_smoking_gun: Test_dtxqcd_smoking_gun.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_smoking_gun.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 # Deflation-basis localization diagnostics (slice density + grading
 # fraction + transverse IPR per cached eigenmode).
 Test_dtxqcd_defl_slicedens.o: Test_dtxqcd_defl_slicedens.cc \
