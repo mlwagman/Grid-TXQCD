@@ -129,19 +129,39 @@ class DtxqcdDeformRecycle {
       }
     }
     const RealD cap = std::sqrt(Fn2_(r) / bn2);
-    // CG on A from x0 (r already = bn - A x0, exact via stored AU)
-    p = r;
+    // TRUE DEFLATED CG (Def-PCG): the projector acts INSIDE the
+    // iteration (z = (1 - U H^{-1} (AU)^dag) r each step) -- init-guess
+    // alone measured useless at kappa~1e8 (gate 1303508: iters flat at
+    // dim=64; slow modes re-excited unless removed from the search).
+    F z(&rb_);
+    auto Proj_ = [&](const F &rin, F &zout) {
+      zout = rin;
+      const int M = (int)U_.size();
+      if (M == 0) return;
+      Eigen::VectorXcd c(M);
+      for (int j = 0; j < M; ++j) {
+        const ComplexD ip = Fip_(AU_[j], rin);
+        c(j) = std::complex<double>(DtxqcdToStd(ip).real(),
+                                    DtxqcdToStd(ip).imag());
+      }
+      Eigen::VectorXcd d = Hllt_.solve(c);
+      for (int j = 0; j < M; ++j)
+        Axpy_(zout, ComplexD(-d(j).real(), -d(j).imag()), U_[j]);
+    };
+    Proj_(r, z);
+    p = z;
     RealD r2 = Fn2_(r);
+    RealD rz = DtxqcdToStd(Fip_(r, z)).real();
     const RealD tol2 = tol * tol * bn2;
     int k = 0;
     int nsnap = 0;
-    RealD next_decade = 1e-2;
+    RealD next_decade = 1e-4;   // skip the bulk-rich first decade
     std::vector<F> snaps;
     for (; k < maxit && r2 > tol2; ++k) {
       A_(p, Ap);
       const RealD pAp = DtxqcdToStd(
           DtxqcdDeformQuda::finner_(p, Ap)).real();
-      const RealD alpha = r2 / std::max(pAp, 1e-300);
+      const RealD alpha = rz / std::max(pAp, 1e-300);
       Axpy_(x_o, ComplexD(alpha, 0.0), p);
       Axpy_(r, ComplexD(-alpha, 0.0), Ap);
       const RealD rn = Fn2_(r);
@@ -153,12 +173,15 @@ class DtxqcdDeformRecycle {
         ++nsnap;
         next_decade *= 1e-2;
       }
-      const RealD beta = rn / r2;
+      Proj_(r, z);
+      const RealD rzn = DtxqcdToStd(Fip_(r, z)).real();
+      const RealD beta = rzn / std::max(rz, 1e-300);
       for (int c2 = 0; c2 < DtxqcdNf; ++c2) {
-        p.upper.f[c2] = r.upper.f[c2] + beta * p.upper.f[c2];
-        p.lower.f[c2] = r.lower.f[c2] + beta * p.lower.f[c2];
+        p.upper.f[c2] = z.upper.f[c2] + beta * p.upper.f[c2];
+        p.lower.f[c2] = z.lower.f[c2] + beta * p.lower.f[c2];
       }
       r2 = rn;
+      rz = rzn;
     }
     rel_out = std::sqrt(r2 / bn2);
     std::cout << GridLogMessage << "[recycle] dim=" << U_.size()
