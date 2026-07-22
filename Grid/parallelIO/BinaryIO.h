@@ -402,7 +402,7 @@ class BinaryIO {
       bstimer.Stop();
     }
     
-    if ( control & BINARYIO_WRITE ) { 
+    if ( control & BINARYIO_WRITE ) {
 
       bstimer.Start();
       NerscChecksum(grid,iodata,nersc_csum);
@@ -603,7 +603,7 @@ class BinaryIO {
     // Munge [ .e.g 3rd row recon ]
     //////////////////////////////////////////////////////////////////////////////
     GridStopWatch timer; timer.Start();
-    unvectorizeToLexOrdArray(scalardata,Umu);    
+    unvectorizeToLexOrdArray(scalardata,Umu);
 
     thread_for(x, lsites, { munge(scalardata[x],iodata[x]); });
 
