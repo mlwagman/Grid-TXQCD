@@ -53,6 +53,7 @@
 #include <Grid/qcd/action/pseudofermion/QCDLogDetCloverEOAction.h>
 #include "dtxqcd_diag.h"   // signed-Pfaffian + aux diagnostics observer
 #include "dtxqcd_sign_hop.h"  // 4^4 sign-sector hop heatbath + exact signPf record
+#include "dtxqcd_dibaryon_inline.h"  // every-traj pure-aux dibaryon measurement
 
 using namespace TXQCDProduction;
 
@@ -739,6 +740,19 @@ int main(int argc, char **argv) {
   }
   Obs.push_back(&ckpt);
   Obs.push_back(&diag);
+  // ---- every-trajectory pure-aux dibaryon measurement (DIBARYON_INLINE=1
+  //      default; ~2.5 s/traj at 16^3x48 vs ~574 s/traj HMC).  Shares
+  //      MeasCore with the offline meas_dibaryon_aux_dtxqcd binary, writes
+  //      format-identical h5 under <cfg_dir>/dibaryon_inline/ so the
+  //      analyze_dibaryon_*.py tools work unchanged.  Thin-link field in,
+  //      stout applied internally with the generator's parameters.
+  std::unique_ptr<DtxqcdDibaryonInline> dibaryon_inline;
+  if (TXQCDProduction::detail::env_int("DIBARYON_INLINE", 1) != 0) {
+    dibaryon_inline = std::make_unique<DtxqcdDibaryonInline>(
+        Grid, cfg_dir + "/dibaryon_inline", lam,
+        stout_nsmear_inv, stout_rho_inv);
+    Obs.push_back(dibaryon_inline.get());
+  }
 
   // ---- smearing + integrator dispatch (2x2 runtime selection).
   //   STOUT_NSMEAR>0 (params.h default 1): stout-chained
