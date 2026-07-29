@@ -3,7 +3,7 @@
 source /lustre2/nplqcd/Grid-DTXQCD/env_lq2_grid.sh > /dev/null 2>&1
 P=/lustre2/nplqcd/Grid-DTXQCD/production
 CFG=$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw
-OUT=$P/meas_2pt/dtxqcd_lam5_dibaryon_aux
+OUT=$P/meas_2pt/${DIBOUT:-dtxqcd_lam5_dibaryon_aux_sm}
 mkdir -p "$OUT"
 n=0
 for t in $(ls -v "$CFG"/ckpoint_lat.* 2>/dev/null | grep -v daux | grep -v rng | sed 's/.*\.//'); do

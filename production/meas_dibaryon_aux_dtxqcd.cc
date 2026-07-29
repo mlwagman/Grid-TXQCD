@@ -125,6 +125,19 @@ int main(int argc, char **argv) {
   const int nstout = env_int("STOUT_NSMEAR", 1);
   const RealD rho = env_real("STOUT_RHO", 0.125);
   const int LMAX = env_int("LMAX", 3);
+  // SMEARS: comma list of covariant Gaussian smearing iteration counts for
+  // the diquark fields (w as 3bar with conjugated links, d6 as colour-6
+  // with U d U^T), SPATIAL-only so dt>=1 contact-freedom is preserved.
+  // Ascending; 0 = the unsmeared (original) operator set.
+  std::vector<int> smears;
+  {
+    std::stringstream ss(env_str("SMEARS", "0,3,10,30"));
+    std::string tok;
+    while (std::getline(ss, tok, ',')) smears.push_back(std::atoi(tok.c_str()));
+    std::sort(smears.begin(), smears.end());
+  }
+  const RealD salpha = env_real("SMEAR_ALPHA", 0.5);
+  const int NLEV = (int)smears.size();
   const RealD lam = env_real("LAMBDA_DTXQCD", 5.0);
   const std::string cfg_dir = env_str("CFG_DIR",
       "/lustre2/nplqcd/Grid-DTXQCD/production/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw");
@@ -177,9 +190,10 @@ int main(int argc, char **argv) {
             << ", I=0 " << NG0 << std::endl;
 
   // ---- everything below recomputed per (possibly twisted) field set ------
+  // S1[level][geo][t], S0[level][geo][t]
   auto ComputeAll = [&](const DTXQCDField &F,
-                        std::vector<std::vector<ComplexD>> &S1,
-                        std::vector<std::vector<ComplexD>> &S0) {
+                        std::vector<std::vector<std::vector<ComplexD>>> &S1,
+                        std::vector<std::vector<std::vector<ComplexD>>> &S0) {
     // stout smear (after any twist: covariant)
     LatticeGaugeField Usm(F.U);
     if (nstout > 0) {
@@ -190,10 +204,23 @@ int main(int argc, char **argv) {
     std::array<LatticeColourMatrix, 3> Umu{
         LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid),
         LatticeColourMatrix(&Grid)};
-    for (int mu = 0; mu < 3; ++mu)
+    std::array<LatticeColourMatrix, 3> cU{
+        LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid),
+        LatticeColourMatrix(&Grid)};
+    std::array<LatticeColourMatrix, 3> tU{
+        LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid),
+        LatticeColourMatrix(&Grid)};
+    std::array<LatticeColourMatrix, 3> aU{
+        LatticeColourMatrix(&Grid), LatticeColourMatrix(&Grid),
+        LatticeColourMatrix(&Grid)};
+    for (int mu = 0; mu < 3; ++mu) {
       Umu[mu] = PeekIndex<LorentzIndex>(Usm, mu);
+      cU[mu] = conjugate(Umu[mu]);
+      tU[mu] = transpose(Umu[mu]);
+      aU[mu] = adj(Umu[mu]);
+    }
 
-    // diquark fields
+    // base diquark fields
     LatticeColourMatrix d_iso = IsoSingletDiquark(F.d);
     LatticeColourVector w = EpsReduce(d_iso);
     LatticeColourMatrix d6(&Grid);
@@ -203,30 +230,25 @@ int main(int argc, char **argv) {
       d6 = m00 + m11;                    // colour-symmetric (6), I3=+-1 mix
     }
 
-    // cached 3bar transports: V[mu][sgn][L] = w transported from x + sgn*L*mu
-    // forward step: v(x) = conj(U_mu(x)) v(x+mu);  backward: v(x) =
-    // transpose(U_mu(x-mu)) v(x-mu).
-    std::map<std::tuple<int, int, int>, LatticeColourVector> V;
-    for (int mu = 0; mu < 3; ++mu)
-      for (int s : {+1, -1}) {
-        LatticeColourVector v = w;
-        for (int L = 1; L <= LMAX; ++L) {
-          if (s > 0) {
-            LatticeColourVector sh = Cshift(v, mu, +1);
-            v = LatticeColourMatrix(conjugate(Umu[mu])) * sh;
-          } else {
-            LatticeColourVector tv =
-                LatticeColourMatrix(transpose(Umu[mu])) * v;
-            v = Cshift(tv, mu, -1);
-          }
-          V.emplace(std::make_tuple(mu, s, L), v);
-        }
+    // one covariant Gaussian smearing step, spatial only (w: 3bar transport;
+    // d6: fwd U d U^T, bwd U^dag d U^*)
+    auto SmearStep = [&](LatticeColourVector &wv, LatticeColourMatrix &dm) {
+      LatticeColourVector wa(&Grid); wa = Zero();
+      LatticeColourMatrix da(&Grid); da = Zero();
+      LatticeColourVector tv(&Grid);
+      LatticeColourMatrix tm(&Grid);
+      for (int mu = 0; mu < 3; ++mu) {
+        tv = Cshift(wv, mu, +1);
+        wa = wa + cU[mu] * tv;
+        tv = tU[mu] * wv;
+        wa = wa + Cshift(tv, mu, -1);
+        tm = Cshift(dm, mu, +1);
+        da = da + Umu[mu] * tm * tU[mu];
+        tm = aU[mu] * dm * cU[mu];
+        da = da + Cshift(tm, mu, -1);
       }
-    auto getW = [&](const Coordinate &r) -> const LatticeColourVector & {
-      for (int mu = 0; mu < 3; ++mu)
-        if (r[mu] != 0)
-          return V.at(std::make_tuple(mu, r[mu] > 0 ? +1 : -1, std::abs(r[mu])));
-      return w;
+      wv = (1.0 - salpha) * wv + (salpha / 6.0) * wa;
+      dm = (1.0 - salpha) * dm + (salpha / 6.0) * da;
     };
 
     auto slice = [&](const LatticeComplex &D, std::vector<ComplexD> &out) {
@@ -236,36 +258,74 @@ int main(int argc, char **argv) {
       for (int t = 0; t < T; ++t) out[t] = TensorRemove(sl[t]) / V3;
     };
 
-    // I=1: D = sum_k w1_k (d6 w3)_k   (no conjugation anywhere)
-    S1.assign(NG1, {});
-    for (int g = 0; g < NG1; ++g) {
-      const LatticeColourVector &w1 = getW(geoI1[g].r1);
-      const LatticeColourVector &w3 = getW(geoI1[g].r2);
-      LatticeColourVector u = d6 * w3;
-      LatticeComplex D(&Grid);
-      D = Zero();
-      for (int k = 0; k < Nc; ++k)
-        D = D + peekColour(w1, k) * peekColour(u, k);
-      slice(D, S1[g]);
-    }
+    // evaluate the full geometry set on the current (w, d6)
+    auto EvalGeoms = [&](const LatticeColourVector &wc,
+                         const LatticeColourMatrix &d6c,
+                         std::vector<std::vector<ComplexD>> &S1l,
+                         std::vector<std::vector<ComplexD>> &S0l) {
+      // cached 3bar transports of wc
+      std::map<std::tuple<int, int, int>, LatticeColourVector> V;
+      for (int mu = 0; mu < 3; ++mu)
+        for (int s : {+1, -1}) {
+          LatticeColourVector v = wc;
+          for (int L = 1; L <= LMAX; ++L) {
+            if (s > 0) {
+              LatticeColourVector sh = Cshift(v, mu, +1);
+              v = cU[mu] * sh;
+            } else {
+              LatticeColourVector tvv = tU[mu] * v;
+              v = Cshift(tvv, mu, -1);
+            }
+            V.emplace(std::make_tuple(mu, s, L), v);
+          }
+        }
+      auto getW = [&](const Coordinate &r) -> const LatticeColourVector & {
+        for (int mu = 0; mu < 3; ++mu)
+          if (r[mu] != 0)
+            return V.at(
+                std::make_tuple(mu, r[mu] > 0 ? +1 : -1, std::abs(r[mu])));
+        return wc;
+      };
 
-    // I=0: D0 = w . (w2 x w3)  (eps contraction, all unconjugated)
-    S0.assign(NG0, {});
-    for (int g = 0; g < NG0; ++g) {
-      const LatticeColourVector &w2 = getW(geoI0[g].r1);
-      const LatticeColourVector &w3 = getW(geoI0[g].r2);
-      LatticeComplex b0 = peekColour(w2, 0), b1 = peekColour(w2, 1),
-                     b2 = peekColour(w2, 2);
-      LatticeComplex c0 = peekColour(w3, 0), c1 = peekColour(w3, 1),
-                     c2 = peekColour(w3, 2);
-      LatticeComplex D = peekColour(w, 0) * (b1 * c2 - b2 * c1) +
-                         peekColour(w, 1) * (b2 * c0 - b0 * c2) +
-                         peekColour(w, 2) * (b0 * c1 - b1 * c0);
-      slice(D, S0[g]);
+      S1l.assign(NG1, {});
+      for (int g = 0; g < NG1; ++g) {
+        const LatticeColourVector &w1 = getW(geoI1[g].r1);
+        const LatticeColourVector &w3 = getW(geoI1[g].r2);
+        LatticeColourVector u = d6c * w3;
+        LatticeComplex D(&Grid);
+        D = Zero();
+        for (int k = 0; k < Nc; ++k)
+          D = D + peekColour(w1, k) * peekColour(u, k);
+        slice(D, S1l[g]);
+      }
+      S0l.assign(NG0, {});
+      for (int g = 0; g < NG0; ++g) {
+        const LatticeColourVector &w2 = getW(geoI0[g].r1);
+        const LatticeColourVector &w3 = getW(geoI0[g].r2);
+        LatticeComplex b0 = peekColour(w2, 0), b1 = peekColour(w2, 1),
+                       b2 = peekColour(w2, 2);
+        LatticeComplex c0 = peekColour(w3, 0), c1 = peekColour(w3, 1),
+                       c2 = peekColour(w3, 2);
+        LatticeComplex D = peekColour(wc, 0) * (b1 * c2 - b2 * c1) +
+                           peekColour(wc, 1) * (b2 * c0 - b0 * c2) +
+                           peekColour(wc, 2) * (b0 * c1 - b1 * c0);
+        slice(D, S0l[g]);
+      }
+    };
+
+    S1.assign(NLEV, {});
+    S0.assign(NLEV, {});
+    int cur = 0;
+    for (int lev = 0; lev < NLEV; ++lev) {
+      while (cur < smears[lev]) {
+        SmearStep(w, d6);
+        ++cur;
+      }
+      EvalGeoms(w, d6, S1[lev], S0[lev]);
     }
   };
 
-  std::vector<std::vector<ComplexD>> S1, S0;
+  std::vector<std::vector<std::vector<ComplexD>>> S1, S0;
   ComputeAll(U, S1, S0);
 
   // ---- GAUGE_TWIST gate --------------------------------------------------
@@ -279,19 +339,21 @@ int main(int argc, char **argv) {
         blk = om * blk * omT;
         PokeIndex<1>(U.d, blk, a, b);
       }
-    std::vector<std::vector<ComplexD>> T1, T0;
+    std::vector<std::vector<std::vector<ComplexD>>> T1, T0;
     ComputeAll(U, T1, T0);
     double dev = 0.0, scale = 0.0;
-    for (int g = 0; g < NG1; ++g)
-      for (int t = 0; t < T; ++t) {
-        dev = std::max(dev, DtxqcdAbs(ComplexD(S1[g][t] - T1[g][t])));
-        scale = std::max(scale, DtxqcdAbs(S1[g][t]));
-      }
-    for (int g = 0; g < NG0; ++g)
-      for (int t = 0; t < T; ++t) {
-        dev = std::max(dev, DtxqcdAbs(ComplexD(S0[g][t] - T0[g][t])));
-        scale = std::max(scale, DtxqcdAbs(S0[g][t]));
-      }
+    for (int l = 0; l < NLEV; ++l) {
+      for (int g = 0; g < NG1; ++g)
+        for (int t = 0; t < T; ++t) {
+          dev = std::max(dev, DtxqcdAbs(ComplexD(S1[l][g][t] - T1[l][g][t])));
+          scale = std::max(scale, DtxqcdAbs(S1[l][g][t]));
+        }
+      for (int g = 0; g < NG0; ++g)
+        for (int t = 0; t < T; ++t) {
+          dev = std::max(dev, DtxqcdAbs(ComplexD(S0[l][g][t] - T0[l][g][t])));
+          scale = std::max(scale, DtxqcdAbs(S0[l][g][t]));
+        }
+    }
     const double rel = dev / std::max(scale, 1e-300);
     std::cout << GridLogMessage << "[dibaryon GAUGE_TWIST] max|dS|/max|S| = "
               << rel << (rel < 1e-8 ? "   PASSED" : "   FAILED") << std::endl;
@@ -324,10 +386,15 @@ int main(int argc, char **argv) {
       for (int c = 0; c < 3; ++c) g0meta.push_back(g.r2[c]);
     write(wr, "geo_I1", g1meta);
     write(wr, "geo_I0", g0meta);
-    for (int g = 0; g < NG1; ++g)
-      write(wr, "dib_I1_S_" + std::to_string(g), S1[g]);
-    for (int g = 0; g < NG0; ++g)
-      write(wr, "dib_I0_S_" + std::to_string(g), S0[g]);
+    write(wr, "smears", smears);
+    write(wr, "smear_alpha", salpha);
+    for (int l = 0; l < NLEV; ++l) {
+      const std::string sm = "sm" + std::to_string(smears[l]) + "_";
+      for (int g = 0; g < NG1; ++g)
+        write(wr, "dib_I1_" + sm + "S_" + std::to_string(g), S1[l][g]);
+      for (int g = 0; g < NG0; ++g)
+        write(wr, "dib_I0_" + sm + "S_" + std::to_string(g), S0[l][g]);
+    }
     std::cout << GridLogMessage << "wrote " << outfile << std::endl;
   }
 
