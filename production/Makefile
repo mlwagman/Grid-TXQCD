@@ -52,7 +52,7 @@ endif
 PROGRAMS = gen_dtxqcd_cfgs gen_txqcd_cfgs gen_txqcd_cfgs_2plus1 gen_txqcd_cfgs_nf2 gen_qcd_cfgs gen_qcd_cfgs_2plus1 \
            meas_conn_txqcd meas_conn_qcd meas_conn_dtxqcd meas_conn_weakfield meas_conn_weakfield_nf2 \
            meas_disco_txqcd meas_disco_qcd \
-           meas_aux_txqcd meas_aux_dtxqcd meas_baryon_dtxqcd compare compute_plaq compute_vev \
+           meas_aux_txqcd meas_aux_dtxqcd meas_baryon_dtxqcd meas_dibaryon_aux_dtxqcd compare compute_plaq compute_vev \
            eigspec_diag eigspec_diag_nf2 \
            test_quda_init test_quda_roundtrip test_quda_inverter \
            test_quda_clover_mg \
