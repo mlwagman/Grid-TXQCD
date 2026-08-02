@@ -387,6 +387,15 @@ Test_dtxqcd_eta_stoch_pf: Test_dtxqcd_eta_stoch_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_eta_stoch_pf.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
+# p-field (eta') contour-deformation reweighting estimator -- REFERENCE
+# version: host CGNR, no QUDA/Schur (optimization = fork).  See file header.
+Test_dtxqcd_pdeform_pf.o: Test_dtxqcd_pdeform_pf.cc params.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_pdeform_pf: Test_dtxqcd_pdeform_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_pdeform_pf.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 # Operator-consistency A/B (host sandwich vs fused device x profile API).
 Test_dtxqcd_smoking_gun.o: Test_dtxqcd_smoking_gun.cc dtxqcd_deform_quda.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
