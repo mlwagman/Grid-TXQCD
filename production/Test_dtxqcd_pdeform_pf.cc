@@ -41,7 +41,9 @@
 //      PROF_T0 (0), N_NOISE (16), N_GL (4), MASS (-0.245),
 //      CSW (1.24930970916466), STOUT_NSMEAR (1), STOUT_RHO (0.125),
 //      LAMBDA_DTXQCD (5), CG_TOL (1e-8), CG_MAX (20000), NOISE_SEED (77),
-//      DERIVCHECK (1).
+//      DERIVCHECK (1), PDEF_MODE (phase|rescale, default phase),
+//      IMP_WIDTH (1.0, units of the physical p width), IMP_SEED (555 --
+//      keep FIXED across eta and reuse in the offline observable grading).
 
 #include <Grid/Grid.h>
 #include <Grid/qcd/action/dtxqcd/Dtxqcd.h>
@@ -127,21 +129,86 @@ int main(int argc, char **argv) {
     return std::min(d, (double)T - d);   // sharp tent
   };
 
-  // ---- per-slice weighted copies of p -----------------------------------
+  // ---- PDEF_MODE=phase (default) | rescale ------------------------------
+  // rescale: the REAL change of variables p -> e^{-e prof} p (kept as the
+  //   reference/control; weight has the exact extensive Gaussian piece and
+  //   provably cannot beat plain sampling -- see the 2026-08-02 spread pilot).
+  // phase (mwagman): reinterpret the real Gaussian as |p_c|^2 with
+  //   p_c = Re p + i Im p, Im p a FICTITIOUS decoupled Gaussian (drawn here,
+  //   IMP_SEED/IMP_WIDTH; ultralocal, so <p_c p_c> = <Re p Re p> for dt>=1),
+  //   fermions couple to Re p only.  Deform arg p_c -> arg p_c + i e prof(t):
+  //   a true CONTOUR move -- Gaussian |p_c|^2 INVARIANT (no extensive dS_g),
+  //   Jacobian 1, observable monomials p_c grade by e^{-e prof} exactly, and
+  //   the fermion coupling becomes
+  //     Re p -> Re p cosh(e prof) - i Im p sinh(e prof)
+  //   so the O(e) weight is a PURE PHASE (-i Im p sinh gamma5 insertion, the
+  //   charge-trace analog) with magnitude cost only at O(e^2) via
+  //   (cosh-1) Re p.  Weight = Pf ratio ONLY, complex.  The dagger additions
+  //   use the CONJUGATE weighted field (gamma5-Hermiticity is broken by
+  //   complex p; CGNR is agnostic).
+  const bool phase_mode = [&] {
+    const char *v = std::getenv("PDEF_MODE");
+    return !v || std::string(v) != "rescale";
+  }();
   LatticeInteger tc(&Grid);
   LatticeCoordinate(tc, Nd - 1);
-  LatticeDtxqcdP p_w(&Grid), p_d(&Grid);
-  auto WeightP = [&](LatticeDtxqcdP &out, auto fac) {
-    out = U.p;
+  LatticeDtxqcdP imp(&Grid);
+  imp = Zero();
+  if (phase_mode) {
+    // Im p ~ N(0, (IMP_WIDTH * sigma_p)^2), sigma_p^2 = 1/(lambda^2 c_sp)
+    // the physical p width.  IMP_WIDTH = 1 is LOCKED by the construction
+    // (mwagman): the arg-shift is a valid contour ONLY if the Gaussian is a
+    // function of |p_c|^2 alone, i.e. ISOTROPIC -- Im width == Re width.
+    // Any other value breaks the invariance and the Pf-ratio-only weight is
+    // missing a Gaussian piece: diagnostic use only, NOT a valid contour.
+    // Deterministic per config: IMP_SEED must be FIXED across eta (and
+    // reused by the offline observable grading).
+    const double c_sp0 = DtxqcdTracelessAux() ? 6.0 / 7.0 : 1.0;
+    const double width =
+        env_real("IMP_WIDTH", 1.0) / (lam * std::sqrt(c_sp0));
+    GridParallelRNG iRNG(&Grid);
+    const int is = env_int("IMP_SEED", 555);
+    iRNG.SeedFixedIntegers({is, is + 5, is + 11, is + 17, is + 23});
+    gaussian(iRNG, imp);
+    imp = 0.5 * (imp + conjugate(imp));          // real part, variance 1/2
+    imp = ComplexD(width * std::sqrt(2.0), 0.0) * imp;
+    std::cout << GridLogMessage << "PDEF phase mode: IMP_WIDTH="
+              << env_real("IMP_WIDTH", 1.0) << " (abs " << width
+              << ")  IMP_SEED=" << is << std::endl;
+  }
+  LatticeDtxqcdP p_w(&Grid), p_wc(&Grid), p_d(&Grid);
+  auto WeightP = [&](LatticeDtxqcdP &out, const LatticeDtxqcdP &base,
+                     auto fac) {
+    out = base;
     for (int t = 0; t < T; ++t) {
-      auto scaled = U.p;
-      scaled = ComplexD(fac(t), 0.0) * scaled;
+      auto scaled = base;
+      scaled = fac(t) * scaled;
       out = where(tc == Integer(t), scaled, out);
     }
   };
+  LatticeDtxqcdP tmpP(&Grid);
   auto BuildWeights = [&](double e) {
-    WeightP(p_w, [&](int t) { return std::exp(-e * prof(t)) - 1.0; });
-    WeightP(p_d, [&](int t) { return -prof(t) * std::exp(-e * prof(t)); });
+    if (!phase_mode) {
+      WeightP(p_w, U.p,
+              [&](int t) { return ComplexD(std::exp(-e * prof(t)) - 1.0, 0.0); });
+      WeightP(p_d, U.p,
+              [&](int t) { return ComplexD(-prof(t) * std::exp(-e * prof(t)), 0.0); });
+      p_wc = p_w;
+      return;
+    }
+    // insertion  = (cosh(e prof)-1) Re p - i sinh(e prof) Im p
+    // d/de       = prof (sinh(e prof) Re p - i cosh(e prof) Im p)
+    WeightP(p_w, U.p,
+            [&](int t) { return ComplexD(std::cosh(e * prof(t)) - 1.0, 0.0); });
+    WeightP(tmpP, imp,
+            [&](int t) { return ComplexD(0.0, -std::sinh(e * prof(t))); });
+    p_w = p_w + tmpP;
+    p_wc = conjugate(p_w);
+    WeightP(p_d, U.p,
+            [&](int t) { return ComplexD(prof(t) * std::sinh(e * prof(t)), 0.0); });
+    WeightP(tmpP, imp,
+            [&](int t) { return ComplexD(0.0, -prof(t) * std::cosh(e * prof(t))); });
+    p_d = p_d + tmpP;
   };
 
   // ---- deformed operator + vertex ---------------------------------------
@@ -169,7 +236,7 @@ int main(int argc, char **argv) {
   // residual actually converging (a wrong dagger stalls CGNR immediately).
   auto MdefDag = [&](const F &in, F &out) {
     Mop.Mdag(in, out);
-    AddPDiag(p_w, in, out);
+    AddPDiag(p_wc, in, out);      // conjugate field (== p_w in rescale mode)
   };
   auto dMp = [&](const F &in, F &out) {
     for (int a = 0; a < DtxqcdNf; ++a) {
@@ -243,11 +310,13 @@ int main(int argc, char **argv) {
   const RealD c_sp = DtxqcdTracelessAux() ? 6.0 / 7.0 : 1.0;
   RealD dSg = 0.0, sumprof = 0.0;
   for (int t = 0; t < T; ++t) {
-    dSg += 0.5 * lam * lam * c_sp *
-           (std::exp(-2.0 * eta * prof(t)) - 1.0) * P2[t];
+    if (!phase_mode)
+      dSg += 0.5 * lam * lam * c_sp *
+             (std::exp(-2.0 * eta * prof(t)) - 1.0) * P2[t];
     sumprof += prof(t);
   }
-  const RealD logJ = -eta * V3 * sumprof;
+  // phase mode: Gaussian |p_c|^2 invariant, Jacobian 1 -- both identically 0.
+  const RealD logJ = phase_mode ? 0.0 : -eta * V3 * sumprof;
 
   // ---- GL quadrature + Hutchinson ---------------------------------------
   static const double gl_x1[1] = {0.5};
@@ -288,11 +357,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  RealD dlogpf = 0.0, dlogpf_var = 0.0;
+  ComplexD dlogpf(0.0, 0.0);
+  RealD dlogpf_var_re = 0.0, dlogpf_var_im = 0.0;
   for (int q = 0; q < n_gl; ++q) {
     const double e = eta * gl_x[q];
     BuildWeights(e);
-    RealD acc = 0.0, acc2 = 0.0;
+    ComplexD acc(0.0, 0.0);
+    RealD acc2_re = 0.0, acc2_im = 0.0;
     int last_it = 0;
     for (int s = 0; s < n_noise; ++s) {
       F xi(&Grid), x(&Grid), b(&Grid), r(&Grid), pv(&Grid), t1(&Grid), Ap(&Grid);
@@ -335,27 +406,38 @@ int main(int argc, char **argv) {
       }
       last_it = k + 1;
       dMp(x, t1);
-      const RealD est = 0.5 * innerF(xi, t1).real() / noise_var;
+      const ComplexD est = 0.5 * innerF(xi, t1) / noise_var;
       acc += est;
-      acc2 += est * est;
+      acc2_re += est.real() * est.real();
+      acc2_im += est.imag() * est.imag();
     }
-    const RealD mean = acc / n_noise;
-    const RealD err = std::sqrt(std::max(acc2 / n_noise - mean * mean, 0.0) /
-                                std::max(n_noise - 1, 1));
+    const ComplexD mean = acc / (RealD)n_noise;
+    auto serr = [&](RealD a2, RealD m) {
+      return std::sqrt(std::max(a2 / n_noise - m * m, 0.0) /
+                       std::max(n_noise - 1, 1));
+    };
+    const RealD err_re = serr(acc2_re, mean.real());
+    const RealD err_im = serr(acc2_im, mean.imag());
     std::cout << GridLogMessage << "PDEF-NODE q=" << q << " e=" << e
-              << " (1/2)Tr[M^-1 dM/de] = " << mean << " +- " << err
+              << " (1/2)Tr[M^-1 dM/de] = " << mean.real() << " +- " << err_re
+              << "  im " << mean.imag() << " +- " << err_im
               << "  iters=" << last_it << std::endl;
     dlogpf += eta * gl_w[q] * mean;
-    dlogpf_var += (eta * gl_w[q] * err) * (eta * gl_w[q] * err);
+    dlogpf_var_re += (eta * gl_w[q] * err_re) * (eta * gl_w[q] * err_re);
+    dlogpf_var_im += (eta * gl_w[q] * err_im) * (eta * gl_w[q] * err_im);
   }
-  const RealD dlogpf_err = std::sqrt(dlogpf_var);
+  const RealD dlogpf_err_re = std::sqrt(dlogpf_var_re);
+  const RealD dlogpf_err_im = std::sqrt(dlogpf_var_im);
 
   std::cout << GridLogMessage << "PDEF-RESULT eta=" << eta
-            << " dlogPf = " << dlogpf << " +- " << dlogpf_err
+            << " dlogPf re = " << dlogpf.real() << " +- " << dlogpf_err_re
+            << "  im (phase) = " << dlogpf.imag() << " +- " << dlogpf_err_im
             << "  dS_gauss(exact) = " << dSg
             << "  logJ(const) = " << logJ << std::endl;
-  std::cout << GridLogMessage << "PDEF-RESULT log w (config-dependent part) = "
-            << (-dSg + dlogpf) << " +- " << dlogpf_err << std::endl;
+  std::cout << GridLogMessage << "PDEF-RESULT log|w| (config-dependent) = "
+            << (-dSg + dlogpf.real()) << " +- " << dlogpf_err_re
+            << "   arg w = " << dlogpf.imag() << " +- " << dlogpf_err_im
+            << std::endl;
 
   Grid_finalize();
   std::fflush(nullptr);
