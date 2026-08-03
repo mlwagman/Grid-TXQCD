@@ -396,6 +396,15 @@ Test_dtxqcd_pdeform_pf: Test_dtxqcd_pdeform_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
 	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_pdeform_pf.o \
 	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
 
+# U(1)_{u-d} isospin contour reweighting estimator -- REFERENCE (site-local
+# field frame, host CGNR).  Ward gate: uniform profile => dlogPf == 0.
+Test_dtxqcd_isodeform_pf.o: Test_dtxqcd_isodeform_pf.cc params.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+Test_dtxqcd_isodeform_pf: Test_dtxqcd_isodeform_pf.o $(DTXQCD_NATIVE_IMPL_OBJS)
+	$(LINKER) $(CXXFLAGS) -o $@ Test_dtxqcd_isodeform_pf.o \
+	  $(DTXQCD_NATIVE_IMPL_OBJS) $(LDFLAGS) $(LIBS) -lcusolver
+
 # Operator-consistency A/B (host sandwich vs fused device x profile API).
 Test_dtxqcd_smoking_gun.o: Test_dtxqcd_smoking_gun.cc dtxqcd_deform_quda.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
