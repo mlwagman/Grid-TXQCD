@@ -1169,22 +1169,58 @@ int main(int argc, char **argv) {
                           defl_nev, d_tol, d_ord, ep, prof_t0,
                           Grid.GlobalDimensions());
           }
-        if (d_cache.empty() || !Qdef->LoadEODeflation(d_cache)) {
-          Qdef->BuildEODeflation(
-              defl_nev, pRNG, d_ord, d_lo, d_tol,
-              env_int("DTXQCD_DEFORM_EO_DEFLATE_RESTARTS", 20));
-          if (!d_cache.empty()) Qdef->SaveEODeflation(d_cache);
+        // SRAND=2: skip Build/Load ENTIRELY (the 2026-07-23 discriminator
+        // chain: random basis WITH the load still biased +21 while the
+        // exact term and projection are provably ~0.1 -- the load's SIDE
+        // EFFECTS on Qdef state are the last candidate; SRAND=2 removes
+        // them).  SRAND=1 keeps the load, overwrites vectors (previous
+        // discriminator step).
+        const int srand_mode = env_int("DTXQCD_STOCHPF_DEFLATE_RANDOM", 0);
+        if (srand_mode < 2) {
+          if (d_cache.empty() || !Qdef->LoadEODeflation(d_cache)) {
+            Qdef->BuildEODeflation(
+                defl_nev, pRNG, d_ord, d_lo, d_tol,
+                env_int("DTXQCD_DEFORM_EO_DEFLATE_RESTARTS", 20));
+            if (!d_cache.empty()) Qdef->SaveEODeflation(d_cache);
+          }
         }
+        // THE +21 BIAS ROOT CAUSE (2026-07-23 discriminator chain):
+        // LoadEODeflation/BuildEODeflation mutate Qdef's profile/frame
+        // state, so subsequent SchurSolve solves ran a CLOBBERED
+        // operator while the host-side dStil insertion kept the node's
+        // -- an operator mismatch created AT LOAD TIME (which is why
+        // the smoking-gun test, which never loaded, was clean, and why
+        // the no-load random arm is unbiased).  Fix: re-issue the
+        // node's profile immediately, before ANY operator application.
+        Qdef->SetProfile(ep, [&](int t) { return prof(t); });
         const auto &evp = Qdef->EODeflEvecs();
-        K = (int)evp.size();
+        K = (srand_mode == 2) ? defl_nev : (int)evp.size();
         // Basis: unpack -> struct RB (physical Odd) -> S~ v_k -> full grid.
         std::vector<F> Vf;
         F vrb(&RBGrid), srb(&RBGrid);
         for (int k = 0; k < K; ++k) {
-          DtxqcdUnpackDoubled(evp[k], vrb);
-          for (int a = 0; a < DtxqcdNf; ++a) {
-            vrb.upper.f[a].Checkerboard() = Odd;
-            vrb.lower.f[a].Checkerboard() = Odd;
+          if (srand_mode < 2) {
+            DtxqcdUnpackDoubled(evp[k], vrb);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              vrb.upper.f[a].Checkerboard() = Odd;
+              vrb.lower.f[a].Checkerboard() = Odd;
+            }
+          }
+          // DTXQCD_STOCHPF_DEFLATE_RANDOM=1: the ANY-BASIS split
+          // discriminator -- overwrite the loaded vector with a fresh
+          // random pure-odd one (drawn full-grid, restricted).  The
+          // exact+remainder split is algebraically exact for ANY basis
+          // in the solve domain: bias here = estimator-algebra bug;
+          // clean here + biased with IRL vectors = the loaded vectors'
+          // content (cache/unpack/frame) is the culprit.
+          if (env_int("DTXQCD_STOCHPF_DEFLATE_RANDOM", 0)) {
+            LatticeFermion tmpf(&Grid);
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              gaussian(pRNG, tmpf);
+              pickCheckerboard(Odd, vrb.upper.f[a], tmpf);
+              gaussian(pRNG, tmpf);
+              pickCheckerboard(Odd, vrb.lower.f[a], tmpf);
+            }
           }
           F vf(&Grid), sf(&Grid);
           for (int a = 0; a < DtxqcdNf; ++a) {
@@ -1203,43 +1239,86 @@ int main(int argc, char **argv) {
           Vf.push_back(vf);
           SVf.push_back(sf);
         }
-        // G = (S~V)^dag(S~V);  W_jk = (S~v_j)^dag dS~ v_k;
-        // exact term = Tr[W G^-1] -- exact for ANY basis (no triplet bias).
-        Eigen::MatrixXcd G(K, K), W(K, K);
+        // QR-STABILIZED oblique projector (2026-07-23).  The tent's
+        // quasi-degenerate cluster makes the S~v_k columns nearly
+        // PARALLEL -> Ghat = (S~V)^dag(S~V) near-singular; the explicit
+        // fullPivLu inverse then injects a large correlated roundoff
+        // floor through the projection (measured: remainder biased +39
+        // at ep=0.44 and +207 at 0.56 -- worse with depth = worse
+        // kappa(Ghat); cos bands are spread over a decade and never
+        // triggered it).  MGS: S~V = Q R; the projector is Q Q^dag
+        // (unconditionally stable) and the exact term
+        // Tr[Ghat^{-1}(S~V)^dag dS~V] = Tr[R^{-1} Q^dag dS~V] via one
+        // triangular solve.  Columns with R_kk below 1e-8 of the
+        // largest are DROPPED (true rank of the span).  Mathematically
+        // identical to the Gram form for any full-rank basis.
+        std::vector<F> Qv;   // orthonormal S~V columns
+        Eigen::MatrixXcd R = Eigen::MatrixXcd::Zero(K, K);
+        std::vector<int> keep;
         for (int k = 0; k < K; ++k) {
-          F dsv(&Grid);
-          dStil(Vf[k], dsv);
-          for (int j = 0; j < K; ++j) {
-            const ComplexD gg = DtxqcdDeformQuda::finner_(SVf[j], SVf[k]);
-            const ComplexD ww = DtxqcdDeformQuda::finner_(SVf[j], dsv);
-            G(j, k) = std::complex<double>(DtxqcdToStd(gg).real(),
-                                           DtxqcdToStd(gg).imag());
-            W(j, k) = std::complex<double>(DtxqcdToStd(ww).real(),
-                                           DtxqcdToStd(ww).imag());
+          F q = SVf[k];
+          for (int j = 0; j < (int)Qv.size(); ++j) {
+            const ComplexD z = DtxqcdDeformQuda::finner_(Qv[j], q);
+            const std::complex<double> zz(DtxqcdToStd(z).real(),
+                                          DtxqcdToStd(z).imag());
+            R(keep[j], k) = zz;
+            const ComplexD zc(zz.real(), zz.imag());
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              q.upper.f[a] = q.upper.f[a] - zc * Qv[j].upper.f[a];
+              q.lower.f[a] = q.lower.f[a] - zc * Qv[j].lower.f[a];
+            }
+          }
+          const RealD nq = std::sqrt(DtxqcdDeformQuda::fnorm2_(q));
+          R(k, k) = nq;
+          const RealD rmax = std::abs(R(keep.empty() ? k : keep[0],
+                                        keep.empty() ? k : keep[0]));
+          if (nq > 1e-8 * std::max(rmax, (RealD)1e-300)) {
+            for (int a = 0; a < DtxqcdNf; ++a) {
+              q.upper.f[a] = (1.0 / nq) * q.upper.f[a];
+              q.lower.f[a] = (1.0 / nq) * q.lower.f[a];
+            }
+            Qv.push_back(q);
+            keep.push_back(k);
           }
         }
-        Ginv = G.fullPivLu().inverse();
-        const std::complex<double> tex = (W * Ginv).trace();
+        const int Kq = (int)Qv.size();
+        // M_jk = <q_j, dS~ v_k> on the KEPT rows; R_kept = R[keep,keep]
+        Eigen::MatrixXcd M(Kq, Kq), Rk(Kq, Kq);
+        for (int k = 0; k < Kq; ++k) {
+          F dsv(&Grid);
+          dStil(Vf[keep[k]], dsv);
+          for (int j = 0; j < Kq; ++j) {
+            const ComplexD ww = DtxqcdDeformQuda::finner_(Qv[j], dsv);
+            M(j, k) = std::complex<double>(DtxqcdToStd(ww).real(),
+                                           DtxqcdToStd(ww).imag());
+            Rk(j, k) = R(keep[j], keep[k]);
+          }
+        }
+        const std::complex<double> tex =
+            (Rk.triangularView<Eigen::Upper>().solve(M)).trace();
         t_exact = ComplexD(tex.real(), tex.imag());
+        RealD rdmin = 1e300, rdmax = 0;
+        for (int k = 0; k < Kq; ++k) {
+          rdmin = std::min(rdmin, std::abs(Rk(k, k)));
+          rdmax = std::max(rdmax, std::abs(Rk(k, k)));
+        }
         std::cout << GridLogMessage << "[stochpf-defl] node ep=" << ep
-                  << " K=" << K << " exact term = " << t_exact.real()
+                  << " K=" << K << " Kq=" << Kq << " Rdiag-ratio="
+                  << rdmax / std::max(rdmin, (RealD)1e-300)
+                  << " exact term = " << t_exact.real()
                   << " + " << t_exact.imag() << " i" << std::endl;
+        SVf.swap(Qv);   // the projector now uses the ORTHONORMAL columns
+        K = Kq;
 #endif
       }
       auto Project = [&](F &y) {
         if (K == 0) return;
-        Eigen::VectorXcd c(K);
+        // orthonormal basis: P y = Q (Q^dag y) -- no inverse anywhere
         for (int j = 0; j < K; ++j) {
           const ComplexD z = DtxqcdDeformQuda::finner_(SVf[j], y);
-          c(j) = std::complex<double>(DtxqcdToStd(z).real(),
-                                      DtxqcdToStd(z).imag());
-        }
-        Eigen::VectorXcd d = Ginv * c;
-        for (int k = 0; k < K; ++k) {
-          const ComplexD dk(d(k).real(), d(k).imag());
           for (int a = 0; a < DtxqcdNf; ++a) {
-            y.upper.f[a] = y.upper.f[a] - dk * SVf[k].upper.f[a];
-            y.lower.f[a] = y.lower.f[a] - dk * SVf[k].lower.f[a];
+            y.upper.f[a] = y.upper.f[a] - z * SVf[j].upper.f[a];
+            y.lower.f[a] = y.lower.f[a] - z * SVf[j].lower.f[a];
           }
         }
       };

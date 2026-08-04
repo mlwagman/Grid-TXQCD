@@ -37,45 +37,49 @@ DEFL=${DEFL:-0}             # oblique-projector deflation nev (0 = off);
 RUNTAG=${RUNTAG:-}          # optional log-name suffix: REQUIRED for any
                             # rerun of an existing (segment, profile) --
                             # identical tags OVERWRITE prior logs.
+SLATT=${SLATT:-16.16.16.48} # lattice (4.4.4.4 for gate-scale arms)
+SCFG=${SCFG:-}              # cfg dir override (default = lam5 production)
 TAG=$(echo "seg${ELO}_${EHI}_${PROF}${RUNTAG}" | tr -d .)
 rm -f $LOGD/rwf_smoke_$TAG.DONE
+STRAJS=${STRAJS:-"300 400 500 600"}
 GPU=0
-for TRAJ in 300 400 500 600; do
+for TRAJ in $STRAJS; do
   (
     srun --overlap --mpi=pmix -N 1 -n 1 --cpu-bind=none \
-      env CUDA_VISIBLE_DEVICES=$GPU LATT=16.16.16.48 TRAJ=$TRAJ \
+      env CUDA_VISIBLE_DEVICES=$GPU LATT=$SLATT TRAJ=$TRAJ \
           LAMBDA_DTXQCD=5 \
-          CFG_DIR=$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw \
+          CFG_DIR=${SCFG:-$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw} \
           ETA=$EHI ETA_LO=$ELO N_GL=2 N_NOISE=$NA \
           NOISE_SEED=$((SEEDBASE + TRAJ)) \
           PROFILE=$PROF PROF_T0=0 DTXQCD_STOCHPF_ANTI=0 \
           DTXQCD_STOCHPF_DEFLATE=$DEFL \
           DTXQCD_DEFORM_EO_DEFLATE_ORD=1001 \
           DTXQCD_DEFORM_EO_DEFLATE_TOL=1e-5 \
-          DTXQCD_DEFORM_EO_DEFLATE_LO=3e-5 \
+          DTXQCD_DEFORM_EO_DEFLATE_LO=${SLO:-3e-5} \
           DTXQCD_DEFORM_EO_DEFLATE_CACHE=$P/defl_cache \
+          DTXQCD_STOCHPF_DEFLATE_RANDOM=${SRAND:-0} \
           DTXQCD_DEFORM_QUDA=1 DTXQCD_DEFORM_EO=1 \
           DTXQCD_MG_BLOCK=4.4.4.4 DTXQCD_MG_LUDEV=0 DTXQCD_MG_REUSE_NV=1 \
-      $P/Test_dtxqcd_eta_stoch_pf --grid 16.16.16.48 --mpi 1.1.1.1 \
+      $P/Test_dtxqcd_eta_stoch_pf --grid $SLATT --mpi 1.1.1.1 \
       --shm 512 --shm-mpi 1 > $LOGD/rwf_smoke_${TAG}_tr${TRAJ}_anchor.log 2>&1
     if [ "$NT" -gt 0 ]; then
     srun --overlap --mpi=pmix -N 1 -n 1 --cpu-bind=none \
-      env CUDA_VISIBLE_DEVICES=$GPU LATT=16.16.16.48 TRAJ=$TRAJ \
+      env CUDA_VISIBLE_DEVICES=$GPU LATT=$SLATT TRAJ=$TRAJ \
           LAMBDA_DTXQCD=5 \
-          CFG_DIR=$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw \
+          CFG_DIR=${SCFG:-$P/cfgs/dtxqcd_lam5.0000_tla_fromchroma_cw} \
           ETA=$EHI N_NOISE=$NT NOISE_SEED=$((SEEDBASE + 100 + TRAJ)) \
           PROFILE=$PROF PROF_T0=0 \
           DTXQCD_DEFORM_QUDA=1 DTXQCD_DEFORM_EO=1 \
           DTXQCD_STOCHPF_TSRC_RATIO=12 \
           DTXQCD_MG_BLOCK=4.4.4.4 DTXQCD_MG_LUDEV=0 DTXQCD_MG_REUSE_NV=1 \
-      $P/Test_dtxqcd_eta_stoch_pf --grid 16.16.16.48 --mpi 1.1.1.1 \
+      $P/Test_dtxqcd_eta_stoch_pf --grid $SLATT --mpi 1.1.1.1 \
       --shm 512 --shm-mpi 1 > $LOGD/rwf_smoke_${TAG}_tr${TRAJ}_tsrc.log 2>&1
     fi
   ) &
   GPU=$((GPU+1))
 done
 wait
-for TRAJ in 300 400 500 600; do
+for TRAJ in $STRAJS; do
   echo "== traj $TRAJ =="
   grep -aE "STOCHPF" $LOGD/rwf_smoke_${TAG}_tr${TRAJ}_anchor.log | tail -1
   grep -aE "TSRCCLOSURE" $LOGD/rwf_smoke_${TAG}_tr${TRAJ}_tsrc.log | tail -1
