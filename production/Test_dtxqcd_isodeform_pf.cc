@@ -207,6 +207,30 @@ int main(int argc, char **argv) {
     pack2(n_dp, n00, n11, dp, dm, 0, 0, 1, 1);
   };
 
+  // Vertex fields at e=0 for an ARBITRARY profile (ISO_LINEAR mode: the
+  // O(eta) phase coefficient is profile-linear, so one undeformed solve
+  // serves every profile's vertex).
+  auto BuildVertexE0 = [&](const std::function<double(int)> &pf) {
+    auto dm = [&](int t) { return -pf(t); };
+    auto dp = [&](int t) { return +pf(t); };
+    LatticeColourMatrix a(&Grid), b(&Grid);
+    auto pack2 = [&](auto &out, const LatticeColourMatrix &c01,
+                     const LatticeColourMatrix &c10, auto f01, auto f10,
+                     int i0, int j0, int i1, int j1) {
+      out = Zero();
+      WeightComp(a, c01, f01);
+      WeightComp(b, c10, f10);
+      PokeIndex<1>(out, a, i0, j0);
+      PokeIndex<1>(out, b, i1, j1);
+    };
+    pack2(sig_dm, sig01, sig10, dm, dp, 0, 1, 1, 0);
+    pack2(pi_dm, pi01, pi10, dm, dp, 0, 1, 1, 0);
+    pack2(d_dm, d00, d11, dm, dp, 0, 0, 1, 1);
+    pack2(d_dp, d00, d11, dp, dm, 0, 0, 1, 1);
+    pack2(n_dm, n00, n11, dm, dp, 0, 0, 1, 1);
+    pack2(n_dp, n00, n11, dp, dm, 0, 0, 1, 1);
+  };
+
   // ---- deformed operator + vertex ---------------------------------------
   typedef DTXQCDFermionDoubled F;
   auto AddDiag = [&](const LatticeDtxqcdSigma &sw, const LatticeDtxqcdPi &pw,
@@ -303,6 +327,100 @@ int main(int argc, char **argv) {
     std::cout << GridLogMessage << "ISO-DERIVCHECK |dMiso - FD(Mdef)|/|FD| = "
               << rel << (rel < 1e-4 ? "   MATCH" : "   MISMATCH") << std::endl;
     if (rel >= 1e-4) { Grid_finalize(); std::_Exit(2); }
+  }
+
+  // ---- ISO_LINEAR: O(eta) phase coefficients for a PROFILE LADDER --------
+  // The small-eta phase is eta * c_config with c_config = Im (1/2)Tr[M^-1
+  // dM_prof] at e=0, LINEAR in the profile.  One UNDEFORMED solve per noise
+  // vector serves every profile's vertex, so the sharp-vs-rounded kink
+  // comparison (the sigma_theta rounding lever) costs a single solve set.
+  // Output: per-profile mean re/im +- err; the config-to-config spread of
+  // the im column across a config scan IS sigma_theta/eta per profile.
+  if (env_int("ISO_LINEAR", 0) != 0) {
+    struct PV { std::string name; std::function<double(int)> p; };
+    auto tent_r = [&](double w, double wsrc) {
+      return std::function<double(int)>([&, w, wsrc](int t) {
+        double d = (double)(((t - prof_t0) % T + T) % T);
+        double v = std::min(d, (double)T - d);
+        const double a = std::abs(d - 0.5 * T);
+        if (w > 0 && a < w) v = 0.5 * T - 0.5 * w - a * a / (2.0 * w);
+        if (wsrc > 0) {
+          const double b = std::min(d, (double)T - d);
+          if (b < wsrc) v = 0.5 * wsrc + b * b / (2.0 * wsrc);
+        }
+        return v;
+      });
+    };
+    const double wpi = 1.0 / 0.5943;
+    std::vector<PV> pv = {
+        {"tent_sharp", tent_r(0.0, 0.0)},
+        {"round_1mpi", tent_r(wpi, wpi)},
+        {"round_2mpi", tent_r(2.0 * wpi, 2.0 * wpi)},
+        {"round_3mpi", tent_r(3.0 * wpi, 3.0 * wpi)},
+    };
+    const int np = (int)pv.size();
+    const RealD noise_var0 = 2.0;            // Grid gaussian per-component
+    std::vector<ComplexD> acc(np, ComplexD(0, 0));
+    std::vector<RealD> a2r(np, 0), a2i(np, 0);
+    BuildWeights(0.0);                       // Mdef == undeformed M
+    for (int s = 0; s < n_noise; ++s) {
+      F xi(&Grid), x(&Grid), b(&Grid), r(&Grid), pvv(&Grid), t1(&Grid),
+          Ap(&Grid);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        gaussian(pRNG, xi.upper.f[a]);
+        gaussian(pRNG, xi.lower.f[a]);
+      }
+      MdefDag(xi, b);
+      for (int a = 0; a < DtxqcdNf; ++a) {
+        x.upper.f[a] = Zero(); x.lower.f[a] = Zero();
+      }
+      r = b; pvv = b;
+      RealD r2 = norm2F(r), b2 = std::max(norm2F(b), 1e-300);
+      const RealD tol2 = tol * tol * b2;
+      for (int k = 0; k < cgmax; ++k) {
+        Mdef(pvv, t1);
+        MdefDag(t1, Ap);
+        RealD alpha = r2 / innerF(pvv, Ap).real();
+        axpyF(x, +alpha, pvv);
+        axpyF(r, -alpha, Ap);
+        RealD rn = norm2F(r);
+        if (rn < tol2) break;
+        RealD beta = rn / r2;
+        for (int a = 0; a < DtxqcdNf; ++a) {
+          pvv.upper.f[a] = r.upper.f[a] + beta * pvv.upper.f[a];
+          pvv.lower.f[a] = r.lower.f[a] + beta * pvv.lower.f[a];
+        }
+        r2 = rn;
+      }
+      if (std::sqrt(norm2F(r) / b2) > tol) {
+        std::cout << GridLogMessage << "[iso-CG] NOT CONVERGED -- abort"
+                  << std::endl;
+        Grid_finalize();
+        std::_Exit(3);
+      }
+      for (int j = 0; j < np; ++j) {
+        BuildVertexE0(pv[j].p);
+        dMiso(x, t1);
+        const ComplexD est = 0.5 * innerF(xi, t1) / noise_var0;
+        acc[j] += est;
+        a2r[j] += est.real() * est.real();
+        a2i[j] += est.imag() * est.imag();
+      }
+    }
+    for (int j = 0; j < np; ++j) {
+      const ComplexD m = acc[j] / (RealD)n_noise;
+      auto serr = [&](RealD a2, RealD mm) {
+        return std::sqrt(std::max(a2 / n_noise - mm * mm, 0.0) /
+                         std::max(n_noise - 1, 1));
+      };
+      std::cout << GridLogMessage << "ISO-LINEAR " << pv[j].name
+                << "  c = " << m.real() << " +- " << serr(a2r[j], m.real())
+                << "  im " << m.imag() << " +- " << serr(a2i[j], m.imag())
+                << std::endl;
+    }
+    Grid_finalize();
+    std::fflush(nullptr);
+    std::_Exit(0);
   }
 
   // ---- GL quadrature + Hutchinson ---------------------------------------
