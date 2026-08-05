@@ -443,6 +443,15 @@ class DtxqcdDeformQuda {
     }
   }
   bool HasDeflation() const { return !defl_evec_.empty(); }
+  // Drop the deflation state (basis + frame bookkeeping) so subsequent
+  // SolveTilEO calls run the PLAIN path.  For callers (the reweighting
+  // estimator) that only need the VECTORS: extract, then clear -- the
+  // internal deflated-solve routing (frame-conjugated corrections) is
+  // what biased the estimator (+21, 2026-07-23 discriminator chain).
+  void ClearEODeflation() {
+    defl_evec_.clear();
+    defl_eval_.clear();
+  }
   // Read access to the deflation basis (packed RB fields) — the stochastic
   // reweighting estimator builds its oblique-projector trace split from
   // these (Test_dtxqcd_eta_stoch_pf, DTXQCD_STOCHPF_DEFLATE).

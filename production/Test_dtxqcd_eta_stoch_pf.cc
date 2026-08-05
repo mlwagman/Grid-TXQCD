@@ -1239,6 +1239,14 @@ int main(int argc, char **argv) {
           Vf.push_back(vf);
           SVf.push_back(sf);
         }
+        // FIX v2 (2026-07-23): vectors extracted -- CLEAR Qdef's
+        // deflation state so SchurSolve runs the PLAIN SolveTilEO path.
+        // With HasDeflation() set, the internal deflated routing
+        // (frame-conjugated corrections; "solve-frame conjugation is
+        // INVALID on a fixed gauge config") biased the remainder +21;
+        // profile-restore alone did NOT cure it (validation 1308899);
+        // the no-load arm (plain path) was exactly on truth.
+        Qdef->ClearEODeflation();
         // QR-STABILIZED oblique projector (2026-07-23).  The tent's
         // quasi-degenerate cluster makes the S~v_k columns nearly
         // PARALLEL -> Ghat = (S~V)^dag(S~V) near-singular; the explicit
