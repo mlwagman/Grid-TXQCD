@@ -1,0 +1,158 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,hyperref}
+\title{DTXQCD: contour deformation of the auxiliary-field integral\\
+\large Findings note, 2026-08-14 (scout campaign 2026-07-14 -- 2026-08-14)}
+\author{M.~Wagman, with Claude (scout-team sessions, Grid-DTXQCD \texttt{dtxqcd-v2})}
+\date{}
+\begin{document}
+\maketitle
+
+\section{The construction}
+The auxiliary diquark fields $d,n$ (charge-conjugate cross blocks of $M_{48}$) carry baryon
+number 2.  A time-graded imaginary $U(1)_B$ rotation with profile $p(t)$,
+\begin{equation}
+  d(t)\to e^{-\eta p(t)}d(t),\qquad \bar d(t)\to e^{+\eta p(t)}\bar d(t),
+\end{equation}
+is a genuine complex contour (the holomorphic pair scales inversely).  Uniform $\eta$ is a
+similarity transform of $M_{48}$ and leaves the Pfaffian exactly invariant (verified bitwise,
+commit \texttt{8de24fa1}); the graded violation lives only in the Wilson time hops, i.e.\ it is a
+real chemical potential $\mu=\eta p'(t)$ on the conjugate block.  Consequences: the $O(\eta)$
+change of the weight is a pure phase (a charge trace); the magnitude cost enters at
+$O(\eta^2)$ via the charge susceptibility; the cost is localised where $p(t)$ has gradients.
+Observables built from $d$ acquire deterministic factors $e^{\mp\eta p(t)}$ per field.
+
+\subsection{Profile physics}
+The tent $p(t)=\min(t,T-t)$ (slope $\pm1$) stays subcritical up to $\eta\simeq\mu_c\approx0.85$;
+the smooth $\cos$ profile has peak slope $\pi\eta/2$ and goes supercritical at $\eta\approx0.54$.
+The ESS cliff tracks \emph{criticality} $|\eta p'|\le\mu_c$, not $\eta$: at $\eta=0.6$ the
+tent's cumulative phase spread is $\sigma_\theta\approx0.84$ (ESS $\approx0.5$) while the
+$\cos$ profile's is $4.6$ rad (ESS $\sim10^{-9}$).  The kinks of the tent bind near-zero modes
+as $\mu$-domain-wall pairs; rounding the apex and trough on a scale $w\sim1/\mu$
+(\texttt{tent\_rounded2}, $w=12$) moved the solvable edge from $0.85$ to beyond $0.9$ at
+$\sim30\times$ fewer iterations.  Production factors use the sharp tent (the rounding win is
+a conditioning effect; see \S4).
+
+\section{Reweighting factors (the $d$ contour)}
+Per config and source offset $t_0$, $w=\mathrm{Pf}(\tilde M)/\mathrm{Pf}(M)$ is measured as
+$\Delta\log\mathrm{Pf}=\int_0^\eta d\eta'\,\tfrac12\mathrm{Tr}[\tilde M^{-1}\partial_{\eta'}\tilde M]$
+by Gauss--Legendre quadrature in $\eta$ and Hutchinson noise, in $\eta$ segments that add,
+with the hop-form (low-variance) insertion, EO Schur solves, comb-4 time dilution, Neyman node
+allocation and a TSRC-ratio quadrature that reconstructs all 48 offsets from one anchor.
+Measured intrinsic (config-to-config) spreads at $16^3\times48$, $\lambda=5$, tent:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+segment & $[0,0.2]$ & $[0.2,0.4]$ & $[0.4,0.6]$\\
+\midrule
+$\sigma_R$ (magnitude) & 0.00 & 0.00 & 0.89\\
+$\sigma_\theta$ (phase) & 0.46 & 0.70 & 0.00\\
+cumulative ESS/config & 0.81 & 0.50 & 0.50\\
+\bottomrule
+\end{tabular}
+\end{center}
+The $[0.6,0.7]$ segment's intrinsic spread is $\approx2.2\pm50\%$ at four configs --- the
+open flag for extending beyond $\eta=0.6$.
+
+\subsection{Systematics found by the one-config test (2026-08-11)}
+Same-seed solver triangles against a CG$(10^{-8})$ truth at $[0.4,0.6]$:
+sloppy tolerance $10^{-4}$ biases $\Delta\log\det$ by $+0.12/+0.56/+3.2$ on the three segments
+(a magnitude ladder); $10^{-5}$ leaves $+0.04$.  The multigrid-assisted solve is biased by
+$+4.2$ \emph{independently of tolerance} --- it converges to a perturbed operator --- and is
+excluded from the estimator (its $2.4$--$3.3\times$ speedup is recoverable once the operator
+mismatch is found; conditioning on sharp tents was never the problem).  Noise scales exactly as
+$N^{-1/2}$: at $N=1000$ samples the per-config errors are $0.53/0.60/0.82$; solves cost
+$6$--$25$~s across $\eta=0.04$--$0.62$ (iterations $\propto e^{2.55\eta}$).  The TSRC circuit is
+$\sim96$ nodes per segment top, its node noise growing $\sim100\times$ from $\eta=0.2$ to
+$0.6$.  Production farm (2026-08-12): 10 configs $\times$ three segments, CG $10^{-5}$,
+$N=370/380/500$ first layer (target $737/763/1000$), additive seed layers; $\sim1.1$k GPU-h.
+
+\section{What the grading buys: the graded-down reweighted estimator}
+For any monomial $X$ of graded fields, the deformed observable on the deformed contour is a
+deterministic rescale, $O_{\rm def}=e^{-q\eta p(\Delta t)}X$ with the tent trough at the
+\emph{conjugated} end, and Cauchy's theorem gives exactly
+\begin{equation}
+  \frac{\langle O_{\rm def}\,w\rangle}{\langle w\rangle}=\langle X\rangle=C(\Delta t),
+\end{equation}
+with per-sample fluctuations graded down by $e^{-q\eta p}$ while the reweighting covariance
+restores the mean.  Signal-to-noise gain $e^{+q\eta p(\Delta t)}\sqrt{\mathrm{ESS}}$, purely
+offline, capped only when the graded floor reaches $C/\sigma_w$.  Grading in the other
+direction (trough at the unconjugated end) is provably useless: significance is exactly
+$\eta$-independent.  Forward and backward correlators from each trough share the same $w$.
+Measured on the pure-aux dibaryon (\S5): per-config sample $C/\text{graded floor}=1.5$ and
+$1.6$ at $\Delta t=1,2$ for $\eta=0.6$; on four pilot configs the reweighted errors contract
+by $0.84/0.19/0.039$ ($\eta=0.4$) and $0.11/0.015/0.006$ ($\eta=0.6$) at $\Delta t=1,2,3$
+--- three configs at one offset already beat the 175-config unreweighted ensemble at
+$\Delta t\ge2$.  Deformed \emph{sampling} is also meaningful for this complex contour (the
+leftover reweighting is phase-only) but forces a single contour per stream; for real contours
+(\S6) it is identically useless.
+
+\section{Correlator ladder and solver frontier}
+Deformed aux-baryon propagators at $16^3\times48$, $\lambda=5$, 48 sources: the grading law
+$\mathrm{std}(C_{\rm def})/\mathrm{std}(C_0)=e^{-\eta p(\Delta t)}$ holds to three decimals for
+tent $\eta\le0.7$, is transitional at $0.75$ ($32{,}300$ iterations/solve) and breaks at $0.8$
+($55{,}810$ iterations, per-config sign flips).  Iteration cost is $0.024$~s/iteration
+universally; $\eta=0.7$ costs $12{,}398$ iterations $=298$~s per solve.  Unreweighted
+significance is $\eta$-independent (mean and error scale together); at $\Delta t=20$ the
+$\eta=0.7$ aux band sits on the quark-connected scale, from $+6.4$ decades above it at
+$\eta=0$.  Propagator cost $1.0/2.7/4.8/15.9$ GPU-h per config at $\eta=0.2/0.4/0.6/0.7$,
+against $\sim6.4$ GPU-h per 10-trajectory config of HMC.
+
+\section{The pure-aux dibaryon channel}
+Products of three diquark fields at (near-)coincident sites,
+$D=w^k d_{6,kl}w^l$ with $w^a=\epsilon^{abc}d_{\rm iso}(b,c)$ (isosinglet $\bar3$) and
+$d_6=d(0,0)+d(1,1)$ (colour 6), form the $I=1$, $J=0$ ($^1S_0$) interpolator with no inversions
+and no contractions; contact terms vanish for $\Delta t\ge1$ (holomorphic source, ultralocal
+Gaussian measure), the correlator is positive definite, and $B=2$ makes it periodic in time.
+Covariant Gaussian smearing of both diquarks (spatial, $\alpha=0.5$) gave a textbook overlap
+curve with a $3.3\sigma$ hint at $\Delta t=1$ for $N=60$--$100$ steps on 175 configs
+(all 13 geometry classes positive, half-splits consistent).  An every-trajectory inline
+measurement (0.25~s/trajectory) then provided an independent 153-trajectory window that read
+$-1.2\sigma$; combined $C(1)=(+2.9\pm1.6)\times10^{-21}$ ($1.9\sigma$).  Field identity and
+drift checks are clean; this is statistics.  The dibaryon correlator decorrelates in
+$\tau_{\rm int}\approx0.85$ trajectories (every-trajectory sampling retains $\sim60\%$ of each
+trajectory), whereas the aux meson walls carry a slow mode ($\tau_{\rm int}\approx2$--$3$).
+The undeformed aux \emph{baryon} is resolved at $\Delta t=1$ to $10.9\sigma$ ($\lambda=5$,
+175 configs) and $8.7\sigma$ ($\lambda=4$, 57 configs) and is noise at $\Delta t\ge2$ --- the
+shape the graded reweighting is built to fix.
+
+\section{Which directions can be deformed: the Ward-identity/susceptibility law}
+Attempting the same trick on neutral fields established a general rule.
+\begin{itemize}
+\item A \emph{real} rescale of the pseudoscalar singlet $p$ is a change of variables: its weight
+  carries the exact Gaussian action change, extensive in the profile area
+  ($\sigma_{\log w}=3.1$ at $\eta=0.3$ on $4^4$, ESS $10^{-4}$); baking it into HMC reproduces
+  the original estimator identically.
+\item The \emph{true} contour (reinterpret $p^2=|p_c|^2$ with a fictitious decoupled
+  $\mathrm{Im}\,p$ of the \emph{same} width --- isotropy is required for the arg-shift to be a
+  contour --- and shift $\arg p_c\to\arg p_c+i\eta p(t)$) removes the Gaussian bill
+  ($\sigma^2$ down $16\times$, ESS $0.56$ at $\eta=0.3$) but not the exponent: the per-site phase
+  variance $k\,\sinh^2(\eta p)$ with $k\approx0.013$ is not gap-suppressed, an amplitude wall
+  appears at $\eta p\gtrsim1$, and production wall-observables would need $\eta p<0.15$.
+\item $U(1)_{u-d}$ isospin is an exact symmetry for degenerate $N_f=2$: the uniform grading is
+  exactly Pfaffian-preserving (Ward gate at 256 noise vectors: $0.06\pm0.16$), the cost is
+  kink-localised and paid in \emph{pion} currency $e^{-M_\pi\ell}$.  Measured
+  $\sigma_\theta\approx1.7\eta$ on $4^4$, about $10\times$ the baryon-contour phase at matched
+  $\eta$, consistent with $e^{2\ell(M_N-M_\pi)}$ at $\ell\approx2.4$ ($aM_\pi=0.5943(2)$,
+  $aM_N\approx1.22$); kink rounding trims only $5$--$15\%$.  Extrapolated production usable
+  $\eta\approx0.02$--$0.05$: correct, certified, parked at this quark mass.
+\end{itemize}
+The synthesis is a calibrated design formula,
+$\sigma_\theta\simeq\eta\sqrt{V_3\,\ell_{\rm ch}}\;e^{-M_{\rm ch}\ell_{\rm ch}}$ with the currency
+$M_{\rm ch}$ the lightest state carrying the graded charge: neutral directions are extensive
+and dead, isospin is priced in pions, and baryon number --- gapped by $2M_N$ --- is the one
+direction cheap enough at production volume.  Contour grading is a conserved-charge technology,
+and its ceiling on the baryon side is CG conditioning ($\eta\approx0.85$), never the weight.
+
+\section{Status}
+Live: the 10-config reweighting farm ($[0,0.6]$, all-TSRC validation layer), every-trajectory
+dibaryon and aux-meson records on the $\lambda=4,5$ chains extending to 200 configs, tent
+propagator farms to $\eta=0.7$, and the $\beta=6.5$ $32^3\times64$ $\lambda=5$ chain.  Next
+decisions: the $[0.6,0.7]$ segment (its intrinsic spread), TSRC at $\eta=0.6$ (direct
+quadrature vs kink-telescope instruments), and the multigrid operator mismatch.
+Code: \texttt{Test\_dtxqcd\_eta\_stoch\_pf} (reweighting factors),
+\texttt{meas\_baryon\_deform\_dtxqcd}, \texttt{meas\_dibaryon\_aux\_dtxqcd} +
+\texttt{dtxqcd\_dibaryon\_inline.h}, \texttt{Test\_dtxqcd\_pdeform\_pf},
+\texttt{Test\_dtxqcd\_isodeform\_pf}; multigrid details in
+\texttt{DTXQCD\_DEFORM\_MG\_NOTE.tex}.
+\end{document}

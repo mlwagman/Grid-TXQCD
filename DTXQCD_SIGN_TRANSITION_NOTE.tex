@@ -1,0 +1,110 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,siunitx,hyperref}
+\sisetup{separate-uncertainty=true,table-format=+1.3(3)}
+\title{DTXQCD: the Pfaffian-sign transition in $\lambda$ and the plaquette-deficit proxy\\
+\large Status note, 2026-08-14 (data through the 2026-07-10 $4^4$ campaign)}
+\author{M.~Wagman, with Claude (scout-team sessions, Grid-DTXQCD \texttt{dtxqcd-v2})}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Setting}
+DTXQCD couples the auxiliary fields $\{\sigma,\pi,d,n,s,p\}$ to a charge-conjugate-doubled
+quark field so that the fermion determinant becomes a Pfaffian, $\det M\to\mathrm{Pf}(K M_{48})$,
+with $M_{48}$ the $48\times48$ per-site doubled matrix.  HMC samples
+$|\mathrm{Pf}|\,e^{-S_{\rm aux}}$; the sign
+\begin{equation}
+  \mathrm{sign\,Pf} = (-1)^{n_{\rm neg}/2},\qquad
+  n_{\rm neg}=\#\{\text{negative eigenvalues of }\gamma_5 M_{48}\},
+\end{equation}
+is recovered by reweighting, $\langle O\rangle_{\rm phys}=\langle s\,O\rangle/\langle s\rangle$.
+$\gamma_5 M_{48}$ is Kramers-doubled, so $n_{\rm neg}$ is always even and the exponent must be
+$n_{\rm neg}/2$ (a probe using $(-1)^{n_{\rm neg}}$ can never observe a flip; this was a bug
+found and fixed on 2026-07-04).  The auxiliary width is $1/\lambda$: small $\lambda$ = wide aux
+disorder, large $\lambda$ = mean-field.  The invariant that governs everything below is
+\emph{Fierz exactness}: with signs included, DTXQCD reproduces QCD expectation values at every
+$\lambda$; any unsigned observable that differs from QCD is a sign/measure symptom.
+
+\section{Why a $4^4$ campaign}
+At production volume ($16^3\times48$) the dense $\gamma_5M_{48}$ spectrum (dimension $48V$) is
+not computable.  On $4^4$ it is ($12288\times12288$, seconds on cuSOLVER, minutes with the Eigen
+CPU fallback), and the $|\mathrm{Pf}|$ HMC there \emph{self-flips} between sign sectors: the
+Pfaffian-zero walls are close (min$|\lambda_{\rm eig}|\sim0.01$--$0.15$) and the rational
+approximation regularises them enough for trajectories to cross.  A plain chain with the
+per-trajectory sign observer (\texttt{production/dtxqcd\_sign\_hop.h}, env
+\texttt{DTXQCD\_SIGN\_HOP\_PROB}) therefore measures $\langle \mathrm{sign\,Pf}\rangle$ under
+the target measure directly.  Explicit sector-crossing Metropolis moves (\texttt{s\_tslice0},
+\texttt{negate\_sigma}; both leave $S_{\rm aux}$ invariant) exist but are dead at the saddle
+aux for $\lambda\le1$ (they fight the $\sigma$ VEV, $\Delta\log|\det|\sim-2000$); parity
+heatbath does not cross sectors at all ($\gamma_5M_{48}$ maps onto minus itself, $\eta\equiv+1$).
+All chains: non-EO full-operator RHMC (\texttt{USE\_FULL\_PF=1}, the EO-Schur path blows up at
+small $\lambda$), MDS=10, $\tau=\sqrt2/4$, degree-8 rational with autoscaled bounds,
+stout $\rho=0.125$, $\beta=6.1$, $m=-0.245$, $c_{\rm sw}=1.2493$; 50 trajectories discarded,
+20-trajectory blocked errors.
+
+\section{Results}
+\input{signhop_table.tex}
+
+\noindent\textbf{Transition.}  $\langle \mathrm{sign\,Pf}\rangle$ is consistent with zero for
+$\lambda\le2.25$, shows a first small positive value at $2.5$--$2.75$ ($+0.07(3)$, $\sim2.5\sigma$),
+rises sharply to $+0.49(4)$ at $\lambda=3$, and saturates at $+1.000$ with zero flips in 208 and
+355 trajectories at $\lambda=4,5$.  The slightly negative $\lambda=2$--$2.25$ values are
+finite-statistics/near-wall rational bias (the exact $\langle s\rangle$ must be positive since
+$Z_{\rm signed}=\det^2>0$), not physics.
+
+\noindent\textbf{The plaquette deficit is the validated production proxy.}  $\Delta P$, the
+unsigned plaquette deficit relative to the clean $\lambda=5$ anchor, goes to zero exactly as
+$\langle\mathrm{sign\,Pf}\rangle\to1$ ($\Delta P=0.008$ at $\lambda=4$, $0$ at $5$), and is
+$+0.06$ at $\lambda\le1$.  Two mechanisms are measured:
+\begin{enumerate}
+\item \emph{Quasi-quenching}: pure-gauge HMC at the exact production action point
+  (\texttt{Test\_qcd\_quenched\_plaq}) gives $P=0.4405(1)$; the $\lambda=0.1$--$0.25$ chains
+  plateau at $0.4534$, 82\% of the way from dynamical QCD ($0.5133$) to quenched.  The wide aux
+  disorder suppresses the sea-quark feedback on the gauge field like $O(\lambda^2)$.
+\item \emph{Sign catastrophe}: dense spectra over aux prior draws at fixed gauge
+  (\texttt{Test\_dtxqcd\_sign\_aux\_draws}) show the sign fully mixed for every $\lambda\le3$
+  on tepid/weak gauge (min$|\lambda_{\rm eig}|\to10^{-3}$) and clean at $\lambda=6$
+  (gap $\approx0.55$).  The chroma-forked $16^3\times48$ $\lambda=0.1$ chain, started at the
+  QCD plaquette, \emph{decays} to $0.4535$ = the weak-field plateau: the $|\mathrm{Pf}|$ marginal
+  has one equilibrium, so by Fierz the signs carry the whole correction.  The 2026-07-04
+  ``trapped basin'' alternative is dead.
+\end{enumerate}
+The root cause is Wilson-specific: the auxiliary fields drag unprotected real Wilson modes
+through zero.  (Ginsparg--Wilson fermions would turn $(\sigma,\pi)$ into a chiral rotation and
+make sign changes rare, topology-like events; the existing Möbius TXQCD implementation couples
+$\Delta$ naively over the fifth dimension and has not been shown to help.)
+
+\noindent\textbf{Sign and plaquette are uncorrelated at $4^4$.}  At every $\lambda$,
+$\langle P\rangle_{+}-\langle P\rangle_{-}=0$ within errors
+(\texttt{analyze\_sign\_plaq\_corr.py}), while the unsigned $P(\lambda)$ is $0.03$--$0.065$
+below the anchor: the required corrections live entirely in exponentially suppressed
+correlations invisible at $10^3$ trajectories --- a textbook severe sign problem.  Do not read a
+``signed plaquette'' from $10^3$ trajectories as the QCD value.
+
+\noindent\textbf{The $4^4$ curve is a mechanism map, distorted at intermediate $\lambda$.}
+At $\lambda=3$ the $4^4$ per-patch sign is $0.49$ and the unsigned $4^4$ plaquette is $0.03$ low,
+yet the production-volume $\lambda=3$ fork holds flat at QCD
+($P=0.51339(15)$ vs the $\lambda=5$ anchor $0.51370(6)$, a smooth $O(1/\lambda^2)$ drift).
+The deconfined $4^4$ background and the rational near-wall bias \emph{overstate} sign mixing at
+intermediate $\lambda$.  Operationally: \textbf{production-volume forks are the authoritative
+boundary} --- $\lambda=2$ forks decay away from QCD, $\lambda\ge3$ holds --- and unreweighted
+$\lambda\ge3$ production measurements are valid.  The $\lambda=4$--$6$ window is the safe
+operating point; production runs at $\lambda=5$.
+
+\section{Open items and the next scans}
+\begin{itemize}
+\item \textbf{$\beta$ dependence of $\lambda_{\rm crit}$}: repeat the $4^4$ ladder at the fine-spacing
+  point $\beta=6.5$ ($m=-0.1788$, $c_{\rm sw}=1.170082$), and compare with the plaquette-deficit
+  proxy on the production $32^3\times64$ $\lambda=5$ chain (launched 2026-08-14).
+\item \textbf{Clean TXQCD sign runs}: TXQCD's determinant is real, sign $=(-1)^{n_{\rm neg}}$ of
+  $\gamma_5 M_{24}$ (not halved).  The production-scale ``tensor-condensed phase'' at small
+  $\lambda$ was partly an EO-preconditioner artifact; the clean runs are non-EO $4^4$ chains with
+  an on-chain sign record cloned from \texttt{dtxqcd\_sign\_hop.h}.
+\item \textbf{Aux-correlator thermalization}: the aux wall correlators have $\tau_{\rm eff}\sim1$ at
+  $\lambda=3$--$4$ but $\sim50$--$100$ at $\lambda\ge5$; VEVs thermalize instantly.
+\end{itemize}
+Tools, launch scripts, all chains and reduced logs are bundled in
+\texttt{production/signhop\_handoff.tgz} with a step-by-step handoff
+(\texttt{HANDOFF\_SIGNHOP.md}).
+\end{document}
