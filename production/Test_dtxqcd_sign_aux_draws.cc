@@ -314,8 +314,13 @@ int main(int argc, char **argv) {
                            cudaMemcpyDeviceToHost) == cudaSuccess);
     cudaFree(dA); cudaFree(dW); cudaFree(dInfo); cudaFree(dWork);
 #else
-    std::cout << GridLogError << "non-CUDA build: no dense eigensolver" << std::endl;
-    abort();
+    {  // CPU fallback (2026-08-14): Eigen dense Hermitian eigenvalues
+      Eigen::Map<const Eigen::MatrixXcd> Hm(H.data(), dim, dim);
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hm, Eigen::EigenvaluesOnly);
+      GRID_ASSERT(es.info() == Eigen::Success);
+      evals.resize(dim);
+      for (int i = 0; i < dim; ++i) evals[i] = es.eigenvalues()[i];
+    }
 #endif
     r.n_neg = 0; r.min_abs = 1e300; r.logabsdet = 0.0;
     for (int i = 0; i < dim; ++i) {

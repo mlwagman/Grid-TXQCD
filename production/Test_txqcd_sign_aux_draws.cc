@@ -41,6 +41,8 @@
 #include <cuda_runtime.h>
 #endif
 
+#include <Grid/Eigen/Dense>   // CPU eigensolver fallback (non-CUDA builds)
+
 using namespace Grid;
 
 namespace {
@@ -74,9 +76,13 @@ void DenseEvals(std::vector<std::complex<double>> &H, int dim,
                          cudaMemcpyDeviceToHost) == cudaSuccess);
   cudaFree(dA); cudaFree(dW); cudaFree(dInfo); cudaFree(dWork);
 #else
-  (void)H; (void)dim; (void)evals;
-  std::cout << GridLogError << "non-CUDA build: no dense eigensolver" << std::endl;
-  abort();
+  {  // CPU fallback (2026-08-14): Eigen dense Hermitian eigenvalues
+    Eigen::Map<const Eigen::MatrixXcd> Hm(H.data(), dim, dim);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hm, Eigen::EigenvaluesOnly);
+    GRID_ASSERT(es.info() == Eigen::Success);
+    evals.resize(dim);
+    for (int i = 0; i < dim; ++i) evals[i] = es.eigenvalues()[i];
+  }
 #endif
 }
 
