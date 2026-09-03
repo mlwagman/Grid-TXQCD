@@ -86,6 +86,16 @@ int main(int argc, char **argv) {
     return std::string(v && *v ? v : "tent");
   }();
   const bool prof_cos = prof_kind == "cos";
+  // ISO_DN_ONLY=1 (mwagman probe): grade ONLY the diquark d/n cross-blocks
+  // with the isospin pattern, leave the MESON sigma/pi UNDEFORMED.  Tests
+  // whether the residual isospin-contour phase came from the off-diagonal
+  // meson spurions (sigma_ud, pi_ud) -- if darg collapses toward 0, the
+  // d/n-only contour is (near-)real; if it stays ~1.7 eta, the phase lives
+  // in the diquark UR/LL doubling structure (the real-vs-cheap tension).
+  // NOTE: no longer the isospin SYMMETRY (mesons carry isospin too), so the
+  // WARDCHECK uniform gate is NOT expected to give 0 here -- it measures the
+  // uniform d/n-only response instead.
+  const bool dn_only = env_int("ISO_DN_ONLY", 0) != 0;
   const bool prof_rounded = prof_kind == "tent_rounded" ||
                             prof_kind == "tent_rounded2";
   const bool prof_round_src = prof_kind == "tent_rounded2";
@@ -258,13 +268,13 @@ int main(int argc, char **argv) {
   };
   auto Mdef = [&](const F &in, F &out) {
     Mop.M(in, out);
-    AddDiag(sig_wm, pi_wm, in, out);
+    if (!dn_only) AddDiag(sig_wm, pi_wm, in, out);
     AddCross(d_wm, n_wm, in, out, true);    // UR: uu weighted c, dd 1/c
     AddCross(d_wp, n_wp, in, out, false);   // LL (conj'd): inverse weights
   };
   auto MdefDag = [&](const F &in, F &out) {
     Mop.Mdag(in, out);
-    AddDiag(sig_wp, pi_wp, in, out);        // Hermitian pair swaps weights
+    if (!dn_only) AddDiag(sig_wp, pi_wp, in, out);   // Hermitian pair swaps
     AddCross(d_wp, n_wp, in, out, true);
     AddCross(d_wm, n_wm, in, out, false);
   };
@@ -273,7 +283,7 @@ int main(int argc, char **argv) {
       out.upper.f[a] = Zero();
       out.lower.f[a] = Zero();
     }
-    AddDiag(sig_dm, pi_dm, in, out);
+    if (!dn_only) AddDiag(sig_dm, pi_dm, in, out);
     AddCross(d_dm, n_dm, in, out, true);
     AddCross(d_dp, n_dp, in, out, false);
   };
