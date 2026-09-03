@@ -77,7 +77,24 @@ solve rate, the layer-1 logs have them).
   remains excluded until its operator mismatch is found — that is a second,
   separate item on your queue).
 
-## 5. Conventions that must not drift
+## 5. CORRECTION (2026-09-04) — read before building anything
+
+The premise of §1 ("t0=0-only = one source per config") is WRONG (caught by
+mwagman).  The graded factor depends only on p(d3 end) − p(dbar3 end), and
+the conjugated end of each correlator pair is a free choice: with ONE fixed
+t0=0 contour and ONE anchor per config, EVERY same-slope pair (a,b) with
+|p(a)−p(b)| = dt is graded at the full rate — ~2·(T/2−dt) pairs, i.e.
+near-full translation averaging from the anchors we already have.  Measured
+(`analyze_dib_graded_prod.py`, 5 configs, layer-1 anchors): dt=1 at 3.9σ;
+4 configs at eta=0.6 beat the 175-config unreweighted ensemble at dt=2–3.
+
+Consequently the per-offset instruments of §3 buy only ~2× (second
+direction per pair + straddling pairs) — **DEPRIORITIZED**.  They matter
+again only for eta ≥ 0.7 programs (deformed-HMC phase-only reweighting) or
+if that last ~2× ever becomes the binding constraint.  The acceptance
+gates in §4 stand if you do build them.
+
+## 6. Conventions that must not drift
 
 - CG_TOL=1e-5 (bias ladder 0.12/0.56/3.2 at 1e-4 per segment; +0.04 at 1e-5).
 - Tent profile, PROF_T0 the offset, segments [0,0.2]+[0.2,0.4]+[0.4,0.6] add.
