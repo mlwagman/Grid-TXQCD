@@ -84,8 +84,9 @@ def jackR(num, den):
     return full, np.sqrt((n - 1) / n * ((sub - full) ** 2).sum())
 
 
+EXCLUDE = {1300}   # hard config: 2x conditioning, noisiest w (poisons eta=0.4)
 for ei, eta in ETAS.items():
-    trs = sorted(set(W[ei]) & set(S))
+    trs = sorted((set(W[ei]) & set(S)) - EXCLUDE)
     if len(trs) < 3:
         print(f"eta={eta}: only {len(trs)} configs -- skip")
         continue
@@ -94,7 +95,8 @@ for ei, eta in ETAS.items():
     w = np.exp(lw)
     print(f"\neta={eta} (n={len(trs)}, trajs {trs}):  |w| spread "
           f"{np.std(np.abs(w), ddof=1)/np.mean(np.abs(w)):.2f}, "
-          f"phase spread {np.std(lw.imag, ddof=1):.2f} rad")
+          f"phase spread {np.std(lw.imag, ddof=1):.2f} rad, "
+          f"Re<w>/<|w|> = {w.sum().real/np.abs(w).sum():+.3f}")
     for dt in (1, 2, 3):
         g = np.exp(-3 * eta * p[dt])
         # ALL same-slope pairs (mwagman 2026-09-04): one fixed contour grades
